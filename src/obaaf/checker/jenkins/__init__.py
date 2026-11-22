@@ -194,6 +194,7 @@ def analyze(rel: str, data: bytes, catalog: Catalog, root: Path | None, extra_ag
         return result
     try:
         pipeline = model_mod.build(parsed.tree)
+        pipeline.source = text
         engine = rules_mod.JenkinsRules(rel, pipeline, catalog, root, extra_agents, lane_overrides)
         findings, unknowns, applicable = engine.run()
     except RecursionError:

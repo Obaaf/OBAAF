@@ -15,8 +15,7 @@ One more is optional and not installed: [optional/obaaf-settings-drift.yml](opti
 
 ## Install
 
-The package from PyPI does not include these templates, so they are copied from a clone of the OBAAF
-repository, kept outside the repository you are setting up and checked out at the commit you pin:
+A development build installed from a commit ([how](../../docs/checker-configuration.md#trying-unreleased-checker-changes)) includes the templates. Use the install command below with that same full commit and omit `--source`. For release 0.3.0, copy the templates from a separate checkout at the commit you pin.
 
 ```bash
 git clone https://github.com/Obaaf/OBAAF.git obaaf-src
@@ -59,7 +58,7 @@ The build job runs on GitHub-hosted runners, which start every job on a fresh ma
 
 ## Egress
 
-The agent job declares its policy in `OBAAF_EGRESS` and can turn on a blocking runtime monitor (repository variable `OBAAF_EGRESS_MONITOR: harden-runner`, with `OBAAF_ALLOWED_ENDPOINTS`). A declaration enforces nothing and the monitor is optional, so `obaaf check` reports `OBAAF-GHA-020` (low) for the agent job, with its egress control "not met". Making the monitor unconditional, with `disable-sudo-and-containers: true`, changes that to "cannot tell", not to a pass: whether the repository is one Harden-Runner's tier covers is not in the workflow. Two controls clear the finding, as [the egress control page](../../docs/egress-control.md) explains: GitHub's native egress firewall (`runs-on: ubuntu-24.04-firewall` with `.github/egress-firewall.yaml` in `enforce` mode, a technical preview on Linux runners), and OBAAF's egress action around the agent's command, at the full commit listed in the [egress control guide](../../docs/egress-control.md). Whatever else enforces the policy (ephemeral runners behind a network policy, say), record it with an ignore entry in `.github/obaaf.yml` that names an owner, a reason and an expiry date.
+The agent job declares its policy in `OBAAF_EGRESS` and can turn on a blocking runtime monitor (repository variable `OBAAF_EGRESS_MONITOR: harden-runner`, with `OBAAF_ALLOWED_ENDPOINTS`). A declaration enforces nothing and the monitor is optional, so `obaaf check` reports `OBAAF-GHA-020` (low) for the agent job, with its egress control "not met". Making the monitor unconditional, with `disable-sudo-and-containers: true`, changes that to "cannot tell", not to a pass: whether the repository is one Harden-Runner's tier covers is not in the workflow. Two controls clear the finding, as [the egress control page](../../docs/egress-control.md) explains: GitHub's native egress firewall (`runs-on: ubuntu-24.04-firewall` with `.github/egress-firewall.yaml` in `enforce` mode, a technical preview on Linux runners), and OBAAF's egress action around the agent's command, at the [listed action pin](../../docs/egress-control.md#using-it). Neither clears it for this template's agent job as written: since decision D-133 an agent job that may upload an artifact, as this one does, or that runs other scripts or actions beside the agent (`actions/checkout` beside the agent's step, on the firewall), is "cannot tell" at best ([the checker's guide](../../docs/checker-configuration.md#egress-controls)). Whatever else enforces the policy (ephemeral runners behind a network policy, say), record it with an ignore entry in `.github/obaaf.yml` that names an owner, a reason and an expiry date.
 
 ## Other files
 

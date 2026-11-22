@@ -3,28 +3,50 @@
 from __future__ import annotations
 
 import bisect
+import collections
 import copy
 import fnmatch
 import hashlib
 import json
 import re
+import shlex
+import unicodedata
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from obaaf.settings_evidence import SettingsEvidence
 
 from obaaf import agent_tools
 from obaaf.catalog import Catalog
+from obaaf.checker import agent_flags
 from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
     COMMIT_SHA_RE, FULL_SHA_RE, IMAGE_DIGEST_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
-    PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION,
-    UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup,
-    digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
+    PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION, AgentActions, leaves_repository,
+    UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup, image_outputs_push, through_matrix,
+    bounded, digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
     LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
+
+
+def _strings_in(value, limit: int) -> list:
+    """The strings in a value of lists and mappings (a matrix), at most `limit` of them, each node once."""
+    out: list = []
+    stack, seen = [value], set()
+    while stack and len(out) < limit:
+        node = stack.pop()
+        if isinstance(node, str):
+            out.append(node)
+        elif isinstance(node, (list, dict)) and id(node) not in seen:
+            seen.add(id(node))
+            stack.extend(node.values() if isinstance(node, dict) else node)
+    return out
 _OWNER_PLACEHOLDER_RE = re.compile(r"obaaf_owner", re.I)
 _SHA_PLACEHOLDER_RE = re.compile(r"@0{40}(?![0-9a-fA-F])")
 
@@ -58,6 +80,8 @@ class Control:
     detail: str = ""
     id: str = ""        # a short name that stays the same when `name` is reworded
 
+    action_conditions: tuple[str, ...] = field(default=(), compare=False, repr=False)
+
     def __post_init__(self) -> None:
         if self.verdict not in (VERIFIED, NOT_MET, CANNOT_TELL):
             raise ValueError(f"a control is {VERIFIED}, {NOT_MET} or {CANNOT_TELL}, not {self.verdict!r}")
@@ -87,6 +111,8 @@ class Finding:
     # v0.1 baseline entry (identified by its message) still names it and `obaaf baseline migrate` carries
     # it over. Empty where the message is unchanged. It is never shown and is not part of a v0.2 identity.
     legacy: str = ""
+    # Display-only evidence for the to-do list. A checked patch still needs an exact version and proof.
+    pin_candidate: str | None = field(default=None, compare=False, repr=False)
 
     def sort_key(self) -> tuple:
         order = {"high": 0, "medium": 1, "low": 2}
@@ -110,8 +136,10 @@ class Finding:
 
 class Note(str):
     """Text a finding's message shows that is not one of its facts, because the facts already hold
-    it: a count of the files or characters that are listed in full as a fact. Every other value
-    given to `compose` is a fact. A note must never say something the facts do not."""
+    it: a count of the files or characters that are listed in full as a fact, or what the catalogue
+    gives for a fact (the words of documentation an OBAAF-GHA-026 finding's `setting` names, and where
+    they are, flagship slice 2d.5c1). Every other value given to `compose` is a fact. A note must never
+    say something the facts do not."""
 
 
 class Fact:
@@ -255,6 +283,211 @@ def _strip_comment_text(line: str) -> str:
 
 # Actions that restore a GitHub Actions cache whatever their inputs, or that hand the cache service's
 # token to the steps after them (flagship slice 2d.2e).
+# Flagship slice 2d.13 (F-278). Names that, given to a bash or sh step, change what its shell runs or what
+# the programs it names run: which program a name finds (`PATH`); bash's start and its reading
+# (`BASH_ENV`, `ENV`, `SHELLOPTS`, whose `noexec` makes bash read the script and run none of it,
+# `BASHOPTS`, `BASH_FUNC_NAME%%`, `BASH_COMPAT`, `PS4`, `EXECIGNORE` and the rest of `BASH...`); the
+# loader's (`LD_...` and `GCONV_PATH` on Linux, `DYLD_...` on macOS, whose `DYLD_INSERT_LIBRARIES` the runner
+# keeps for each step's process there), which load code into every program the step starts, bash included;
+# Python's, which load code into `obaaf` (`PYTHONPATH`, `PYTHONHOME`, `PYTHONWARNINGS`, `PYTHONUSERBASE`
+# and the rest of `PYTHON...`), and `HOME`, under which an interpreter outside a virtual environment
+# finds the user's own packages; and `ACTIONS_ALLOW_UNSECURE_COMMANDS`, with which any line a later step
+# prints can set the others. The checks OBAAF counts are `obaaf` (Python) and `gh`, `cosign` and
+# `slsa-verifier` (Go); Node.js's, Perl's, Ruby's and Java's variables (`NODE_OPTIONS`, `PERL5OPT`,
+# `RUBYOPT`, `JAVA_TOOL_OPTIONS`) change none of them and not bash, so they are not here. What the
+# programs read for their own settings (`GIT_...`, `GH_...`, `SSL_CERT_FILE`) is not read.
+_STEERING_NAMES = frozenset({"PATH", "ENV", "SHELLOPTS", "PS4", "PROMPT_COMMAND", "EXECIGNORE", "GCONV_PATH", "HOME",
+                             "ACTIONS_ALLOW_UNSECURE_COMMANDS"})
+_STEERING_PREFIXES = ("BASH", "LD_", "DYLD_", "PYTHON")
+# Python's variables that load nothing: output buffering, bytecode files, the standard streams' encoding
+# (looked up only among the standard library's `encodings` modules, a name with a dot refused), UTF-8
+# mode, the hash seed, and turning the user's own packages off.
+_PYTHON_PLAIN = frozenset({"PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE", "PYTHONIOENCODING", "PYTHONUTF8",
+                           "PYTHONHASHSEED", "PYTHONNOUSERSITE"})
+
+
+def steers(name) -> bool:
+    """Whether a variable's name, read the widest way (space around it trimmed, any letter case), is one
+    that changes what a bash or sh step runs or what the programs it names run (`_STEERING_NAMES`)."""
+    text = str(name).strip().upper()
+    return text in _STEERING_NAMES or (text.startswith(_STEERING_PREFIXES) and text not in _PYTHON_PLAIN)
+
+
+_NAMES_GITHUB_ENV = re.compile(r"GITHUB_ENV", re.I)
+# The runner's file commands. It names a step's files side by side with one suffix
+# (`FileCommandManager.InitializeFiles`, v2.338.2), so the path of any of them leads to GITHUB_ENV's.
+_NAMES_FILE_VAR = re.compile(r"GITHUB_(ENV|PATH|OUTPUT|STATE|STEP_SUMMARY)", re.I)
+_ANSI_C_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
+
+
+def _squeeze(text: str) -> str:
+    """Text as bash puts a word together, for searching names: a backslash and the line break after it (a
+    continued line) taken out, `$'...'` decoded, `$""` taken out, then quotes, backslashes and the
+    lexer's `\x03` marks. So `$GITHUB_\\<line break>ENV`, `GITHUB_E""NV`, `GITHUB_E\\NV` and
+    `$'GITHUB_\x45NV'` are found (the reviews of slice 2d.13; the lexer reads the first as `$GITHUB_` and
+    `ENV`). It can join what bash keeps apart, which only finds more."""
+    text = re.sub(r"\\\r?\n", "", text)
+
+    def decoded(match):
+        try:
+            return agent_flags._ansi_c(match.group(1))
+        except (AttributeError, ValueError, OverflowError):
+            return match.group(0)
+
+    text = _ANSI_C_RE.sub(decoded, text).replace('$""', "")
+    return re.sub(r"[\"'\\\x03]", "", text)
+
+
+def _names_file_var(text: str) -> bool:
+    return bool(_NAMES_FILE_VAR.search(text) or _NAMES_FILE_VAR.search(_squeeze(text)))
+
+
+# A redirection's target as the lexer gives it, naming one of the files plainly: `$NAME`, `${NAME}`, or
+# `${NAME:-/dev/stdout}` (or stderr, or null), which keeps a script runnable outside Actions.
+_FILE_TARGET_RE = re.compile(r"\x03\$(?:(GITHUB_[A-Z_]+)|\{(GITHUB_[A-Z_]+)(?::-/dev/(?:stdout|stderr|null))?\})\x03\Z")
+_ENV_LINE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+# Words that may begin a command before its name; the lexer gives `then echo ...` as one command.
+_LEADING_WORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "{"})
+# The redirections that write to GITHUB_ENV from its end, or from its start after emptying it.
+_WRITE_OPS = frozenset({">>", ">", "&>>", "&>", ">|", ">&"})
+# A continued line beside an operator's character: bash joins the line first, so `<\<line break>>` is
+# `<>`, while the lexer reads `<` and `>` (the fourth review of slice 2d.13).
+_SPLIT_OPERATOR_RE = re.compile(r"[<>&|]\\\r?\n|\\\r?\n[<>&|]")
+# What a write's output may also be sent to beside GITHUB_ENV: a duplicated descriptor (`2>&1`) or nothing.
+_OTHER_TARGETS = frozenset({"/dev/null"})
+# A `printf` format the checker reads: `NAME=` (or `NAME<<`) and text, `%s` its only conversion, and at
+# most one escape, a line break at its end.
+_PRINTF_FORMAT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(=|<<)([^%\\\n\r\x03]|%s)*(\\n)?\Z")
+# An assignment in a command substitution in a written value could print it on a line of its own. Upper
+# case only, as a variable's name is written (`--home=` is an option); anchored, so a long word is cheap.
+_ASSIGNED_NAME_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z_][A-Z0-9_]*)\s*(=|<<)")
+# `${!PREFIX*}` and `${!PREFIX@}` list the names of variables; with a prefix of a file command's name
+# (or none) they reach its path without naming it (`${!GITHUB_E*}`, the first review of slice 2d.13).
+_NAMES_LISTED_RE = re.compile(r"\$\{!\s*([A-Za-z_][A-Za-z0-9_]*)?\s*[*@]\s*\}")
+# `tee` writing an output, the step summary or the state: its options that change nothing else.
+_TEE_OPTIONS = frozenset({"-a", "--append", "-i", "--ignore-interrupts", "-p"})
+# Ways a script can make `echo` or `printf` something other than bash's own: a function, a builtin
+# loaded or turned off, an alias (which bash expands only after `shopt -s expand_aliases`).
+_ECHO_REPLACED_RE = re.compile(r"(?<![\w./-])(function|enable|alias|shopt)(?![\w./-])|"
+                               r"(?<![\w./-])(echo|printf)\s*\(\s*\)")
+
+
+def _lists_file_vars(text: str) -> bool:
+    for match in _NAMES_LISTED_RE.finditer(text):
+        prefix = (match.group(1) or "").upper()
+        if any(name.startswith(prefix) for name in ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE",
+                                                       "GITHUB_STEP_SUMMARY")):
+            return True
+    return False
+
+
+def _file_target(word) -> str | None:
+    match = _FILE_TARGET_RE.match(word.text) if word.redirect else None
+    return (match.group(1) or match.group(2)) if match else None
+
+
+def _github_env_names(script: str) -> set | None:
+    """The names a bash or sh script writes to GITHUB_ENV, or None when the checker cannot read them all
+    (flagship slice 2d.13). The script is read with the lexer. A file command's variable (`GITHUB_ENV`,
+    `GITHUB_PATH`, `GITHUB_OUTPUT`, `GITHUB_STATE`, `GITHUB_STEP_SUMMARY`, found with `_squeeze`) may
+    appear only as a redirection's target written plainly (`$NAME`, `${NAME}`, `${NAME:-/dev/stdout}`) of
+    a command other than `exec`, or as a file `tee` writes an output, the summary or the state to, its own
+    output sent to no file command; anywhere else (an argument,
+    an assignment, `set --`, `for`, `read`, `printf -v`, a name reference, a here-document, a command
+    substitution, a parameter expansion that changes it) gives None, because the runner's files sit side
+    by side and any of their paths leads to GITHUB_ENV's (the second review of slice 2d.13), and so does
+    listing names with `${!GITHUB_E*}` and any write to GITHUB_PATH. A write to GITHUB_ENV is read in two
+    forms, redirected with `>>`, `>`, `&>>`, `&>`, `>|` or `>&` (`<>` writes over what is there, and is
+    refused, and so is a script with a continued line beside an operator's character, which bash joins
+    into an operator the lexer reads in two), `2>&1` or `/dev/null` beside it, and no `$'...'` in a word
+    (dash, Ubuntu's sh, does not read it, and its `echo` reads the backslash): `echo` with words and no
+    option, the name
+    before the first `=` (or `<<`, the runner's multi-line form) a plain word written out in the
+    script; and `printf` with a literal format that begins with such a name, has `%s` for its only
+    conversion and no escape but a line break at its end. Any other write gives None, as does a name put
+    together from a variable, an expression, a glob or a brace expansion, a word that can put a line
+    break in what is printed (a backslash, which sh's `echo` reads as an escape, or a line break written
+    inside quotes), a written value with a command substitution, nested or not, whose script assigns a
+    steering name in upper case (it could print it on a line of its own), a script that can replace
+    `echo` or `printf`, and a script the lexer cannot read. A value is otherwise read as one line: a line
+    break that a variable, a file or a command's output puts in it at run time, which would let the write
+    set a second name, is not read (an outsider's text there is also #232). Every line the runner reads
+    begins where a write begins, and the lines of the runner's multi-line form are each read as a name,
+    so this is never fewer names than the runner sets."""
+    if _lists_file_vars(_squeeze(script)):
+        return None
+    commands, problem = agent_flags.lex(script)
+    if problem:
+        return None
+    names: set = set()
+    for command in commands:
+        if any(_names_file_var(text) for _kind, text, _literal in command.stdin):
+            return None             # a here-document or here-string that names one
+        if any(_names_file_var(inner) for word in command.words for inner in word.inner):
+            return None             # a command substitution that names one
+        mentions = [w for w in command.words if _names_file_var(w.text) or _names_file_var(w.shown)]
+        if not mentions:
+            continue
+        words = list(command.words)
+        while words and not words[0].redirect and not words[0].computed and words[0].text in _LEADING_WORDS:
+            words.pop(0)
+        if not words:
+            return None
+        targets = {_file_target(w) for w in mentions}
+        if words[0].text == "tee" and not words[0].computed and all(
+                (w.redirect and not (_names_file_var(w.text) or _names_file_var(w.shown))) or w.text in _TEE_OPTIONS
+                or (not w.redirect and _FILE_TARGET_RE.match(w.text) and
+                    (_FILE_TARGET_RE.match(w.text).group(1) or _FILE_TARGET_RE.match(w.text).group(2))
+                    in ("GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"))
+                for w in words[1:]):
+            continue                # `tee -a "$GITHUB_OUTPUT"`, its own output not sent to a file command
+        if None in targets or "GITHUB_PATH" in targets or not targets <= {
+                "GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"}:
+            return None
+        if words[0].text == "exec":
+            return None             # a descriptor left open on a file command, whose path `/proc` then gives
+        if "GITHUB_ENV" not in targets:
+            continue                # a write to an output, the summary or the state
+        if _ECHO_REPLACED_RE.search(script) or _SPLIT_OPERATOR_RE.search(script):
+            return None
+        if words[0].redirect or words[0].computed or words[0].text not in ("echo", "printf"):
+            return None
+        arguments = [w for w in words[1:] if not w.redirect]
+        # Only a redirection that writes from where the file ends, or from its start after emptying it: `<>`
+        # writes over what is there, which can turn an earlier line into another name (the third review).
+        if any(_file_target(w) == "GITHUB_ENV" and w.redirect_op not in _WRITE_OPS for w in words[1:]):
+            return None
+        # sh is dash on Ubuntu, which does not read `$'...'` and passes the backslash to its `echo`.
+        if any("$'" in w.shown or '$"' in w.shown for w in arguments):
+            return None
+        if not arguments or any(_file_target(w) not in (None, "GITHUB_ENV") for w in words[1:] if w.redirect) or any(
+                w.redirect and _file_target(w) is None and w.text not in _OTHER_TARGETS and not w.text.isdigit()
+                for w in words[1:]):
+            return None
+        for word in arguments:
+            shown = _squeeze(word.shown)
+            if ("$(" in word.shown or "`" in word.shown) and any(
+                    steers(m.group(1)) for m in _ASSIGNED_NAME_RE.finditer(shown)):
+                return None
+        if words[0].text == "printf":
+            form = arguments[0]
+            if form.computed or not _PRINTF_FORMAT_RE.match(form.text) or any(
+                    c in w.text for w in arguments[1:] for c in "\\\n\r"):
+                return None
+            line = form.text
+        else:
+            if arguments[0].text.startswith("-") or any(c in w.text for w in arguments for c in "\\\n\r"):
+                return None
+            line = " ".join(w.text for w in arguments)
+        equals, heredoc = line.find("="), line.find("<<")
+        cut = equals if equals >= 0 and (heredoc < 0 or equals < heredoc) else heredoc
+        # The name is a plain word: no unknown expansion (marked `\x03`), glob or brace in it.
+        if cut < 0 or not _ENV_LINE_NAME_RE.match(line[:cut]):
+            return None
+        names.add(line[:cut])
+    return names
+
+
 _ALWAYS_CACHES = ("Swatinem/rust-cache", "hendrikmuhs/ccache-action", "mozilla-actions/sccache-action",
                   "DeterminateSystems/magic-nix-cache-action", "crazy-max/ghaction-github-runtime")
 
@@ -384,6 +617,25 @@ def _forbids_restores(mode) -> bool:
     return mode in ("none", "write-only")
 
 
+def _local_like(uses) -> bool:
+    """A `uses` that may name an action of the repository itself (`./`, `$/` or `.\\` at its start, after any
+    space), read as the checker reads a local action for an agent."""
+    return isinstance(uses, str) and uses.strip().startswith(("./", "$/", ".\\"))
+
+
+def _image_build_only(step: Step, job: Job | None = None) -> bool:
+    """Whether a step that uses `docker/build-push-action` can only build an image (flagship slice 2d.14):
+    its `with`, if written, is a mapping; `push` (in any letter case, as GitHub reads inputs) is not given
+    or is `false` in any case; and no output of its `outputs` may push (`workflow.image_outputs_push`).
+    Any other value, `push:` with no value included, is read as one that may push. `docker/bake-action` reads what it
+    pushes from files the checker does not read, so it is never taken to build only."""
+    raw = step.raw.get("with")
+    if not step.uses_action("docker/build-push-action") or (raw is not None and not isinstance(raw, dict)):
+        return False
+    push = as_text(step.with_.get("push", "")).strip().lower()
+    return push in ("", "false") and not through_matrix(step.with_.get("outputs", ""), job, image_outputs_push)
+
+
 # What a workflow's jobs give a job that calls it: (releasing, restoring, a release job downloads, the first
 # release, any job downloads, any job may restore a cache).
 _NO_PARTS = (CallSummary(), CallSummary(), False, (), False, False)
@@ -493,7 +745,8 @@ class WorkflowRules:
     """Applies every workflow rule to one parsed workflow."""
 
     def __init__(self, workflow: Workflow, catalog: Catalog, protected: dict | None = None,
-                 agents: dict | None = None, firewall: "egress_mod.FirewallPolicy | None" = None) -> None:
+                 agents: dict | None = None, firewall: "egress_mod.FirewallPolicy | None" = None,
+                 settings: SettingsEvidence | None = None) -> None:
         self.wf = workflow
         self.catalog = catalog
         self.detection = catalog.detection
@@ -501,12 +754,13 @@ class WorkflowRules:
         # The `agents` section of the configuration, and what was read of the repository's policy for
         # GitHub's native egress firewall (None when no repository was checked, only files).
         self.agents = dict(agents or {})
+        self.settings = settings
         self.firewall = firewall
         self.findings: list[Finding] = []
 
     def add(self, rule: str, line: int, template: str, job: Job | None = None, step: Step | None = None,
             severity: str | None = None, *, kind: str = "", controls: list | None = None, legacy: str = "",
-            **values) -> None:
+            pin_candidate: str | None = None, **values) -> None:
         """Report a finding. `template` is the message, with `{job}`, `{step}` and one `{name}` for
         each of `values`; `kind` tells a rule's cases apart (see `compose`). `controls` are the
         controls that would clear the finding, each with what the checker established about it."""
@@ -529,6 +783,7 @@ class WorkflowRules:
             facts=facts,
             controls=list(controls or []),
             legacy=legacy if legacy != message else "",
+            pin_candidate=pin_candidate,
         ))
 
     def run(self) -> list[Finding]:
@@ -541,6 +796,7 @@ class WorkflowRules:
             self.script_injection(job)
             self.agent_rules(job)
             self.agent_tool_installs(job)
+            self.agent_tool_settings(job)
             self.release_rules(job)
             self.unpinned(job)
             self.persisted_credentials(job)
@@ -574,8 +830,9 @@ class WorkflowRules:
             return
         view = _through_view(self.wf, self.detection, self.agents)
         second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
-                               firewall=self.firewall)
+                               firewall=self.firewall, settings=self.settings)
         second._through = True
+        second._problems = self.wf.problems      # a problem the second pass finds is the file's
         found = second.run()
         order = {"high": 0, "medium": 1, "low": 2}
         standing = {FIXED: 0, UNDECIDED: 1, NEW: 2}
@@ -590,6 +847,7 @@ class WorkflowRules:
         relaned = {job_id for job_id, job in view.jobs.items() if set(job.lanes) != set(self.wf.jobs[job_id].lanes)}
         place = {id(finding): n for n, finding in enumerate(self.findings)}
         added: list = []
+        answered: set = set()
         for finding in found:
             if finding.step in inner:
                 # A step of an action: one finding for each step, as for steps written in the job.
@@ -614,59 +872,126 @@ class WorkflowRules:
             if finding.job not in relaned and there and all(
                     order.get(f.severity, 3) <= order.get(finding.severity, 3) for f in there):
                 continue
+            if finding.job in relaned and not finding.kind.startswith("capability"):
+                # Flagship slice 2d.14: where the action's steps made the job a release job, the first pass's
+                # "cannot tell whether it releases" case of the same rule there (OBAAF-GHA-006's and 015's
+                # `capability...`) is answered by the release case, when that is at least as severe.
+                for mate in there:
+                    if (mate.kind.startswith("capability") and mate.kind != "capability-call"
+                            and order.get(finding.severity, 3) <= order.get(mate.severity, 3)):
+                        answered.add(id(mate))
             added.append(finding)
+        if answered:
+            self.findings = [f for f in self.findings if id(f) not in answered]
         self.findings.extend(added)
 
     # -------------------------------------------------------------- GHA-023
+    # Values OBAAF-GHA-023 reaches in one file, each place counted on its own: a large workflow reaches
+    # some thousands.
+    _PLACEHOLDER_WALK = 500_000
+
+    class _WalkExceeded(Exception):
+        pass
+
     def placeholders(self) -> None:
         """Every template placeholder in a value GitHub reads, one finding each (flagship slice 2d.2f).
         The values are read as YAML gives them, so an escape (`OBAAF\\x5FOWNER`, a line joined inside
         double quotes) is the placeholder it spells, and a comment, which GitHub never reads, is not.
         `OBAAF_OWNER` is found in any letter case (GitHub owner names are compared without regard to
-        case); the all-zero SHA as a ref, or after `@` anywhere in a value, as exactly 40 zeros."""
-        seen: set = set()
+        case); the all-zero SHA as a ref, or after `@` anywhere in a value, as exactly 40 zeros.
+
+        A value written once under a YAML anchor and reached through aliases is one object to the
+        reader. Each place (a top-level key, a job's key, a step) is walked on its own, each list and
+        mapping in it once, so a step shared by two jobs, or used twice in one job, is reported at each
+        (slice 2d.3: it was reported at the first place only). Each text is searched once, however
+        often it is reached, and a text with a placeholder reached again in the same place is that
+        place's once. A file whose places together reach more values than the checker reads is an
+        error for the file, never a pass; the rule's findings so far, and the other rules', stand."""
         found: list = []
+        budget = [self._PLACEHOLDER_WALK]
+        searched: dict = {}
+
+        def held(text: str, where: str) -> list:
+            key = (text, where.rsplit(".", 1)[-1] == "uses")
+            if key not in searched:
+                searched[key] = _placeholders_in(text, where)
+            return searched[key]
 
         def visit(value, where: str, line: int, job: Job | None, step: Step | None) -> None:
-            if isinstance(value, (dict, list)):
-                if id(value) in seen:
-                    return
-                seen.add(id(value))
-            if isinstance(value, str):
-                for placeholder in _placeholders_in(value, where):
-                    found.append((line, job, step, where, placeholder))
-            elif isinstance(value, dict):
-                for key, sub in value.items():
-                    name = as_text(key)
-                    for placeholder in _placeholders_in(name, where):
-                        found.append((line, job, step, f"{where}.{name}" if where else name, placeholder))
-                    sub_line = line
-                    if hasattr(value, "line_of"):
-                        try:
-                            sub_line = max(int(value.line_of(key) or 0), line)
-                        except (TypeError, ValueError):
-                            pass
-                    visit(sub, f"{where}.{name}" if where else name, sub_line, job, step)
-            elif isinstance(value, list):
-                for n, sub in enumerate(value):
-                    visit(sub, f"{where}[{n}]", line, job, step)
+            seen: set = set()
 
+            def walk(value, where: str, line: int) -> None:
+                budget[0] -= 1
+                if budget[0] < 0:
+                    raise self._WalkExceeded()
+                if isinstance(value, (dict, list)):
+                    if id(value) in seen:
+                        return
+                    seen.add(id(value))
+                if isinstance(value, str):
+                    placeholders = held(value, where)
+                    if placeholders:
+                        # A text reached again through an alias in the same place is that place's once,
+                        # as a list or mapping is; a text written out twice is two objects, and two places.
+                        if id(value) in seen:
+                            return
+                        seen.add(id(value))
+                    for placeholder in placeholders:
+                        found.append((line, job, step, where, placeholder))
+                elif isinstance(value, dict):
+                    for key, sub in value.items():
+                        name = as_text(key)
+                        for placeholder in held(name, where):
+                            found.append((line, job, step, f"{where}.{name}" if where else name, placeholder))
+                        sub_line = line
+                        if hasattr(value, "line_of"):
+                            try:
+                                sub_line = max(int(value.line_of(key) or 0), line)
+                            except (TypeError, ValueError):
+                                pass
+                        walk(sub, f"{where}.{name}" if where else name, sub_line)
+                elif isinstance(value, list):
+                    for n, sub in enumerate(value):
+                        walk(sub, f"{where}[{n}]", line)
+
+            walk(value, where, line)
+
+        try:
+            self._placeholder_places(visit)
+        except self._WalkExceeded:
+            message = ("values reached through YAML aliases are too many to read for template placeholders; the "
+                       "checker cannot tell whether one is left")
+            problems = getattr(self, "_problems", None)
+            problems = self.wf.problems if problems is None else problems
+            if message not in problems:
+                problems.append(message)
+        self._placeholder_findings(found)
+
+    def _placeholder_places(self, visit) -> None:
         jobs_raw = self.wf.raw.get("jobs")
         for key, sub in self.wf.raw.items():
             if key != "jobs":
                 visit({key: sub}, "", 1, None, None)
-        by_raw = {id(job.raw): job for job in self.wf.jobs.values()}
+        # Each job and step is matched to its raw value in order, so that two places holding the same
+        # value through an alias are two jobs or two steps, not one.
+        by_raw: dict = collections.defaultdict(collections.deque)
+        for job in self.wf.jobs.values():
+            by_raw[id(job.raw)].append(job)
         if isinstance(jobs_raw, dict):
             for key, job_raw in jobs_raw.items():
-                job = by_raw.get(id(job_raw))
+                queue = by_raw.get(id(job_raw))
+                job = queue.popleft() if queue else None
                 if job is None:
                     visit({key: job_raw}, "jobs", 1, None, None)
                     continue
-                steps = {id(step.raw): step for step in job.steps}
+                steps: dict = collections.defaultdict(collections.deque)
+                for step in job.steps:
+                    steps[id(step.raw)].append(step)
                 for name, sub in job_raw.items():
                     if name == "steps" and isinstance(sub, list):
                         for n, step_raw in enumerate(sub):
-                            step = steps.get(id(step_raw))
+                            queue = steps.get(id(step_raw))
+                            step = queue.popleft() if queue else None
                             visit(step_raw, f"steps[{n}]", step.line if step else job.line, job, step)
                     else:
                         visit({name: sub}, "", job.line, job, None)
@@ -676,8 +1001,10 @@ class WorkflowRules:
             for job in self.wf.jobs.values():
                 for step in job.steps:
                     if step.via is not None and isinstance(step.written, dict):
-                        seen.clear()      # each use of an action is read, as each step written in a job is
+                        # each use of an action is read, as each step written in a job is
                         visit(step.written, "step", step.line, job, step)
+
+    def _placeholder_findings(self, found: list) -> None:
         done: set = set()
         for line, job, step, where, placeholder in found:
             key = (job.id if job else None, step.index if step else None, where, placeholder)
@@ -1597,7 +1924,11 @@ class WorkflowRules:
                 if isinstance(value, bool) or not isinstance(value, (str, int, float)):
                     out[name] = None
                     continue
-                text = str(value)
+                try:
+                    text = str(value)
+                except ValueError:          # an integer too long for Python to print (found by 2d.5c2a's review)
+                    out[name] = None
+                    continue
                 out[name] = None if "$" in text or len(text) > 10_000 else text
         return out
 
@@ -1710,6 +2041,31 @@ class WorkflowRules:
                 return True
         return False
 
+    def _pin_candidate(self, step: Step, shell: str, windows: bool = False) -> str | None:
+        """One literal package in a direct workflow run. Normalized detection text loses its origin."""
+        raw = step.raw.get("run")
+        if step.via is not None or step.uses is not None or not isinstance(raw, str):
+            return None
+        # A `run` written once under a YAML anchor and reached through aliases is one edit for every
+        # step that reaches it, so none of them is a candidate (review of #258).
+        if "run" in getattr(step.raw, "shared_keys", ()):
+            return None
+        # A called workflow may already contain values substituted from a caller. A Windows runner's
+        # default shell is PowerShell, as agent_tool_installs reads it.
+        if self.wf.caller_inputs_put_in or shell not in ("", "sh", "bash") or (windows and not shell):
+            return None
+        # Exactly one package token on one install line. The optional second line may
+        # only query the installed CLI's version, using the catalogue's own spelling.
+        match = re.fullmatch(r"(?:sudo[ \t]+)?npm[ \t]+install[ \t]+-g[ \t]+([^\s]+)"
+                             r"(?:[ \t]*\r?\n[ \t]*([^\s]+)[ \t]+--version)?", raw.strip(" \t\r\n"))
+        if not match:
+            return None
+        package, queried_cli = match.groups()
+        cli = (self.detection.get("agent_installs") or {}).get(package)
+        if cli and (queried_cli == cli or queried_cli is None and not raw.lstrip().startswith("sudo")):
+            return package
+        return None
+
     def agent_tool_installs(self, job: Job) -> None:
         """OBAAF-GHA-025: an agent job installs or runs a tool at a version it does not fix (flagship slice
         2d.5a, control R6). One finding per step and case, with what was found as its facts."""
@@ -1802,11 +2158,496 @@ class WorkflowRules:
                 self.add("OBAAF-GHA-025", step.line,
                          "Agent job '{job}' ({why}) installs an agent CLI at a version that can change, in step "
                          "'{step}': {installs}.", job, step, kind="agent-cli", why=why, installs=sorted(installs),
+                         pin_candidate=self._pin_candidate(step, shell, windows) if len(installs) == 1 and not piped
+                         else None,
                          **agents)
+
+    # -------------------------------------------------------------- GHA-026
+    _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2}
+
+    def agent_tool_settings(self, job: Job) -> None:
+        """OBAAF-GHA-026: a step gives an agent action a setting the tool's own documentation warns about
+        (flagship slice 2d.5c1). The settings are data, under each agent tool's entry in the detection
+        data, each with the documentation's words and where they are. One finding per step and input: for
+        the first of the settings for that input whose values the given value is (compared trimmed and in
+        any letter case, the wider reading), or, where the value is not plain text (an expression, a list,
+        a mapping), case `computed`, "cannot tell", at the highest of those settings' severities but at
+        most medium. An input that is not given has the action's default, which no setting names."""
+        known = agent_tools.settings(self.detection)
+        readers = agent_tools.flag_readers(self.detection)
+        if not known and not readers:
+            return
+        if readers:
+            self._agent_flags(job, readers)
+        for step in job.steps:
+            if not step.uses or step.is_local or step.uses.strip().lower().startswith("docker://"):
+                continue
+            written = step.raw.get("with")
+            if written is not None and not isinstance(written, dict):
+                # `with: ${{ fromJSON(...) }}`: GitHub evaluates it into the inputs, which the checker cannot
+                # read, so every setting of the action is "cannot tell" (found by 2d.5c1's review), and so is
+                # every flag of an input it hands the program as options (slice 2d.5c2a).
+                mine = [c for c in known if self._tool_action(step, c[2]["action"])]
+                mine += [(tool, name, flag) for tool, name, flags, _programs, _packages, args in readers
+                         if any(self._tool_action(step, a) for a in args) for flag in flags]
+                if mine:
+                    self._agent_setting(job, step, written, mine, whole=True)
+                continue
+            given = step.with_
+            if not given:
+                continue
+            by_input: dict = {}
+            for tool, name, setting in known:
+                if self._tool_action(step, setting["action"]):
+                    key = input_name(setting["input"])
+                    if key in given:
+                        by_input.setdefault(key, []).append((tool, name, setting))
+            for key, candidates in by_input.items():
+                self._agent_setting(job, step, given[key], candidates)
+
+    def _tool_action(self, step: Step, action: str) -> bool:
+        """Whether the step uses `action`, an agent tool's action, or one in a folder under it that the
+        catalogue does not list as running no agent (flagship slice 2d.11): the approval check under
+        `anthropics/claude-code-action` is not given that action's settings."""
+        return step.uses_action(action) and not self._agent_actions().excludes(step.action)
+
+    def _agent_flags(self, job: Job, readers: list) -> None:
+        """OBAAF-GHA-026 for command-line options (flagship slice 2d.5c2a): an option an agent tool's own
+        files warn about, given where the tool's program is run in a step's script (its `run`, a
+        github-script script, the command OBAAF's egress action runs, and any other input, `env` value or
+        `docker://` argument that is a command running the program) or in an input one of the tool's actions
+        hands the program as options (`claude_args`, `codex-args`). `agent_flags` says how each is read and
+        what is "cannot tell"."""
+        for step in job.steps:
+            given = step.with_ if step.uses and not step.is_local else {}
+            written = step.raw.get("with")
+            for tool, name, flags, programs, packages, args in readers:
+                # The inputs an action of the tool hands its program as options. A `with:` that is one
+                # expression is "cannot tell" for them in `agent_tool_settings`.
+                if given and isinstance(written, dict):
+                    for action, inputs in args.items():
+                        if not self._tool_action(step, action):
+                            continue
+                        for key in dict.fromkeys(input_name(i) for i in inputs):
+                            if key in given:
+                                self._agent_args(job, step, tool, name, flags, action, key, given[key])
+                self._agent_command(job, step, tool, name, flags, programs, packages)
+
+    def _agent_args(self, job: Job, step: Step, tool: str, name: str, flags: list, action: str, key: str,
+                    raw) -> None:
+        if raw is None:
+            return
+        text = ("true" if raw else "false") if isinstance(raw, bool) else as_text(raw) if isinstance(
+            raw, (str, int, float)) else None
+        candidates = [(tool, name, dict(flag, input=key)) for flag in flags]
+        if text is None or "${{" in text:
+            # The same case as a setting's value the checker cannot read (a list, a mapping, an expression).
+            self._agent_setting(job, step, raw, candidates)
+            return
+        codex = action.lower() == "openai/codex-action"
+        # claude-code-action leaves out a line that starts with `#` and puts in an unset variable as nothing
+        # (shell-quote); codex-action reads `[` as JSON and keeps every other word (string-argv).
+        reading, unknown = agent_flags.read_args(text, flags, json_array=codex, comments=not codex,
+                                                 expands=not codex)
+        odd = any(unicodedata.category(ch)[0] in "CZ" and ch not in agent_flags.JS_SPACE for ch in text)
+        if odd or unknown:
+            # A character either side may read otherwise, or a variable the action may put in as nothing.
+            self._agent_setting(job, step, raw, [c for c in candidates if c[2]["id"] not in reading.hits],
+                                force_computed=True)
+        shown_action = (step.action or "").lower()
+        for flag, option, value in reading.hits.values():
+            written_as = option if value is None else f"{option} {value}"
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' gives {action} `{input}` the option `{option}`, which {tool}'s "
+                     "own documentation warns about: \"{says}\" ({source}).", job, step,
+                     severity=flag["severity"], kind="option", action=shown_action, input=key,
+                     option=Fact(bounded(written_as), one_line(written_as, 120)), setting=f"{tool}/{flag['id']}",
+                     tool=Note(name), says=Note(" ".join(str(flag["says"]).split())),
+                     source=Note(str(flag["source"])))
+
+    _COMMAND_INPUTS = frozenset({"run", "command", "commands", "cmd", "script", "shell", "args", "arguments",
+                                 "entrypoint", "exec", "execute", "build-command", "test-command"})
+
+    _FOREIGN_SPECIAL_RE = re.compile(r"[$@`%^(]")
+
+    def _later_writes(self, job: Job) -> list:
+        """The indexes of the job's steps that can set a variable for the steps after them, worked out once."""
+        cache = self.__dict__.setdefault("_later_writes_cache", {})
+        if job.id not in cache:
+            cache[job.id] = [n for n, s in enumerate(job.steps) if self._SETS_FOR_LATER_RE.search(
+                (s.run or "") + " " + " ".join(str(v) for v in s.with_.values() if isinstance(v, str)) + " "
+                + " ".join(str(v) for v in s.env.values() if isinstance(v, str)))]
+        return cache[job.id]
+
+    _EXEC_CALL_RE = re.compile(r"\b(exec|execSync|execFile|execFileSync|spawn|spawnSync|getExecOutput|run|call|"
+                               r"check_call|check_output|Popen|system)\s*\(|\$`|child_process|\.apply\s*\(")
+
+    def _step_shell(self, job: Job, step: Step) -> str:
+        """The shell a `run` step's script is given to: its `shell`, else the job's and then the workflow's
+        `defaults.run.shell`, else bash (pwsh on a Windows runner)."""
+        shell = step.raw.get("shell")
+        if not isinstance(shell, str):
+            for defaults in (job.raw.get("defaults"), self.wf.raw.get("defaults")):
+                run = defaults.get("run") if isinstance(defaults, dict) else None
+                if isinstance(run, dict) and isinstance(run.get("shell"), str):
+                    shell = run["shell"]
+                    break
+        if not isinstance(shell, str):
+            windows = any("windows" in str(label).lower() for label in job.runs_on)
+            return "pwsh" if windows else "bash"
+        first = shell.split()[0] if shell.split() else ""
+        return first.rsplit("/", 1)[-1].lower()
+
+    def _step_language(self, job: Job, step: Step, shell_name: str) -> str:
+        """The language a `run` step's script is read as by `agent_code`: the shell's program, after `env`
+        and its options (`/usr/bin/env python3 {0}`), and python for `uv run --script {0}`."""
+        shell = step.raw.get("shell")
+        if not isinstance(shell, str):
+            return shell_name
+        words = [w.rsplit("/", 1)[-1].lower() for w in shell.split() if w != "{0}"]
+        while words and (words[0] == "env" or words[0].startswith("-")):
+            words = words[1:]
+        if words and words[0] in ("uv", "uvx") and ("--script" in words or "run" in words):
+            return "python"
+        return words[0] if words else shell_name
+
+    def _agent_command(self, job: Job, step: Step, tool: str, name: str, flags: list, programs: list,
+                       packages: list) -> None:
+        # What the step gives a shell, and in what language: (text, read as bash, the step names the tool).
+        parts: list = []
+        languages: dict = {}
+        if step.run:
+            shell_name = self._step_shell(job, step)
+            # cmd takes a `^` out before the program sees the word (`claude ^--yolo`).
+            # A caret at a line's end continues the line (found by slice 2d.5c2c's review).
+            parts.append((re.sub(r"\^[ \t]*\r?\n", " ", step.run).replace("^", "")
+                          if shell_name in ("cmd", "cmd.exe") else step.run, shell_name in ("bash", "sh")))
+            languages[id(parts[-1][0])] = self._step_language(job, step, shell_name)
+        given = step.with_ if step.uses else {}
+        script = given.get("script") if step.uses_action("actions/github-script") else None
+        if isinstance(script, str):
+            parts.append((script, False))
+            languages[id(script)] = "github-script"
+        if step.confines and isinstance(given.get("run"), str):
+            parts.append((given["run"], True))
+        # A `shell` is itself a command line GitHub runs (`shell: claude ... {0}`), the step's or the default.
+        if step.run:
+            for shell in (step.raw.get("shell"), *(d.get("run", {}).get("shell") for d in (
+                    job.raw.get("defaults"), self.wf.raw.get("defaults")) if isinstance(d, dict) and isinstance(
+                    d.get("run"), dict))):
+                if isinstance(shell, str):
+                    parts.append((shell.replace("{0}", "script.sh"), True))
+                    break
+        own = {id(text) for text, _bash in parts}
+        # (text, whether its input's name says it is a command): other inputs, `env` values, and a
+        # `docker://` step's entrypoint and arguments, which GitHub hands the container as one command line.
+        others = [(v, k in self._COMMAND_INPUTS) for k, v in given.items() if isinstance(v, str) and id(v) not in own
+                  and not (k == "script" and script is not None) and not (k == "run" and step.confines)]
+        if step.uses and step.uses.strip().lower().startswith("docker://"):
+            entry, args = given.get("entrypoint"), given.get("args")
+            others.append((" ".join(v for v in (entry, args) if isinstance(v, str)), True))
+        others += [(v, False) for v in step.env.values() if isinstance(v, str)]
+        named = [text for text, _bash in parts] + [v for v, _c in others] + [
+            v for scope in (job.env, self.wf.env) if isinstance(scope, dict) for v in scope.values() if isinstance(v, str)]
+        matrix = job.raw.get("strategy")
+        if isinstance(matrix, dict):
+            named += _strings_in(matrix.get("matrix"), 2000)
+        scopes = [step.raw.get("env"), job.raw.get("env"), self.wf.raw.get("env")]
+        # An `env` written as one expression (`env: ${{ fromJSON(...) }}`) can set any name: none is known.
+        scoped = not any(scope is not None and not isinstance(scope, dict) for scope in scopes)
+        scopes = [scope if isinstance(scope, dict) else {} for scope in scopes]
+        if not any(agent_flags.appears(t, programs, packages) for t in named):
+            # A name put together from variables the script sets (`a=cla; b=ude; $a$b`) is looked for only
+            # where the script has a `$` and an assignment, with a regular expression (kept cheap).
+            if not any("$" in text and "=" in text and agent_flags.appears(agent_flags.put_in_cheaply(
+                    text, scopes), programs, packages) for text, _b in parts):
+                return              # the tool's name is nowhere in the step (the common case, kept cheap)
+        # A step before this one that can set a variable for later steps (GITHUB_ENV, `exportVariable`):
+        # the job's and workflow's `env` values are then not known; the step's own `env` is.
+        writes = self._later_writes(job)
+        index = next((n for n, other_step in enumerate(job.steps) if other_step is step), 0)
+        later = any(n < index for n in writes)
+        trust_env = [scoped, scoped and not later, scoped and not later]
+        known = {id(text): agent_flags.known_variables(scopes, text, trust_env) for text, _b in parts}
+        mentioned = any(agent_flags.mentions(t, programs, packages) for t in named)
+        reading = agent_flags.Reading()
+        for text, bash in parts:
+            variables, unread = known[id(text)]
+            if bash:
+                reading.merge(agent_flags.read_script(text, programs, packages, flags, variables,
+                                                      mentioned=mentioned, unread=unread, loose=True))
+            else:
+                # JavaScript (github-script) or another shell: "cannot tell" only where a line names the tool
+                # and runs a command (an exec call, or in a shell, a character its quoting or variables use).
+                # JavaScript or another shell is read the widest way; "cannot tell" where it names the tool and
+                # holds the start of a warned option it cannot complete (`"--dangerously-" + "skip-..."`).
+                # The language is read by its tokens too (`agent_code`, flagship slice 2d.5c2c): argument lists
+                # held in variables, command lines joined with values, options in pieces; in another shell, a
+                # variable or splat among the program's words (`claude @a`, `& claude $flags`, `claude %F%`)
+                # is "cannot tell", as an unquoted one is in bash.
+                if agent_flags.appears(text, programs, packages):
+                    reading.merge(agent_flags.read_script(text, programs, packages, flags, variables,
+                                                          mentioned=agent_flags.mentions(text, programs, packages),
+                                                          bash=False, loose=True,
+                                                          language=languages.get(id(text), "")))
+        for other, command_like in others:
+            # Another input, an `env` value or a `docker://` command line that runs the program: one whose text
+            # starts a command with it, or that names the tool in an input whose name says it is a command.
+            if agent_flags.starts_program(other, programs, packages) or (
+                    command_like and agent_flags.appears(other, programs, packages)):
+                variables, unread = agent_flags.known_variables(scopes, other, trust_env)
+                reading.merge(agent_flags.read_script(other, programs, packages, flags, variables, mentioned=True,
+                                                      unread=unread, prose=not command_like))
+        for flag, option, value in reading.hits.values():
+            written_as = option if value is None else f"{option} {value}"
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' runs {program} with `{option}`, which {tool}'s own "
+                     "documentation warns about: \"{says}\" ({source}).", job, step, severity=flag["severity"],
+                     kind="command-option", program=tool,
+                     option=Fact(bounded(written_as), one_line(written_as, 120)), setting=f"{tool}/{flag['id']}",
+                     tool=Note(name), says=Note(" ".join(str(flag["says"]).split())),
+                     source=Note(str(flag["source"])))
+        open_ = [flag for flag in flags if flag["id"] in reading.unknown and flag["id"] not in reading.hits]
+        if open_ and agent_tools.other_program_only(self.detection, tool, programs, [
+                text for text, _bash in parts] + [v for v, _c in others]):
+            # Another well-known program has this name (AWS's `copilot`, pressly's `goose`): no "cannot tell"
+            # where every place the step names the program is followed by that other program's own words
+            # (flagship slice 2d.5c2b).
+            open_ = []
+        if open_:
+            words = sorted({w for flag in open_ for w in reading.unknown[flag["id"]]})
+            shown = "; ".join(one_line(w, 60) for w in words[:5]) + ("; ..." if len(words) > 5 else "")
+            worst = max((f["severity"] for f in open_), key=lambda sev: self._SEVERITY_RANK.get(sev, 2))
+            severity = "medium" if self._SEVERITY_RANK.get(worst, 2) > 1 else worst
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' runs {program} with words the checker cannot read ({words}), "
+                     "so it cannot tell whether they hold an option that {tool}'s own documentation warns about "
+                     "({settings}).", job, step, severity=severity, kind="command-computed", program=tool,
+                     words=Fact([bounded(w) for w in words], shown), tool=Note(name),
+                     settings=sorted(f"{tool}/{f['id']}" for f in open_))
+
+    # What both the checker's Python and the actions' JavaScript take off the ends of a value (`str.strip`
+    # and `String.prototype.trim`): the union, so a value either reads as warned is read as warned.
+    _TRIMMED = "".join(ch for ch in map(chr, range(0x3001)) if ch.isspace()) + "\ufeff"
+
+    def _agent_setting(self, job: Job, step: Step, raw, candidates: list, whole: bool = False,
+                       force_computed: bool = False) -> None:
+        action = (step.action or "").lower()
+        tool_name = candidates[0][1]
+        input_shown = "with" if whole else candidates[0][2]["input"]
+        if raw is None:
+            return          # `input:` with nothing after it is an empty value, which no setting names
+        if whole:
+            text = None
+        elif isinstance(raw, bool):
+            text = "true" if raw else "false"
+        elif isinstance(raw, (str, int, float)):
+            text = as_text(raw)
+        else:
+            text = None
+        core = text.strip(self._TRIMMED) if text is not None else None
+        # A control, format or separator character left inside the value (a NUL, which ends an environment
+        # variable, U+200B, a no-break space) can make the action read another value than the one written.
+        odd = core is not None and any(unicodedata.category(ch)[0] in "CZ" and ch not in " \t\r\n" for ch in core)
+        # A value that starts with a comment, read by `fromJSON` (`/* x */ true`): what the runner's reader
+        # makes of it was not tested, so it is "cannot tell" (2d.5c2b's second review).
+        commented = core is not None and core.startswith("/") and any(c[2].get("json") is True for c in candidates)
+        if text is None or "${{" in text or odd or force_computed or commented:
+            if not candidates:
+                return
+            # The value is the fact (its digest beyond 200 characters), so an acceptance stops matching when
+            # any of it changes (found by 2d.5c1's second review: a fact cut to 60 characters let `drop-sudo`
+            # become `unsafe`). A list or a mapping, which GitHub refuses as inputs, is named by its kind, as
+            # `value_identity` names it: walking it would expand every YAML alias in it (the fourth review).
+            if text is None:
+                fact = shown = value_identity(raw)
+            else:
+                fact, shown = bounded(text), one_line(text, 120)
+            worst = max((c[2]["severity"] for c in candidates), key=lambda sev: self._SEVERITY_RANK.get(sev, 2))
+            severity = "medium" if self._SEVERITY_RANK.get(worst, 2) > 1 else worst
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' gives {action} `{input}` a value the checker cannot read "
+                     "({value}), so it cannot tell whether it is one that {tool}'s own documentation warns "
+                     "about ({settings}).", job, step, severity=severity, kind="computed", action=action,
+                     input=input_shown, value=Fact(fact, shown),
+                     tool=Note(tool_name), settings=sorted(f"{c[0]}/{c[2]['id']}" for c in candidates))
+            return
+        value = core
+        folded = value.casefold()
+        decoded = self._json_text(value)
+        for tool, name, setting in candidates:
+            # An action that reads the input through `fromJSON` (`json: true`) takes `'"true"'` as `true`.
+            compared = decoded.strip(self._TRIMMED).casefold() if setting.get("json") is True and (
+                decoded is not None) else folded
+            if "equals" in setting:
+                hit = any(compared == str(v).strip().casefold() for v in setting["equals"])
+            else:
+                hit = compared != ""
+            if not hit:
+                continue
+            self.add("OBAAF-GHA-026", step.line,
+                     "Step '{step}' of job '{job}' gives {action} `{input}: {value}`, which {tool}'s own "
+                     "documentation warns about: \"{says}\" ({source}).", job, step, severity=setting["severity"],
+                     kind="setting", action=action, input=setting["input"],
+                     value=Fact(value, one_line(value, 120)), setting=f"{tool}/{setting['id']}",
+                     tool=Note(name), says=Note(" ".join(str(setting["says"]).split())),
+                     source=Note(str(setting["source"])))
+            return
+
+    _JSON_WORD_RE = re.compile(r"[^\s,/\]\}:\[\{]+")
+
+    @classmethod
+    def _json_text(cls, value: str):
+        """What GitHub's `fromJSON` makes of a value, as text, the way the runner's reader (Newtonsoft's
+        `JToken.ReadFrom`) does: the first token, a string in double or single quotes (`'"true"'`, `"'true'"`)
+        or a word up to a separator (`true // off`, `true off`); anything after it is not read. None where the
+        first token is neither (the runner refuses it). Found by 2d.5c2b's reviews."""
+        text = value.lstrip(" \t\r\n")
+        if text[:1] in ("'", '"'):
+            quote = text[0]
+            i, out = 1, []
+            while i < len(text):
+                ch = text[i]
+                if ch == "\\" and i + 1 < len(text):
+                    try:
+                        piece = json.loads('"' + text[i:i + (6 if text[i + 1] == "u" else 2)] + '"')
+                    except ValueError:
+                        piece = text[i + 1]
+                    out.append(piece)
+                    i += 6 if text[i + 1] == "u" else 2
+                    continue
+                if ch == quote:
+                    return "".join(out)
+                out.append(ch)
+                i += 1
+            return None
+        m = cls._JSON_WORD_RE.match(text)
+        return m.group(0) if m else None
 
     # ---------------------------------------------------- controls for GHA-005 and GHA-020
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
     EGRESS_ID = "egress-enforced"
+
+    # Actions whose ordinary operation the checker can identify without reading repository code: they are not
+    # artifact uploads, and they start only git (git-lfs or ssh when asked for), tar and the compressors tar
+    # uses (zstd, gzip), whose code-loading variables the checker reads (`steers`, `_UPLOAD_STEERING_*`). What they save to a cache is not read here (only the egress action's route reads a
+    # cache of its output, as "not met"). The second review of #357 (run `ouzel`) took the `actions/setup-`
+    # actions out: they start the tools they install, which read the repository's files and variables the
+    # checker does not read (by their source, not run: setup-node runs `yarn --version`, which Yarn 1 hands to
+    # a `yarn-path` in the repository's `.yarnrc`; setup-go runs `go`, which `GOTOOLCHAIN` can switch to a
+    # toolchain it downloads).
+    _NON_UPLOAD_ACTIONS = frozenset({
+        "actions/checkout", "actions/download-artifact", "actions/cache", "actions/cache/save",
+        "actions/cache/restore",
+    })
+    # Of those, the ones with no post step, by their action.yml.
+    _NO_POST_ACTIONS = frozenset({"actions/download-artifact", "actions/cache/restore"})
+
+    # Literal arguments only. The step's shell must be known, but errexit and pipefail
+    # do not affect whether one of these commands uploads an artifact.
+    _LITERAL_COMMAND = re.compile(
+        r"""([\w.:-]+)(?:[ \t]+(?:[\w/.,:@%+=-]+|'[^'\n]*'|"[^"$`\\\n]*"))*[ \t]*"""
+    )
+    _PLAIN_COMMANDS = frozenset({"echo", "pwd", "true", ":"})
+
+    # Review of #357 (run `ouzel`): names that, in an `env`, make an action from the list above, Harden-Runner, an
+    # agent's CLI or `echo` run code the checker did not read, besides `steers` (bash's, the loader's, Python's,
+    # `PATH`, `HOME`): Node.js's, since every action above, Harden-Runner and most agents' CLIs are Node.js
+    # programs, run with the token that uploads artifacts; git's (identity names excepted) and
+    # `XDG_CONFIG_HOME`, where git finds its global configuration, since actions/checkout runs git; and
+    # `TAR_OPTIONS`, since actions/cache runs tar. What other programs read for their settings is not read.
+    _UPLOAD_STEERING_NAMES = frozenset({"NODE_OPTIONS", "NODE_PATH", "XDG_CONFIG_HOME", "TAR_OPTIONS"})
+    _UPLOAD_STEERING_PREFIXES = ("GIT_",)
+    _UPLOAD_PLAIN_PREFIXES = ("GIT_AUTHOR_", "GIT_COMMITTER_")
+
+    def _upload_env_steers(self, job: Job, step: Step) -> bool:
+        """Whether a variable given to the step, or an earlier step, can make it run code the checker did not
+        read: `_bash_env` (bash's, the loader's, Python's, `PATH`, `HOME`, an `env` written as one expression, a
+        container's `env` or `options`, an earlier step that may change later steps), or a name in
+        `_UPLOAD_STEERING_NAMES` or under `_UPLOAD_STEERING_PREFIXES` in the step's, the job's or the
+        workflow's `env`."""
+        if self._bash_env(job, step):
+            return True
+        for scope in (step.raw, job.raw, self.wf.raw):
+            env = scope.get("env") if isinstance(scope, dict) else None
+            if not isinstance(env, dict):
+                continue
+            for key in env:
+                name = str(key).strip().upper()
+                if name in self._UPLOAD_STEERING_NAMES or (name.startswith(self._UPLOAD_STEERING_PREFIXES)
+                                                           and not name.startswith(self._UPLOAD_PLAIN_PREFIXES)):
+                    return True
+        return False
+
+    def _literal_script(self, job: Job, step: Step, programs) -> bool:
+        """Whether a `run` step's script, in a POSIX shell the checker reads and with no `${{`, is lines of one
+        command each with literal arguments, every command one of `programs` (comment lines skipped)."""
+        if step.uses is not None or self._failfast_shell(job, step) is None or expr_mod.OPEN in step.run:
+            return False
+        lines = [line.strip(" \t") for line in step.run.split("\n")]
+        commands = (self._LITERAL_COMMAND.fullmatch(line) for line in lines if line and not line.startswith("#"))
+        return all(match and match[1] in programs for match in commands)
+
+    def _script_steers_action(self, job: Job) -> str | None:
+        """GitHub's firewall route only (reviews of #357, run `ouzel`): the agent runs there as a step of its own,
+        with the runner's file commands. A step that runs a script the checker does not read as plain `echo`,
+        `pwd`, `true` or `:` lines (the agent's own, or an install, whose packages' scripts run) can write
+        `GITHUB_ENV` and `GITHUB_PATH`, which change what later steps run, the post steps of actions used before
+        it included (actions/checkout's runs `git`, found through the `PATH`). An action runs with the token that
+        uploads artifacts. Both are read from the runner's and the actions' code, not run. An action before every
+        such script that has no post step (`_NO_POST_ACTIONS`), and OBAAF's egress action at a listed commit,
+        whose own steps read nothing a workflow can set for them (slices 2c.9 to 2c.12), are not counted. Under
+        OBAAF's egress action the confined command cannot reach those files (slice 2c.9), so this is not read
+        on that route."""
+        releases = self.detection.get("egress_action_releases") or ()
+        scripts = [step for step in job.steps
+                   if step.uses is None and not self._literal_script(job, step, self._PLAIN_COMMANDS)]
+        if not scripts:
+            return None
+        first = scripts[0]
+        for step in job.steps:
+            if step.uses is None or (step.confines and step.uses.partition("@")[2] in releases):
+                continue
+            where = f"step '{one_line(first.name, 80)}' in job '{one_line(job.id, 80)}' runs a script, which can change"
+            if step.index > first.index:
+                return (f"{where} through GITHUB_ENV or GITHUB_PATH what step '{one_line(step.name, 80)}', which runs "
+                        "after it, runs, and an action runs with the token that uploads artifacts")
+            if step.clean_action not in self._NO_POST_ACTIONS:
+                return (f"{where} through GITHUB_ENV or GITHUB_PATH what the post step of step "
+                        f"'{one_line(step.name, 80)}', used before it, runs if the action has one (actions/checkout's "
+                        "has), and an action runs with the token that uploads artifacts")
+        return None
+
+    def _artifact_upload(self, job: Job) -> str | None:
+        """Return producer-side evidence. A later job's existence or behavior is immaterial."""
+        direct_agents = set((self.detection.get("agent_installs") or {}).values())
+        releases = self.detection.get("egress_action_releases") or ()
+        monitors = self.detection.get("harden_runner_releases") or {}
+        steered = "a variable in an env, or an earlier step, can make it run code the checker did not read"
+        if job.raw.get("container") is not None and job.steps:
+            return (f"job '{one_line(job.id, 80)}' runs in a container, whose image the checker does not read, and "
+                    "its scripts and JavaScript actions run in it")
+        for step in job.steps:
+            action = step.clean_action
+            where = f"step '{one_line(step.name, 80)}' in job '{one_line(job.id, 80)}'"
+            if action in ("actions/upload-artifact", "actions/upload-artifact/merge", "actions/upload-pages-artifact"):
+                return f"{where} uploads an artifact"
+            if step.uses is not None:
+                ref = step.uses.partition("@")[2]
+                if step.confines and ref in releases:
+                    continue    # its own steps' variables were examined by slices 2c.9 to 2c.12
+                if action in self._NON_UPLOAD_ACTIONS or (action == "step-security/harden-runner" and ref in monitors):
+                    if self._upload_env_steers(job, step):
+                        return (f"{where} uses an action that does not upload, but {steered}, with the token "
+                                "that uploads artifacts")
+                    continue
+                return f"{where} uses an action whose implementation may upload an artifact"
+            if self._installs_only(job, step) or self._literal_script(job, step, direct_agents | self._PLAIN_COMMANDS):
+                if self._upload_env_steers(job, step):
+                    return f"{where} runs a script, and {steered}"
+                continue
+            return f"{where} runs a script whose artifact uploads the checker cannot rule out"
+        return None
 
     def _egress(self, job: Job) -> tuple[Control, str, dict]:
         """What the checker can establish about a limit on the job's network access: the control,
@@ -1828,7 +2669,8 @@ class WorkflowRules:
         if readings:
             rank = {VERIFIED: 0, CANNOT_TELL: 1, NOT_MET: 2}
             best = min(readings, key=lambda r: rank[r.verdict])     # the first of the best, in the order above
-            return Control(self.EGRESS_NAME, best.verdict, best.detail, self.EGRESS_ID), best.kind, best.values
+            conditions = tuple(c for reading in readings for c in reading.conditions)
+            return Control(self.EGRESS_NAME, best.verdict, best.detail, self.EGRESS_ID, conditions), best.kind, best.values
         declared = job.env.get("OBAAF_EGRESS") or self.wf.env.get("OBAAF_EGRESS")
         kind, values = ("declared", {"declared": str(declared)}) if declared else ("none", {})
         if declared:
@@ -1916,6 +2758,9 @@ class WorkflowRules:
                 unsure.append(f"the policy allows {one_line(', '.join(wide[:5]), 120)}, which is or has under it "
                               "a public suffix (where anyone can register a name), and the firewall's README does "
                               "not say whether an allowed name covers the names under it")
+        upload = self._artifact_upload(job) or self._script_steers_action(job)
+        if upload:
+            unsure.append(f"{upload}. The job's network restriction does not extend to its artifact in another job")
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             listed = ", ".join(policy.allow) or "nothing"
@@ -2052,17 +2897,35 @@ class WorkflowRules:
             self.__dict__["_agent_patterns_cache"] = cached
         return cached
 
+    def _agent_actions(self) -> AgentActions:
+        """The agent actions, the catalog's (less the paths it lists as running no agent) and the
+        configuration's, built once (flagship slice 2d.11)."""
+        cached = self.__dict__.get("_agent_actions_cache")
+        if cached is None:
+            cached = AgentActions(self.detection, self.agents.get("actions", ()) or ())
+            self.__dict__["_agent_actions_cache"] = cached
+        return cached
+
     def _agent_step(self, step: Step, text: str) -> str | None:
         """Why the checker takes the step to run an agent, or None."""
-        actions = list(self.detection.get("agent_actions", [])) + list(self.agents.get("actions", ()) or ())
-        commands = [re.compile(p, re.M) for p in
-                    list(self.detection.get("agent_commands", [])) + list(self.agents.get("commands", ()) or ())]
-        for prefix in actions:
-            if step.uses_action(prefix):
-                return f"uses {one_line(step.action, 80)}"
-        if text and matches_any(commands, text):
+        if self._agent_actions().names(step.action):
+            return f"uses {one_line(step.action, 80)}"
+        if leaves_repository(step.uses):
+            return f"uses {one_line(step.uses, 80)}, a path out of its repository that can reach any action the job downloads"
+        if text and matches_any(self._agent_patterns(), text):
             return "runs an agent CLI"
         return None
+
+    def draft_agent_steps(self, job: Job) -> list[Step]:
+        """Direct agent candidates for a draft, excluding steps that only install or mention a CLI."""
+        candidates = []
+        for step in job.steps:
+            reason = self._agent_step(step, step.agent_text(self._agent_patterns()))
+            if reason == "runs an agent CLI" and (self._installs_only(job, step) or self._package_mention_only(step)):
+                continue
+            if reason:
+                candidates.append(step)
+        return candidates
 
     _OUTPUTS = frozenset({"workspace", "scratch"})
 
@@ -2263,6 +3126,11 @@ class WorkflowRules:
                 place.problems.append(f"{where} names {name} under env, and the action at a listed commit removes "
                                       "every OPENSSL_ variable from its own steps before it reads env (slice 2c.11a), "
                                       "so it finds the name unset and refuses to run (issue #197)")
+            elif listed and egress_mod.reserved_under_env(name):
+                # Known only for a listed commit, as above (added by the review of A3a, review-gpt #283).
+                place.problems.append(f"{where} names {name} under env, a name the action at a listed commit "
+                                      "sets, withholds or reads as AWF's own configuration, so the action "
+                                      "refuses to run")
         step_env = step.raw.get("env")
         here = self._env_keys(step_env)
         beyond = [self._env_keys(job.raw.get("env")), self._env_keys(self.wf.raw.get("env"))]
@@ -2348,7 +3216,8 @@ class WorkflowRules:
                 place.proxy.append((name, found))
             elif name in env_names:
                 if name in egress_mod.WITHHELD_BY_AWF or not egress_mod.NAME_RE.match(name) \
-                        or (listed and egress_mod.removed_before_inputs(name)):
+                        or (listed and (egress_mod.removed_before_inputs(name)
+                                        or egress_mod.reserved_under_env(name))):
                     continue    # the action refuses to run, which `problems` says
                 place.command.append((f"as {name}", found))
             else:
@@ -2413,8 +3282,7 @@ class WorkflowRules:
                          "the provider is asked to fetch or connect to for it (remote MCP servers, URLs); the proxy "
                          "refuses the providers' hosted web search and fetch tools, in the requests it can read, and "
                          "nothing else of that kind")
-        parts.append("and anything the command prints to the job's log or leaves for a later actions/upload-artifact "
-                     "step to save")
+        parts.append("and anything the command prints to the job's log")
         return "Not blocked: " + "; ".join(parts)
 
     def _egress_action(self, job: Job) -> egress_mod.Reading | None:
@@ -2436,7 +3304,7 @@ class WorkflowRules:
           host. Both limit the network as the allow-list says, and both are said beside a cleared
           finding. A credential the checker cannot place is "cannot tell";
         - no step that can run after or beside it reads its `workspace` or `scratch` output or the
-          scratch directory, except to upload it as an artifact. Saving them to a cache is "not met";
+          scratch directory. A possible artifact upload is "cannot tell". Saving them to a cache is "not met";
           any other use is "cannot tell", because the checker cannot tell reading from running."""
         confined = [step for step in job.steps if step.confines]
         if not confined or job.reusable:
@@ -2558,11 +3426,22 @@ class WorkflowRules:
                 shown = f"{host} (through AWF's API proxy)"
                 if shown not in allow_shown:
                     allow_shown.append(shown)
+        # The ordinary report summarises these groups and prioritises definite
+        # problems. Keep the complete evidence for the one-job draft as well.
+        grouped = {}
+
+        def group(bucket, entries, explanation):
+            summary = egress_mod.joined(entries, 3) + explanation
+            # Retain each subject with its explanation. A length-limited work
+            # order can then show why each named step matters before truncation.
+            grouped[summary] = tuple(entry + explanation for entry in entries)
+            bucket.append(summary)
+
         if agents_outside:
-            problems.append(f"{egress_mod.joined(agents_outside, 3)}, outside the confined command")
+            group(problems, agents_outside, ", outside the confined command")
         if outside:
-            problems.append(f"{egress_mod.joined(outside, 3)}, so the agent may run outside the confined command "
-                            "(the checker tells where an agent runs by where its key goes)")
+            group(problems, outside, ", so the agent may run outside the confined command "
+                  "(the checker tells where an agent runs by where its key goes)")
         elif not agents_outside and not any(place.reaches for place in placements):
             recognised = [step for step in confined if self._agent_step(step, step.agent_text(self._agent_patterns()))
                           or step.index in job.agent_script_steps]
@@ -2573,9 +3452,9 @@ class WorkflowRules:
         if unread_token and not outside:
             unsure.append("the job does not declare its token's permissions, so the repository's default applies, "
                           "which the checker does not read, and every action is given that token")
-        # What runs after (or beside) the confined command. Only `actions/upload-artifact` may: it saves
-        # files as data. A script, or any other action, could run or load what the command wrote, and
-        # the checker cannot tell reading from running. Steps before it are read for what their post
+        # What runs after (or beside) the confined command. `actions/upload-artifact` is read by
+        # `_artifact_upload` as an upload (decision D-133). A script, or any other action, could run or
+        # load what the command wrote, and the checker cannot tell reading from running. Steps before it are read for what their post
         # steps or the processes they leave running could reach: the outputs, the scratch directory by
         # its name, or /tmp.
         ids = {str(step.raw.get("id")).lower() for step in confined if step.raw.get("id") is not None}
@@ -2609,19 +3488,25 @@ class WorkflowRules:
                 unsure.append(f"{where}, before it, may leave a process running beside it "
                               f"({egress_mod.leaves_process(step.run)}), which could reach what the command wrote")
         if after:
-            unsure.append(f"{egress_mod.joined(after, 3)} can run after it or beside it, and the checker cannot tell "
-                          "whether it runs or loads anything the command wrote (only actions/upload-artifact is "
-                          "taken to save files as data)")
+            group(unsure, after, " can run after it or beside it, and the checker cannot tell "
+                  "whether it runs or loads anything the command wrote (an actions/upload-artifact step is "
+                  "read as an upload instead)")
+        upload = self._artifact_upload(job)
+        if upload:
+            unsure.append(f"{upload}. The job's network restriction does not extend to its artifact in another job")
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             detail = (f"the agent's command runs under OBAAF's egress action at a commit OBAAF lists as released, "
-                      f"allowing {one_line(', '.join(allow_shown), 200)}, and nothing but actions/upload-artifact "
-                      f"runs after it. {self._leaks(placements)}")
+                      f"allowing {one_line(', '.join(allow_shown), 200)}, and no other step runs after it. "
+                      f"{self._leaks(placements)}")
         else:
             detail = egress_mod.joined(problems or unsure)
         action = ", ".join(sorted({one_line(step.uses or "", 120) for step in confined}))
+        conditions = tuple(condition for message in (*problems, *unsure)
+                           for condition in grouped.get(message, (message,)))
         return egress_mod.Reading(verdict, detail, "egress-action",
-                                  {"action": action, "allow": allow_shown or ["nothing"], "written": self._written()})
+                                  {"action": action, "allow": allow_shown or ["nothing"], "written": self._written()},
+                                  conditions)
 
     # ---- Harden-Runner
     def _harden_runner(self, job: Job) -> egress_mod.Reading | None:
@@ -2749,9 +3634,7 @@ class WorkflowRules:
         workflow and the checker configuration: every secret the job receives is listed in
         `protected_secrets`, and the job declares the environment the entry names, which is what
         OBAAF-GHA-024 checks for the secrets that are listed. The second is a repository setting
-        (the environment holds the secrets, nothing outside it does, and only protected branches
-        may use it), which `obaaf check` does not read, so it is "cannot tell" for a job that
-        declares an environment and "not met" for one that declares none."""
+        which an explicit audit snapshot can establish for a concrete secret and environment."""
         scoped = "each of the job's secrets is listed in protected_secrets, and the job declares the environment named there"
         setting = "the secrets are stored only in that environment, and only protected branches may use it"
         declared = job.environment
@@ -2762,13 +3645,29 @@ class WorkflowRules:
         odd = written is not None and not isinstance(written, str)
         shown = "the job's environment" if odd else f"environment '{one_line(declared, 120)}'"
 
-        def both(verdict: str, detail: str, second: str = CANNOT_TELL) -> list[Control]:
+        def both(verdict: str, detail: str, second: str = CANNOT_TELL, *, named_secrets=()) -> list[Control]:
             if second == NOT_MET:
                 about = "the job declares no environment, so its secrets come from the repository or organization"
             else:
                 about = (f"where a secret is stored and which branches may use {shown} are repository "
                          "settings, which obaaf check does not read; obaaf audit reads environments and their "
                          "branch rules")
+            if self.settings is not None:
+                if verdict != VERIFIED:
+                    about = detail
+                elif self.wf.callable:
+                    about = "the snapshot cannot establish the storage of caller-supplied secrets"
+                elif job.environment_reading[0] != "literal" or not named_secrets:
+                    about = "each secret needs a literal environment named by protected_secrets and the job"
+                else:
+                    results = [self.settings.assess(secret, declared) for secret in named_secrets]
+                    verdicts = {result.verdict for result in results}
+                    if NOT_MET in verdicts:
+                        second = NOT_MET
+                    elif verdicts == {VERIFIED}:
+                        second = VERIFIED
+                    about = "; ".join(dict.fromkeys(result.reason for result in results))
+                about = f"Settings snapshot taken {self.settings.taken_at}: {about}"
             return [Control(scoped, verdict, detail, "secrets-protected"),
                     Control(setting, second, about, "environment-restricted")]
 
@@ -2810,7 +3709,8 @@ class WorkflowRules:
                                      f"protected_secrets names {', '.join(repr(one_line(env, 120)) for env in unsure)}"
                                      ", which differ only in the case of letters outside ASCII")
         listed = ", ".join(upper[:5]) + (f", and {len(upper) - 5} more" if len(upper) > 5 else "")
-        return both(VERIFIED, f"{listed} in environment '{one_line(declared, 120)}'")
+        return both(VERIFIED, f"{listed} in environment '{one_line(declared, 120)}'",
+                    named_secrets=upper if all(any(envs) for envs in wanted.values()) else ())
 
     # Events that only someone with write access can cause, and whose payload outsiders do not write.
     _WRITE_ACCESS_EVENTS = frozenset({"push", "workflow_dispatch", "schedule", "release"})
@@ -3168,6 +4068,9 @@ class WorkflowRules:
             unsure.append("no key goes to AWF's API proxy or the command, and the checker recognises no agent in the "
                           "confined command, so it cannot tell where the agent runs: an agent that needs no key "
                           "could run in a step before or beside the one that holds the key")
+        upload = self._artifact_upload(job)
+        if upload:
+            unsure.append(f"{upload}. Another job could load the artifact with access to its own credentials")
         if not held and not problems and not unsure:
             # Every secret of the job is in a confined step and none was placed: nothing to show.
             unsure.append("no secret of the job is placed by the checker in a step that uses the action")
@@ -3216,18 +4119,21 @@ class WorkflowRules:
         written = job.raw.get("environment")
         return written.get("name") if isinstance(written, dict) else written
 
-    def _publishing_capabilities(self, job: Job) -> list[str]:
+    def _publishing_capabilities(self, job: Job, builds: bool = True) -> list[str]:
         """What a job holds that publishing needs: `packages: write`, a step that uses an action listed
         under `publishing_actions`, a secret whose name says it publishes. `id-token: write` alone is not
         counted: OBAAF's own templates use it to sign and attest, which is what a repository should do,
-        and OBAAF-GHA-004 reports it for an agent job."""
+        and OBAAF-GHA-004 reports it for an agent job. With `builds=False` (OBAAF-GHA-006 on a job that is
+        not a release job, flagship slice 2d.14), a `docker/build-push-action` step that cannot push is not
+        counted: it builds an image, and an image build with a GitHub Actions cache is common in jobs that
+        publish nothing."""
         capabilities = []
         permissions = job.permissions
         if permissions is not None and permissions.level("packages") == "write":
             capabilities.append("packages: write")
         for step in job.steps:
             action = next((a for a in self.detection.get("publishing_actions", []) if step.uses_action(a)), None)
-            if action:
+            if action and (builds or not _image_build_only(step, job)):
                 capabilities.append(f"uses {step.action}")
         patterns = [re.compile(p, re.I) for p in self.detection.get("publishing_secret_patterns", [])]
         capabilities += [f"secret {name}" for name in sorted(job.secret_names())
@@ -3280,6 +4186,7 @@ class WorkflowRules:
         effects = job.call_effects if job.called else None
         if not job.in_lane("release"):
             self.release_capability(job)
+            self.may_publish_caches(job)
             return
         if effects is not None and effects.lane_given:
             # Flagship slice 2d.4b3b: a job in the release lane only because a workflow it calls releases has
@@ -3411,6 +4318,135 @@ class WorkflowRules:
                          "Step '{step}' uploads after a provenance check only; approvals and agent "
                          "records are not checked (use obaaf verify release).", job, partial[0], severity="medium",
                          kind="provenance-only", steps=Fact([self._release_step(s) for s in partial], ""))
+
+    def may_publish_caches(self, job: Job) -> None:
+        """OBAAF-GHA-006 for a job nothing puts in the release lane that holds what publishing needs and
+        restores a cache, directly or through a job it needs and downloads from (flagship slice 2d.14, #289).
+        Release jobs are recognised by lists of actions and commands, which miss many (`uv build publish`
+        in zizmor's test workflow `cache-poisoning.yml`), and code from a poisoned cache entry runs with
+        what the job holds whether or not the job itself publishes: it can publish with it. So such a job is
+        reported at medium, as one the checker cannot tell releases. What it holds is a fact, so an
+        acceptance written for one credential does not cover another one added later. Nothing when the job
+        holds nothing for publishing, or restores nothing its cache-mode lets through; a job with no cache
+        step gets no `no-cache-mode` finding, which is for release jobs. A job that calls a workflow of the
+        repository is read for the jobs it needs, as for a release job (`_jobs_feeding`); a cache restored in
+        the workflow it calls is read there, with the secret names that workflow's jobs use, so a credential
+        the caller passes under another name is not counted."""
+        mode = job.cache_mode
+        # A step that uses a local action is taken to restore unless its steps were read as the job's, which
+        # then decide (slice 2d.4b2's second pass): a local action is not a cache step by being local.
+        # In the second pass a local action inside one is followed at once by its steps, named after it.
+        read = {id(steps[0].via.raw) for steps in job.local_steps.values() if steps and steps[0].via is not None}
+        read |= {id(s.via.raw) for s in job.steps if s.via is not None}
+
+        def restores(n: int, step: Step) -> bool:
+            if not _local_like(step.uses):
+                return self._restores_cache(step)
+            if step.via is None:
+                return id(step.raw) not in read
+            after = job.steps[n + 1] if n + 1 < len(job.steps) else None
+            return not (after is not None and after.via is step.via
+                        and after.name.startswith((f"{step.name}: ", f"{step.name} > ")))
+
+        cache_steps = [] if _forbids_restores(mode) else [s for n, s in enumerate(job.steps) if restores(n, s)]
+        # What the job holds is worked out only for a job that restores or downloads, and the jobs it needs
+        # only for one that holds something: reading what callers grant costs, and so does following a long
+        # chain of `needs` (the lead found a benchmark of 2,000 callers eight times slower when the first was
+        # worked out for every job, and the review a chain of 2,000 downloading jobs eighteen times slower
+        # when the second was).
+        downloads = self._downloads_artifacts(job)
+        if not cache_steps and not downloads:
+            return
+        held = self._may_publish_holds(job)
+        if not held:
+            return
+        feeding = self._jobs_feeding(job) if downloads else []
+        if cache_steps:
+            names = ", ".join(f"'{s.name}'" for s in cache_steps)
+            values = {"capabilities": held, "steps": Fact([self._cache_step(s) for s in cache_steps], names),
+                      "mode": Fact(mode or "", mode or "not set")}
+            controls = self._callers_cache_controls()
+            if job.self_hosted:
+                self.add("OBAAF-GHA-006", cache_steps[0].line,
+                         "Job '{job}' holds what publishing needs ({capabilities}) and restores caches in {steps}, "
+                         "and its cache-mode is {mode}. The checker cannot tell whether it releases; either way, "
+                         "code from a poisoned cache entry would run while it holds them. This job also runs on a "
+                         "self-hosted runner, where local caches (such as an engine's derived-data cache) are "
+                         "outside what this check can see.", job, cache_steps[0], severity="medium",
+                         kind="capability-restores-self-hosted", controls=controls, **values)
+            else:
+                self.add("OBAAF-GHA-006", cache_steps[0].line,
+                         "Job '{job}' holds what publishing needs ({capabilities}) and restores caches in {steps}, "
+                         "and its cache-mode is {mode}. The checker cannot tell whether it releases; either way, "
+                         "code from a poisoned cache entry would run while it holds them.", job, cache_steps[0],
+                         severity="medium", kind="capability-restores", controls=controls, **values)
+        if feeding:
+            self.add("OBAAF-GHA-006", job.line,
+                     "Job '{job}' holds what publishing needs ({capabilities}), downloads artifacts and needs {jobs}, "
+                     "which restore caches and whose cache-mode does not forbid it. The checker cannot tell whether "
+                     "it releases what they built; if it does, a poisoned cache entry can reach what it releases.",
+                     job, severity="medium", kind="capability-needed-job-restores",
+                     controls=self._callers_cache_controls("on the jobs it needs that restore"), capabilities=held,
+                     jobs=Fact(feeding, ", ".join(f"'{j}'" for j in feeding)))
+
+    def _may_publish_holds(self, job: Job) -> list[str]:
+        """What a job holds that publishing needs, for OBAAF-GHA-006 on a job that is not a release job
+        (flagship slice 2d.14): what OBAAF-GHA-015 counts (`_publishing_capabilities`), less an image build
+        that cannot push; a reference that can read every secret (`toJSON(secrets)`, a computed name,
+        `secrets: inherit`), since which secrets exist is not in the workflow (as OBAAF-GHA-018 reads it);
+        and a token with `contents: write`, which can create a GitHub release and upload its assets, in a job
+        that a release event, a tag push, a tag's creation or another workflow's call can start
+        (`_release_or_tag_events`). On other events `contents: write` is not counted: it is common in jobs
+        that commit back, which this rule would then take for jobs that may release. A job of a called
+        workflow that declares no permissions holds what the jobs of this repository that call it grant
+        (`Job.granted_by_callers`, as OBAAF-GHA-003 and 004 read it); permissions nobody declares, the
+        repository's default, are not counted (OBAAF-GHA-009 reports them)."""
+        held = self._publishing_capabilities(job, builds=False)
+        if any(name.startswith("*") for name in job.secret_names()):
+            held.append("every secret, through a reference that is not one literal name or secrets: inherit")
+        permissions = job.permissions
+        if permissions is None:
+            granted = {scope: [entry for entry in job.granted_by_callers(scope) if entry.endswith(f"{scope}: write")]
+                       for scope in ("packages", "contents")}
+        else:
+            granted = {scope: [""] if permissions.level(scope) == "write" else [] for scope in ("packages", "contents")}
+        events = self._release_or_tag_events(job) if granted["contents"] else []
+        for scope in ("packages", "contents"):
+            if not granted[scope] or (scope == "contents" and not events):
+                continue
+            on = f", on {' or '.join(events)}" if scope == "contents" else ""
+            # The callers that grant it, as one bounded entry: the first three named, and a digest of all, so
+            # the fact does not grow with the callers and a change to any changes it.
+            wheres = sorted({entry[:-len(f" grants {scope}: write")] for entry in granted[scope] if entry})
+            if not wheres:
+                text = f"{scope}: write{on}"
+            elif len(wheres) <= 3:
+                text = f"{scope}: write{on}, granted by {', '.join(wheres)}"
+            else:
+                digest = hashlib.sha256("\n".join(wheres).encode("utf-8", "surrogatepass")).hexdigest()[:16]
+                text = (f"{scope}: write{on}, granted by {', '.join(wheres[:3])} and {len(wheres) - 3} more "
+                        f"(sha256:{digest})")
+            if text not in held:
+                held.append(text)
+        return held
+
+    def _release_or_tag_events(self, job: Job) -> list[str]:
+        """The events among those that can start the job that can be for a release or a tag: `release`,
+        `create` (a branch's or a tag's creation), a `push` unless its filters keep tags out, and
+        `workflow_call`, which stands for a calling workflow's event, any event. GitHub runs a push workflow
+        for a tag unless it names `branches` or `branches-ignore` and neither `tags` nor `tags-ignore` (path
+        filters are not applied to tags). A filter written as anything but a mapping, or with its keys in
+        another spelling, is read as letting tags through, the wider reading."""
+        triggers = job.triggers()
+        events = [event for event in ("release", "create") if event in triggers]
+        if "push" in triggers and "push" in self.wf.triggers:
+            config = self.wf.triggers.get("push")
+            keys = {key for key in config if isinstance(key, str)} if isinstance(config, dict) else set()
+            if keys & {"tags", "tags-ignore"} or not keys & {"branches", "branches-ignore"}:
+                events.append("a tag push")
+        if "workflow_call" in triggers:
+            events.append("a call from another workflow")
+        return events
 
     def _called_caches(self, job: Job, effects: CallEffects) -> None:
         """OBAAF-GHA-006 for a release job that calls workflows of the repository (flagship slice 2d.4b3b):
@@ -3602,26 +4638,142 @@ class WorkflowRules:
             env = scope.get("env") if isinstance(scope, dict) else None
             if isinstance(env, str):
                 return True
-            if isinstance(env, dict) and any(str(key).strip().upper() in ("BASH_ENV", "ENV")
-                                             or str(key).strip().upper().startswith("BASH_FUNC") for key in env):
+            # Flagship slice 2d.13: every name that changes what the step's shell or the check's program
+            # runs (`steers`), where only `BASH_ENV`, `ENV` and `BASH_FUNC...` counted, and a name written
+            # as an expression, which may be any of them.
+            if isinstance(env, dict) and any(steers(key) or expr_mod.OPEN in str(key) for key in env):
+                return True
+        # A container job's steps run with the container's `env` and its `options` (`-e NAME=...`); the
+        # runner takes the PATH from the container too (the third review of slice 2d.13). What its image
+        # holds, the `obaaf` it ships included, is not read.
+        container = job.raw.get("container")
+        if isinstance(container, dict):
+            env = container.get("env")
+            if (env is not None and not isinstance(env, dict)) or (isinstance(env, dict) and any(
+                    steers(key) or expr_mod.OPEN in str(key) for key in env)):
+                return True
+            options = container.get("options")
+            if options is not None and (not isinstance(options, str) or self._CONTAINER_ENV_RE.search(options)):
                 return True
         return self._first_shell_change(job) < step.index
 
+    # In a container's `options`: an environment variable given to it, by name or from a file.
+    # Short options may be joined (`-ite NAME`) and a value written beside them (`-eNAME=...`).
+    _CONTAINER_ENV_RE = re.compile(r"(?<![\w-])(-[A-Za-z]*e|--env)", re.I)
+
     def _first_shell_change(self, job: Job) -> int:
-        """Where the first step of `job` whose script or `env` names `BASH_ENV`, `BASH_FUNC` or `GITHUB_PATH`
-        is, or the number of its steps when none does, worked out once per job: each check of each upload
-        read every earlier step again, which took a job of 1,000 steps (as slice 2d.4b2's reading of
-        local actions can give one) a minute and a half."""
+        """Where the first step of `job` that may change, for the steps after it, what their shell or the
+        programs they name run is (`_changes_later_steps`), or the number of its steps when none may,
+        worked out once per job: each check of each upload read every earlier step again, which took a
+        job of 1,000 steps (as slice 2d.4b2's reading of local actions can give one) a minute and a half."""
         memo = self.__dict__.setdefault("_shell_changes", {})
         found = memo.get(id(job))
         if found is None or found[0] is not job:
-            first = len(job.steps)
-            for position, earlier in enumerate(job.steps):
-                if re.search(r"BASH_ENV|BASH_FUNC|GITHUB_PATH", earlier.scripts() + " " + str(earlier.raw.get("env", ""))):
+            first = 0 if job.steps and self._job_sets_later_steps(job) else len(job.steps)
+            for position, earlier in enumerate(job.steps[:first]):
+                if self._changes_later_steps(job, earlier):
                     first = position
                     break
             found = memo[id(job)] = (job, first)
         return found[1]
+
+    # What a step's text may use to set variables or the PATH for the steps after it, other than a write
+    # to a file command `_github_env_names` reads: bash's own names, the toolkit's calls (github-script and
+    # JavaScript actions), the workflow commands a runner obeys when `ACTIONS_ALLOW_UNSECURE_COMMANDS` is
+    # true, and the runner's folder that holds the file commands' files. Any letter case.
+    _SETS_LATER_STEPS_RE = re.compile(r"BASH_ENV|BASH_FUNC|GITHUB_PATH|addPath|add-path|set-env|exportVariable|"
+                                      r"_runner_file_commands|ACTIONS_ALLOW_UNSECURE_COMMANDS", re.I)
+    # The runner's own contexts for its files (`github.env`, `github.path` and the others), or the whole
+    # `github` context, which holds them and can be written out as text.
+    _FILE_CONTEXTS = ({"github"}, {"env", "path", "output", "state", "step_summary"})
+
+    def _sets_later_steps_text(self, text: str) -> bool:
+        """Whether text that is not a bash script the checker reads names a way to set variables or the PATH
+        for later steps: one of `_SETS_LATER_STEPS_RE`, a file command's variable, `${!GITHUB_E*}`, or an
+        expression that reaches the runner's contexts for its files."""
+        squeezed = _squeeze(text)
+        if self._SETS_LATER_STEPS_RE.search(squeezed) or _NAMES_FILE_VAR.search(squeezed) \
+                or _lists_file_vars(squeezed):
+            return True
+        try:
+            return any(expr_mod.reaches(ref.path, self._FILE_CONTEXTS, ref.extracted)
+                       for body in expr_mod.bodies(text) for ref in expr_mod.refs(body))
+        except expr_mod.TooComplex:
+            return True
+
+    _VALUES_READ = 20_000
+
+    @classmethod
+    def _values_text(cls, value) -> str:
+        """The keys, strings and other values in a value of lists and mappings, as plain text, each node once
+        (a YAML alias can make one hold itself): a line break stays a line break, which `str()` of a mapping
+        writes as two characters (the second review of slice 2d.13). More than `_VALUES_READ` of them
+        give text that names GITHUB_ENV, so the reading fails closed."""
+        out: list = []
+        stack, seen = [value], set()
+        while stack:
+            if len(out) > cls._VALUES_READ:
+                return "GITHUB_ENV (more values than the checker reads)"
+            node = stack.pop()
+            if isinstance(node, (list, dict)):
+                if id(node) in seen:
+                    continue
+                seen.add(id(node))
+                if isinstance(node, dict):
+                    for key, item in node.items():
+                        out.append(str(key))
+                        stack.append(item)
+                else:
+                    stack.extend(node)
+            elif node is not None:
+                out.append(str(node))
+        return "\n".join(out)
+
+    def _job_sets_later_steps(self, job: Job) -> bool:
+        """Whether the workflow's or the job's `env`, `defaults` or the job's `strategy` hold such text: a
+        step can run it (`eval "$CMD"`, `${{ env.CMD }}`, `${{ matrix.cmd }}`, a default `shell`), so every
+        step of the job may set variables for the steps after it (the second review of slice 2d.13)."""
+        parts = [self.wf.raw.get("env"), self.wf.raw.get("defaults"), job.raw.get("env"), job.raw.get("defaults"),
+                 job.raw.get("strategy")]
+        return self._sets_later_steps_text(self._values_text(parts))
+
+    def _changes_later_steps(self, job: Job, step: Step) -> bool:
+        """Whether a step's text may change, for the steps after it in the job, what their shell or the
+        programs they name run (flagship slices 2d.2e and 2d.13). Before 2d.13 only `BASH_ENV`,
+        `BASH_FUNC` and `GITHUB_PATH` were looked for, so a step that wrote `PATH=...` (or
+        `SHELLOPTS=noexec`, with which bash reads a step's script and runs none of it) to GITHUB_ENV
+        left a later check counted. The runner gives every later step of the job what a step writes to
+        that file, and refuses only `NODE_OPTIONS` (actions/runner v2.338.2, `SetEnvFileCommand` in
+        src/Runner.Worker/FileCommandManager.cs).
+
+        A bash or sh `run` script is read by `_github_env_names`: True when it cannot read the script's
+        writes to the runner's files or a name written to GITHUB_ENV `steers`. Everything else about the
+        step (its `shell`, `env` and inputs, and the whole of a step that is not such a script, as code
+        in another language or an action) is text the checker does not read as bash: True when
+        `_sets_later_steps_text` finds a way to set variables for later steps in it, a file command's
+        variable included. Only the workflow's text is read: a name or a path a script puts together
+        otherwise, and what a program or an action the step runs writes, are not."""
+        shell = step.raw.get("shell")
+        beside = self._values_text([step.raw.get("env"), step.raw.get("with"), shell])
+        bash = isinstance(step.raw.get("run"), str) and bool(step.run) and not step.uses \
+            and self._step_shell(job, step) in ("bash", "sh")
+        if not bash:
+            return self._sets_later_steps_text(step.scripts() + "\n" + beside)
+        if self._sets_later_steps_text(beside):
+            return True
+        squeezed = _squeeze(step.run)
+        if self._SETS_LATER_STEPS_RE.search(squeezed):
+            return True
+        try:
+            if any(expr_mod.reaches(ref.path, self._FILE_CONTEXTS, ref.extracted)
+                   for body in expr_mod.bodies(step.run) for ref in expr_mod.refs(body)):
+                return True
+        except expr_mod.TooComplex:
+            return True
+        if not _NAMES_FILE_VAR.search(squeezed) and not _lists_file_vars(squeezed):
+            return False
+        names = _github_env_names(step.run)
+        return names is None or any(steers(name) for name in names)
 
     def _verify_kind(self, job: Job, step: Step) -> str | None:
         """'full' for a release verification that stops the job on failure, 'provenance' for a
@@ -3708,9 +4860,7 @@ class WorkflowRules:
         # downloads: a called release job's, for a job the call makes a release job, and any called job's, for
         # one declared a release job, whose call is the release it declares. A needed job that calls a workflow
         # restores what the jobs it calls restore.
-        effects = job.call_effects if job.called else None
-        called = effects is not None and (effects.downloads if effects.lane_given else effects.downloads_any)
-        if not called and not any(s.uses_action("actions/download-artifact") for s in job.steps):
+        if not self._downloads_artifacts(job):
             return []
         out, seen, todo = [], {job.id}, list(job.needs)
         while todo:
@@ -3727,6 +4877,14 @@ class WorkflowRules:
                 out.append(name)
             todo += dep.needs
         return sorted(out)
+
+    @staticmethod
+    def _downloads_artifacts(job: Job) -> bool:
+        """Whether a job downloads the run's artifacts: a step that uses `actions/download-artifact`, or, for a
+        job that calls workflows of the repository, a called job that does (`_jobs_feeding`)."""
+        effects = job.call_effects if job.called else None
+        called = effects is not None and (effects.downloads if effects.lane_given else effects.downloads_any)
+        return called or any(s.uses_action("actions/download-artifact") for s in job.steps)
 
     @staticmethod
     def _cache_step(step: Step) -> str:
@@ -4450,23 +5608,200 @@ class WorkflowRules:
                     return True
         return False
 
+    # What `npm publish` may be given for its provenance to be credited (flagship slice 2d.12, from its
+    # review). npm's option reader (nopt) takes `true` or `false` after a boolean option as its value,
+    # reads `no-` in any case after any number of dashes, and gives an option that takes a value the next
+    # word, `--provenance` included, so only a closed list of words is read: anything else, a folder or a
+    # package to publish among them, keeps the upload counted.
+    _NPM_PUBLISH_FLAGS = frozenset({"--provenance", "--provenance=true", "--access=public"})
+    _NPM_PUBLISH_VALUES = {"--access": re.compile(r"public\Z"), "--tag": re.compile(r"[A-Za-z0-9][A-Za-z0-9._]*\Z")}
+    _NPM_TAG_RE = re.compile(r"--tag=[A-Za-z0-9][A-Za-z0-9._]*\Z")
+    # Characters in a word that the shell may turn into other words, or that say a value is not known.
+    _NPM_UNREAD_RE = re.compile(r"[$`*?\[\]{}~\\]|OBAAF_EXPRESSION")
+    # The Node.js versions that ship npm 9.5.0 or later, which npm's documentation asks for (line 37 of
+    # generating-provenance-statements.mdx at 507a73e): Node.js 20.0.0 shipped npm 9.6.4; an older one
+    # may ship npm 8, which does not know `--provenance`.
+    _NODE_VERSION_RE = re.compile(r"v?([0-9]+)(\.([0-9]+|x|\*)){0,2}\Z")
+    _NODE_ALIASES = frozenset({"lts/*", "latest", "current", "node"})
+    _SETUP_NODE_INPUTS = frozenset({"node-version", "registry-url", "scope", "cache", "package-manager-cache",
+                                    "always-auth", "check-latest"})
+    # The commands an earlier step may run: they install the package's dependencies and run its own scripts,
+    # and change neither npm nor the job's environment in the workflow's text.
+    _NPM_EARLIER_RE = re.compile(r"npm (ci|install|test|run [A-Za-z0-9:_.-]+)\Z")
+    # Variables that change what `npm`, Node.js or the shell runs, or where npm sends the package, in the
+    # publishing step's, the job's or the workflow's `env`; also any `BASH...`, `LD_...`, `NPM_CONFIG_...`
+    # and `NODE_...` name but `NODE_AUTH_TOKEN` (`_npm_env_changes`). Bash runs `SHELLOPTS` and expands
+    # `PS4` at start (found by the second review of slice 2d.12).
+    _NPM_ENV_KEYS = frozenset({"PATH", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "EXECIGNORE"})
+    _NPM_REGISTRY = frozenset({"https://registry.npmjs.org", "https://registry.npmjs.org/"})
+
+    def _npm_env_changes(self, env) -> bool:
+        """Whether an `env` mapping may change what `npm`, Node.js or the shell runs, or where npm sends the
+        package; an `env` that is not a mapping (one expression) may."""
+        if env is None:
+            return False
+        if not isinstance(env, dict):
+            return True
+        for key in env:
+            name = str(key).strip().upper()
+            if name in self._NPM_ENV_KEYS or name.startswith(("BASH", "LD_", "NPM_CONFIG_")) or (
+                    name.startswith("NODE_") and name != "NODE_AUTH_TOKEN"):
+                return True
+        return False
+
+    def _npm_provenance_publish(self, job: Job, step: Step) -> bool:
+        """Whether a step publishes to npm with provenance that npm signs as it publishes (flagship slice
+        2d.12, #201). npm's CLI signs in `buildMetadata` before the request that sends the package, and
+        throws when it cannot (libnpmpublish's `publish.js` at 787f152), so such a step publishes nothing
+        without provenance. It is read only in the form npm's documentation gives, and only where the
+        workflow's text leaves nothing that could change npm or what it is given:
+
+        - the step's whole script is one command, `npm publish` followed only by `--provenance` (or
+          `--provenance=true`), `--access public` and `--tag NAME`, each read as written;
+        - the job's permissions, or its workflow's when it declares none, give `id-token: write`;
+        - every runner it may run on is GitHub-hosted, and it has no `container` and no `services`;
+        - its shell is a POSIX shell the checker reads, nothing runs beside it, and no `env` of the step, the
+          job or the workflow is one expression or names `PATH`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+          `EXECIGNORE`, a `BASH...`, `LD_...` or `NPM_CONFIG_...` variable, or a `NODE_...` one but
+          `NODE_AUTH_TOKEN`;
+        - an earlier step is `actions/setup-node` with a Node.js version that ships npm 9.5.0 or later (20
+          and up, or `lts/*`, `latest`, `current` or `node`), and every earlier step, with no `env`, `if` or
+          `continue-on-error`, is `actions/checkout`, such a setup-node step with no input beyond
+          `node-version`, `registry-url` (npm's own registry), `scope`, `cache`, `package-manager-cache`,
+          `always-auth` and `check-latest`, or a `run` step whose lines are `npm ci`, `npm install`,
+          `npm test` or `npm run NAME`, in the runner's default shell (neither the job nor the workflow sets
+          a default `shell`).
+
+        Any other form (`NPM_CONFIG_PROVENANCE`, `publishConfig`, `.npmrc`, trusted publishing, pnpm, Yarn,
+        an action that publishes, a folder or package to publish, any other option or earlier step) is not
+        read, and the upload is counted as it was before."""
+        if step.uses or not isinstance(step.run, str) or not step.run.strip():
+            return False
+        perms = job.permissions
+        if perms is None or perms.level("id-token") != "write":
+            return False
+        sets = job.runner_label_sets()
+        if not sets or not all(labels and all(is_hosted_label(str(label).strip()) for label in labels)
+                               for labels in sets) or job.raw.get("container") is not None \
+                or job.raw.get("services") is not None:
+            return False        # a container or a service is another image, which can change npm (third review)
+        shell = self._failfast_shell(job, step)
+        if shell is None or self._bash_env(job, step):
+            return False
+        if any(self._npm_env_changes(scope.get("env")) for scope in (step.raw, job.raw, self.wf.raw)
+               if isinstance(scope, dict)):
+            return False
+        # Nothing runs beside it (a parallel group, or an earlier step left running in the background), and
+        # the steps before it read with the job's and the workflow's own default shell, if they set one.
+        earlier = job.steps[:step.index]
+        if step.group is not None or any(other.background or other.group is not None for other in earlier):
+            return False
+        for scope in (job.raw, self.wf.raw):
+            defaults = scope.get("defaults") if isinstance(scope, dict) else None
+            if defaults is not None and not (isinstance(defaults, dict) and set(map(str, defaults)) <= {"run"} and (
+                    isinstance(defaults.get("run"), dict) and "shell" not in defaults["run"])):
+                return False
+        if not all(self._npm_earlier_step_reads(job, other) for other in earlier) or not any(
+                other.action and other.action.lower() == "actions/setup-node" for other in earlier):
+            return False
+        words = self._one_command(job, step)
+        if words is None or words[:2] != ["npm", "publish"]:
+            return False
+        rest = words[2:]
+        provenance = False
+        at = 0
+        while at < len(rest):
+            word = rest[at]
+            if word in self._NPM_PUBLISH_FLAGS or self._NPM_TAG_RE.match(word):
+                provenance = provenance or word.startswith("--provenance")
+                at += 1
+            elif word in self._NPM_PUBLISH_VALUES and at + 1 < len(rest) and \
+                    self._NPM_PUBLISH_VALUES[word].match(rest[at + 1]):
+                at += 2
+            else:
+                return False
+        return provenance
+
+    def _one_command(self, job: Job, step: Step) -> list[str] | None:
+        """The words of a `run` step's script when it is one command, on one line or continued with a
+        backslash at a line's end, with nothing else but comment lines and blank ones, every word read as
+        written; else None."""
+        lines = [line for line in step.run.replace("\\\n", "").split("\n")
+                 if line.strip() and not line.strip().startswith("#")]
+        shell = self._failfast_shell(job, step)
+        if len(lines) != 1 or "${{" in step.run or shell is None:
+            return None
+        commands, complete = binding_commands(_expressions_for_shell(step.run), *shell)
+        if not complete or len(commands) != 1:
+            return None
+        words = commands[0]
+        if any(not w or self._NPM_UNREAD_RE.search(w) for w in words):
+            return None
+        try:
+            if shlex.split(lines[0], comments=True) != words:
+                return None     # an `|| exit` after it, or quoting the reader turned into other words
+        except ValueError:
+            return None
+        return words
+
+    def _npm_earlier_step_reads(self, job: Job, step: Step) -> bool:
+        """Whether a step before `npm publish --provenance` is one that leaves npm as it is (see
+        `_npm_provenance_publish`)."""
+        # No earlier step is given an `env` (an action runs in its own Node.js, which `NODE_OPTIONS` can
+        # make load a file; found by the second review of slice 2d.12), and none may be skipped or fail
+        # without stopping the job.
+        if step.raw.get("env") is not None or step.raw.get("if") is not None or step.raw.get("continue-on-error") \
+                is not None:
+            return False
+        if step.uses:
+            if step.action and step.action.lower() == "actions/checkout":
+                return True
+            if not (step.action and step.action.lower() == "actions/setup-node"):
+                return False
+            given = step.raw.get("with")
+            if not isinstance(given, dict) or set(map(str, given)) - self._SETUP_NODE_INPUTS:
+                return False
+            registry = given.get("registry-url")
+            if registry is not None and as_text(registry).strip() not in self._NPM_REGISTRY:
+                return False
+            version = given.get("node-version")
+            if version is None or isinstance(version, (bool, float)) or not isinstance(version, (str, int)):
+                return False        # the runner's own Node.js, whose npm the checker does not know
+            text = as_text(version).strip()
+            match = self._NODE_VERSION_RE.match(text)
+            return text in self._NODE_ALIASES or bool(match and int(match.group(1)) >= 20)
+        if not isinstance(step.run, str) or step.raw.get("shell") is not None:
+            return False
+        lines = [" ".join(line.split()) for line in step.run.split("\n") if line.strip() and not line.strip().startswith("#")]
+        return bool(lines) and all(self._NPM_EARLIER_RE.match(line) for line in lines)
+
     def provenance_missing(self) -> None:
         uploading = [j for j in self.wf.jobs.values() if j.in_lane("release") and j.upload_steps(self.detection)]
         if not uploading:
             return
         if any(self._signs_provenance(j) for j in self.wf.jobs.values()):
             return
+        # An upload that is `npm publish --provenance`, in the form `_npm_provenance_publish` reads, signs
+        # its own provenance (flagship slice 2d.12); the other uploads are weighed as before.
+        def unsigned(j: Job) -> list[Step]:
+            return [s for s in j.upload_steps(self.detection) if not self._npm_provenance_publish(j, s)]
+
+        uploading = [j for j in uploading if unsigned(j)]
+        if not uploading:
+            return
         # Provenance signed by another workflow counts when every upload is gated on verifying it, by a
         # check that comes before it and stops it (flagship slice 2d.2e: before, any verify text anywhere
         # in the job counted, after the upload or in an `echo` included).
         unverified = [j for j in uploading
-                      if any(kind is None for _s, kind in self._upload_checks(j, j.upload_steps(self.detection)))]
+                      if any(kind is None for _s, kind in self._upload_checks(j, unsigned(j)))]
         if not unverified:
             return
         # One finding for the workflow. It is reported on the first publishing job that is a release
         # job before anything else, as it was when a job had one lane, so an accepted finding stays
         # where the baseline has it; a job that is also an agent or effect job is named only when
-        # there is no other.
+        # there is no other. A job whose every upload is a credited `npm publish --provenance` is not
+        # among them (slice 2d.12), so the finding can move to the next publishing job, and an acceptance
+        # that names the first one no longer matches.
         job = next((j for j in unverified if j.lane == "release"), unverified[0])
         self.add("OBAAF-GHA-017", job.line,
                  "Job '{job}' publishes artifacts, but no job in this workflow signs provenance for them.", job)

@@ -72,6 +72,20 @@ class TheTwoExampleFiles(unittest.TestCase):
         "Checked by obaaf ": "the version that checked",
     }
 
+    TODO = {
+        "unpinned": [
+            "What to do next: 1 finding, 1 thing to do",
+            "1. An action, reusable workflow or container image lacks a verifiable immutable pin. (1 low)",
+            "   Pin remote actions and workflows to full reviewed commit SHAs and images to SHA-256 digests.",
+            "Optional bulk acceptance: 1 eligible outstanding finding (1 low). Review them before supplying "
+            "the owner, reason and expiry.",
+            "Choose an unused path for NEW_BASELINE_FILE.",
+            "   obaaf check unpinned.yml --fail-on low --write-baseline=NEW_BASELINE_FILE --owner OWNER "
+            "--reason REASON --expires YYYY-MM-DD",
+        ],
+        "pinned": ["What to do next: 0 findings, 0 things to do"],
+    }
+
     def test_both_pages_show_the_same_files_and_report(self):
         self.assertEqual(example_files("index.html"), example_files("quickstart.html"))
         report = [block for block in blocks("index.html") if block.startswith("unpinned.yml\n")]
@@ -108,7 +122,10 @@ class TheTwoExampleFiles(unittest.TestCase):
         before = next(block for block in blocks("index.html") if block.startswith("unpinned.yml\n"))
         after = next(block for block in blocks("index.html") if block.startswith("1 workflow file(s) checked.\n"))
         for name, shown in (("unpinned", before), ("pinned", after)):
-            kept, seen = self._without_added(reports[name][1])
+            lines = reports[name][1].splitlines()
+            closing = self.TODO[name] + [f"Checked by obaaf {__version__}."]
+            self.assertEqual(lines[-len(closing):], closing)
+            kept, seen = self._without_added("\n".join(lines[:-len(closing)] + lines[-1:]))
             self.assertEqual(kept, [line for line in shown.splitlines() if line.strip()],
                              f"the development report of {name}.yml has lines the pages do not account for")
             expected = set(self.ADDED) if name == "unpinned" else set(self.ADDED) - {"        Why: "}
@@ -116,7 +133,7 @@ class TheTwoExampleFiles(unittest.TestCase):
 
     def test_the_added_lines_are_where_the_pages_say(self):
         """At the top "Accepted risk: none" and the count; the "Why:" line under the finding, before its
-        requirement; at the end the three closing lines, the last naming the version the banner names."""
+        requirement; at the end the unconfigured-run guidance, to-do list and checker version."""
         lines = self._development_reports()["unpinned"][1].splitlines()
 
         def where(start: str) -> int:
@@ -141,7 +158,10 @@ class TheTwoExampleFiles(unittest.TestCase):
             words = text(name)
             for placed in ("a count of other findings at the top",
                            "a \"Why:\" line under the finding, saying why it matters",
-                           "and, at the end, what a check with no configuration file leaves out"):
+                           "and, at the end, what a check with no configuration file leaves out",
+                           "a to-do list immediately before the version that checked",
+                           "pinning guidance and an optional command to accept the one low finding",
+                           "zero findings and zero things to do"):
                 self.assertIn(placed, words, f"{name} no longer says where the added lines are")
 
 
@@ -165,10 +185,8 @@ jobs:
   triage:
     runs-on: {runs_on}
 {strategy}    steps:
-      - uses: anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # v1
-        with:
-          prompt: Triage this issue.
-"""
+      - run: claude -p "Triage this issue."
+{more}"""
 
 POLICY = "mode: enforce\nallow:\n  - api.anthropic.com\n"
 
@@ -180,7 +198,8 @@ class TheFirewallConditions(unittest.TestCase):
 
     def _gha020(self, workflow: dict | None = None, policy: str | None = POLICY, policy_name="egress-firewall.yaml",
                 single_file=False) -> str:
-        values = {"on": "issues", "permissions": "contents: read", "runs_on": "ubuntu-24.04-firewall", "strategy": ""}
+        values = {"on": "issues", "permissions": "contents: read", "runs_on": "ubuntu-24.04-firewall", "strategy": "",
+                  "more": ""}
         values.update(workflow or {})
         with TempDir() as tmp:
             (tmp / ".github" / "workflows").mkdir(parents=True)
@@ -205,7 +224,8 @@ class TheFirewallConditions(unittest.TestCase):
                           "sets mode: enforce",
                           "allows only plain host names, none of which is a public suffix or has one under it",
                           "the job's token has contents permission", "the job calls no reusable workflow",
-                          "no other workflow can call this one"):
+                          "no other workflow can call this one", "no step in the agent job may upload an artifact",
+                          "in a job that also runs a script"):
             self.assertIn(condition, words)
 
     def test_a_job_that_calls_a_reusable_workflow_is_not_cleared(self):
@@ -217,7 +237,7 @@ class TheFirewallConditions(unittest.TestCase):
             (tmp / ".github" / "workflows").mkdir(parents=True)
             (tmp / ".github" / "workflows" / "agent.yml").write_text(
                 AGENT_JOB.format(on="[issues, workflow_call]", permissions="contents: read",
-                                 runs_on="ubuntu-24.04-firewall", strategy=""), encoding="utf-8")
+                                 runs_on="ubuntu-24.04-firewall", strategy="", more=""), encoding="utf-8")
             (tmp / ".github" / "workflows" / "caller.yml").write_text(
                 "name: caller\non: issues\npermissions:\n  contents: read\njobs:\n  call:\n"
                 "    uses: ./.github/workflows/agent.yml\n", encoding="utf-8")
@@ -251,6 +271,10 @@ class TheFirewallConditions(unittest.TestCase):
             "a public suffix": dict(policy="mode: enforce\nallow:\n  - github.io\n"),
             "no contents permission": dict(workflow={"permissions": "issues: read"}),
             "callable by another workflow": dict(workflow={"on": "[issues, workflow_call]"}),
+            # Review of #357 (run `ouzel`): the page's "may upload an artifact" and "in a job that also runs a script".
+            "an upload step": dict(workflow={"more": f"      - uses: actions/upload-artifact@{'b' * 40}\n"
+                                                    "        with: {name: out, path: out}\n"}),
+            "actions/checkout beside the agent's step": dict(workflow={"more": f"      - uses: actions/checkout@{'b' * 40}\n"}),
         }
         for case, arguments in cases.items():
             with self.subTest(case):
@@ -279,9 +303,9 @@ jobs:
 
 
 class OBAAFGHA005(unittest.TestCase):
-    def test_five_controls_one_a_setting_check_does_not_read(self):
+    def test_five_controls_without_a_settings_snapshot(self):
         """The rules page: with named secrets the finding lists five controls and clears only when all
-        five are verified; one is a setting `obaaf check` does not read, so it is never cleared; a job
+        five are verified; the environment control needs a selected settings snapshot; a job
         that only declares an environment gets the finding with no controls."""
         words = text("rules.html")
         self.assertIn("lists five controls on the finding and clears it only when it has verified all five", words)

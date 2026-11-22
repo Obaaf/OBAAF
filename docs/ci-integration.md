@@ -49,12 +49,15 @@ Status 1. Both formats report `OBAAF-GHA-001` at line 10 and `OBAAF-CFG-001` at 
 
 ## A required check in GitHub Actions
 
-Use OBAAF's template [`obaaf-pipeline-check.yml`](../templates/github-actions/workflows/obaaf-pipeline-check.yml). Below it is word for word, with its placeholder `uses:` line replaced by the pin above; a test keeps the two the same. Save it as `.github/workflows/obaaf-pipeline-check.yml`.
+For a new workflow, save the standalone [OBAAF template](../templates/github-actions/workflows/obaaf-pipeline-check.yml) as `.github/workflows/obaaf-pipeline-check.yml` if that path is unused. The example below is the template word for word, with its placeholder `uses:` line replaced by the pin above; a test keeps the two the same.
+
+`obaaf init` writes its own workflow to that same path. If you already have it, keep it rather than saving the template over it: once its gate is on, a pull request can use only the baseline entries the target commit also holds, which the template does not check. **The generated workflow only reports until you turn its gate on**, for example with `obaaf fix --gate medium` ([upgrading.md](upgrading.md#enable-the-generated-workflows-gate)), so do that before you make its `check` job a required check. Turn the gate on before you edit the workflow by hand: once it is edited, that command no longer recognises it and prints instructions for a manual edit instead. To add code scanning, copy from the example below the line that writes the SARIF report, the step that keeps it and the `upload` job (the job sets its own `security-events: write` permission, which the `check` job does not have). Run the SARIF line on `source`, the folder the generated workflow checks the repository out into, and before the line that runs the gate, as the template does, so a failing gate still leaves a report. Review the change on its own. The rest of this section describes the template.
 
 What it does:
 
 - **It runs on every pull request and on pushes to `main`**, with a read-only token and without keeping the checkout's credentials.
 - **On a pull request it reads the checker configuration from the branch the pull request targets** (`.github/obaaf.yml`, `.github/obaaf.yaml` or `obaaf.yml`, the first that exists, as the checker chooses), so a pull request cannot accept its own findings by editing the configuration. It runs again when a pull request is moved to another target branch (the `edited` event, which also fires on a change to its title or description; a first-time contributor's run may then need approval again). The configuration must be a regular file there: the step cannot follow a link, and fails if it finds one. It can still edit the workflow file itself: require a code owner's review for `.github/` (the template's [CODEOWNERS example](../templates/github-actions/CODEOWNERS.example)).
+- **To use a saved settings snapshot**, pin a build whose help for the check command lists `--settings FILE`. Commit the output of `obaaf audit --snapshot-out .github/obaaf-settings.json` with code-owner review and set the repository variable `OBAAF_USE_SETTINGS` to `true`. The template reads the snapshot from the branch the pull request targets, as it reads the configuration, or from the push being checked. If the selected file is missing or the checker pin predates the option, the step fails. The example pin on this page predates the option. In a build that includes slice A4b (#301) the snapshot can change verdicts: OBAAF-GHA-005's environment control becomes verified or not met where it was "cannot tell". A finding that is then fixed leaves its baseline entry unmatched, and an unmatched entry fails the gate, so review and remove such an entry when you turn the variable on.
 - **The job writes the SARIF report without failing on findings, then runs the gate** at `--fail-on medium`, and keeps the report as an artifact for 14 days. A file the checker cannot read fails the job at the first command.
 - **The `upload` job is off until you set the repository variable `OBAAF_UPLOAD_SARIF` to `true`.** It then sends the report of each push to `main` to code scanning, under the category `obaaf`. Code scanning on a private repository needs GitHub Advanced Security.
 - **To require it**, wait for one run, then add the check `check` to the branch's ruleset. That is the job's id; if another workflow also has a job `check`, give this one a `name:` first, so the name you require is not shared. The template has no `merge_group` trigger: with a merge queue, add one, or the required check never reports there. A `merge_group` run reads the configuration in the queued change, as a push does; only the pull-request run reads the target branch's.
@@ -112,15 +115,43 @@ jobs:
             /.github/obaaf.yml
             /.github/obaaf.yaml
             /obaaf.yml
+            /.github/obaaf-settings.json
           sparse-checkout-cone-mode: false
 
       - name: Set up OBAAF
         uses: Obaaf/OBAAF/actions/setup-obaaf@a620b95cc18293f57ef385651354a43820dd32e6 # 0.4.0.dev0, not a release
 
       - name: Check workflows, code owners and agent instruction files
+        env:
+          USE_SETTINGS: ${{ vars.OBAAF_USE_SETTINGS }}
         run: |
           set -euo pipefail
           config=()
+          if [[ "${USE_SETTINGS:-}" == true ]]; then
+            # Opt in only after pinning a checker that supports the snapshot format.
+            help=$(obaaf check --help)
+            if [[ "$help" != *"--settings FILE"* ]]; then
+              echo "::error::Pin a version of OBAAF that supports --settings FILE."
+              exit 1
+            fi
+            snapshot=.github/obaaf-settings.json
+            if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+              if [[ -L .obaaf-base/.github || -L ".obaaf-base/$snapshot" || ! -f ".obaaf-base/$snapshot" ||
+                    -L .github || ! -d .github ]]; then
+                echo "::error::The selected settings snapshot must be a regular file on the target branch."
+                exit 1
+              fi
+              # Replace the PR copy at its policy path so CODEOWNERS is checked for that path.
+              staged=$(mktemp .github/.obaaf-settings-XXXXXX)
+              cp ".obaaf-base/$snapshot" "$staged"
+              mv -T "$staged" "$snapshot"
+            fi
+            if [[ -L .github || -L "$snapshot" || ! -f "$snapshot" ]]; then
+              echo "::error::The selected settings snapshot must be a regular file."
+              exit 1
+            fi
+            config+=(--settings "$snapshot")
+          fi
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             # The first that exists on the target branch, as the checker would choose; none is {}.
             echo '{}' > "$RUNNER_TEMP/obaaf.yml"
@@ -135,7 +166,7 @@ jobs:
               fi
             done
             rm -rf .obaaf-base
-            config=(--config "$RUNNER_TEMP/obaaf.yml")
+            config+=(--config "$RUNNER_TEMP/obaaf.yml")
           fi
           obaaf check . "${config[@]}" --format sarif --output obaaf.sarif --fail-on never
           obaaf check . "${config[@]}" --fail-on medium

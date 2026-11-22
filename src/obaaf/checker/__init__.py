@@ -18,7 +18,10 @@ import shlex
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from obaaf.settings_evidence import SettingsEvidence
 
 from obaaf import yamlutil
 from obaaf.catalog import Catalog, load
@@ -276,6 +279,9 @@ def _is_local_like(uses) -> bool:
     return isinstance(uses, str) and uses.strip().startswith(("./", "$/", ".\\"))
 
 
+_OUTSIDE = "its path leads outside the repository"
+
+
 def _local_action_folders(uses: str) -> tuple[list[str], str | None]:
     """The folders a local `uses` may name, relative to the repository, and why none can be read when
     there are none. Whether GitHub takes what follows an `@` as part of the path, and a backslash as a
@@ -292,7 +298,7 @@ def _local_action_folders(uses: str) -> tuple[list[str], str | None]:
     for candidate in candidates:
         folder = posixpath.normpath(candidate.strip("/") or ".")
         if folder == ".." or folder.startswith("../"):
-            return [], "its path leads outside the repository"
+            return [], _OUTSIDE
         if folder not in out:
             out.append(folder)
     return out, None
@@ -1450,7 +1456,7 @@ def _action_folder_script(root: Path, folder: str, run: str, workdir, commands: 
     return None
 
 
-def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list, depth: int = 0,
+def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions", commands: list, depth: int = 0,
                            seen: frozenset = frozenset(), cache: dict | None = None,
                            given: dict | None = None, given_env: dict | None = None) -> _ActionReading:
     """Whether the local action `uses` (`./path`, `$/path` or `.\\path`) runs an agent (flagship slice
@@ -1469,6 +1475,12 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
     out = _ActionReading()
     shown = wf_mod.one_line(uses, 120)
     folders, why = _local_action_folders(uses)
+    if not folders and why == _OUTSIDE:
+        # The runner keeps the whole repository of each action the job uses in one folder beside the
+        # workspace, so a path out of the repository can reach an agent's action the job never names
+        # (flagship slice 2d.11, from its review). The job is put in the agent lane, so no note says it is not.
+        out.agent = f"uses {shown}, a path out of its repository that can reach any action the job downloads"
+        return out
     if not folders:
         out.unread.append((shown, why))
         return out
@@ -1513,7 +1525,13 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
         len(raw["runs"]["steps"]) if isinstance(raw.get("runs"), dict) and isinstance(raw["runs"].get("steps"), list)
         else 1 for _, raw in raws)
     _charge(cache, cost)
-    if not raws:
+    linked_out = next((why for why in missing if why.endswith(" leads outside the repository")), None)
+    if linked_out:
+        # A link in the repository that leads out of it can reach the same folder as `./..` (flagship slice
+        # 2d.11, from its second review).
+        out.agent = (f"uses {shown}, whose {linked_out.removesuffix(' leads outside the repository')} leads "
+                     "outside the repository, where it can reach any action the job downloads")
+    elif not raws:
         out.unread.append((shown, "; ".join(dict.fromkeys(missing))))
     for folder, raw in raws:
         runs = raw.get("runs")
@@ -1560,10 +1578,11 @@ def _agent_in_local_action(root: Path, uses: str, actions: list, commands: list,
             _charge(cache, max(0, added) // _BYTES_PER_UNIT)
             out.unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             where = f"step '{wf_mod.one_line(step.name, 80)}' of the local action {shown}"
-            if out.agent is None:
-                prefix = next((p for p in actions if step.uses_action(p)), None)
-                if prefix is not None:
-                    out.agent = f"uses {step.action} in the local action {shown}"
+            if out.agent is None and actions.names(step.action):
+                out.agent = f"uses {step.action} in the local action {shown}"
+            if out.agent is None and wf_mod.leaves_repository(step.uses):
+                out.agent = (f"uses {wf_mod.one_line(step.uses, 80)} in the local action {shown}, a path out of its "
+                             "repository that can reach any action the job downloads")
             if out.agent is None:
                 text = step.agent_text(commands)
                 if text and wf_mod.matches_any(commands, text):
@@ -1636,7 +1655,7 @@ def _inputs_read(raws) -> set:
     return names
 
 
-def _apply_local_action_detection(workflow, root: Path | None, actions: list, commands: list,
+def _apply_local_action_detection(workflow, root: Path | None, actions: "wf_mod.AgentActions", commands: list,
                                   unread: list, errors: list, cache: dict | None = None) -> None:
     """Put a job whose agent runs inside a local action in the agent lane, and record the step for
     the egress control, as `_apply_script_detection` does for a script (flagship slice 2d.4a). With
@@ -2095,8 +2114,10 @@ def _job_local_steps(workflow, job, root: Path, unread: list, errors: list, stat
             job.local_steps[step.index] = inner
 
 
-def _agent_actions(catalog: "Catalog", config: "Config") -> list:
-    return list(catalog.detection.get("agent_actions", [])) + list(config.agents.get("actions", ()) or ())
+def _agent_actions(catalog: "Catalog", config: "Config") -> "wf_mod.AgentActions":
+    """The catalogue's agent actions, less the paths it lists as running no agent, and the configuration's
+    (flagship slice 2d.11)."""
+    return wf_mod.AgentActions(catalog.detection, config.agents.get("actions", ()) or ())
 
 
 def _script_commands(catalog: "Catalog", config: "Config") -> list:
@@ -2211,6 +2232,9 @@ class Config:
             raise ConfigError(f"{path}: unknown setting(s) {', '.join(unknown)}; the checker reads "
                               f"{', '.join(sorted(CONFIG_KEYS))}")
         ignore = data.get("ignore") or []
+        if not isinstance(ignore, list):
+            # `ignore: 5` raised TypeError here (found by the review of #278).
+            raise ConfigError(f"{path}: ignore must be a list of entries")
         for entry in ignore:
             if not isinstance(entry, dict):
                 raise ConfigError(f"{path}: every ignore entry must be a mapping")
@@ -2242,6 +2266,27 @@ class Config:
         agents = data.get("agents") or {}
         if not isinstance(agents, dict) or not isinstance(agents.get("steps") or [], list):
             raise ConfigError(f"{path}: agents must be a mapping, and agents.steps a list of step names")
+        # A string would be read one character at a time, and an entry that is empty once its `@ref` and a
+        # `/` at its end are taken off names nothing (flagship slice 2d.11, from its review).
+        for key in ("actions", "commands"):
+            given = agents.get(key) or []
+            if not isinstance(given, list) or not all(isinstance(v, str) and v.strip() for v in given):
+                raise ConfigError(f"{path}: agents.{key} must be a list of text")
+        for entry in agents.get("actions") or []:
+            text = entry.strip()
+            # An entry empty without its `@ref` and a `/` at its end, and a `docker://` image, name no action.
+            # A backslash is kept, since a step written with one is compared as written (#245), and so is a
+            # local `./` or `$/` path, which names a called local workflow by its first characters.
+            if text.startswith("docker://") or (not wf_mod.is_local_reference(text)
+                                                and not wf_mod.action_name(text).rstrip("/")):
+                raise ConfigError(f"{path}: agents.actions: {wf_mod.one_line(entry, 80)!r} names no action "
+                                  "(owner, owner/repo or owner/repo/path, before any @, or a local ./ path)")
+        for entry in agents.get("commands") or []:
+            try:
+                re.compile(entry, re.M)
+            except re.error as exc:
+                raise ConfigError(f"{path}: agents.commands: {wf_mod.one_line(entry, 80)!r} is not a Python "
+                                  f"regular expression: {exc}") from None
         lanes = data.get("lanes") or {}     # left empty, it declares nothing
         if not isinstance(lanes, dict):
             raise ConfigError(f"{path}: lanes must be a mapping of a workflow file, or 'file#job', to a lane")
@@ -2268,6 +2313,10 @@ class CheckResult:
     checked: str = ""                                        # the path the command line asked to check
     options: list[str] = field(default_factory=list)         # --config and --platform as the command line gave them
     today: date | None = None                                # the day acceptances were judged against
+    whole_repository: bool = False                           # a repository root on every platform, not a part
+
+    fail_on: str = "medium"  # threshold to reproduce in the report’s suggested commands
+    settings_path: str = ""  # explicitly selected offline settings evidence
 
     @property
     def workflow_files(self) -> list[str]:
@@ -2290,6 +2339,13 @@ class CheckResult:
     def at_or_above(self, severity: str) -> list[Finding]:
         threshold = SEVERITY_ORDER[severity]
         return [f for f in self.active() if SEVERITY_ORDER[f.severity] >= threshold]
+
+    def unmatched_ignores(self):
+        for entry in self.config.ignore:
+            if not any(f.rule == entry["rule"] and f.rule != IDLE_DECLARATION
+                       and fnmatch.fnmatch(f.path, str(entry["path"]))
+                       and (not entry.get("job") or entry["job"] == f.job) for f in self.findings):
+                yield entry
 
     def stale_gating(self, spec: str, catalog: Catalog) -> list[dict]:
         """Baseline entries no finding matched that make `--fail-on spec` fail: the same threshold and
@@ -2374,7 +2430,7 @@ def _resolve(target: Path, platform: str) -> tuple[Path, list[Path], list[Path],
 
 def check(target: Path, files: list[Path] | None = None, config: Config | None = None,
           catalog: Catalog | None = None, today: date | None = None, platform: str = "auto",
-          gate_files: list[Path] | None = None) -> CheckResult:
+          gate_files: list[Path] | None = None, settings: SettingsEvidence | None = None) -> CheckResult:
     """Check a repository root (workflows, Jenkinsfiles and repository files) or specific files.
 
     platform: auto (both kinds of CI definition), github (workflows only) or jenkins (Jenkinsfiles only).
@@ -2395,9 +2451,15 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
             jenkins_paths = [f for f in files if platform == "jenkins" or jenkins_mod.is_jenkinsfile(f)
                              or f.suffix.lower() == ".groovy"]
             files = [f for f in files if f not in jenkins_paths]
+    if settings is not None:
+        settings = settings.for_scan(root, is_repo)
+        gate_files = [*(gate_files or []), settings.source]
     config = config or Config.load(root)
     # Jenkinsfiles are found from the repository root, not from .github/workflows.
     jenkins_sought = is_repo and platform != "github" and target == root
+    # Only a check of the repository's own folder, on every platform, can tell that a baseline or
+    # ignore entry matches no finding at all (fix_paperwork._full_scope makes the same test).
+    whole_repository = is_repo and platform == "auto" and target == root
     errors: list[str] = []
     jenkins_notes: list[str] = []
     if jenkins_sought:
@@ -2472,7 +2534,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
                 suspect_jobs.append((rel, job.id))
         try:
             found = rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets,
-                                            agents=config.agents, firewall=firewall).run()
+                                            agents=config.agents, firewall=firewall, settings=settings).run()
         except expr_mod.TooComplex as exc:
             # A file the checker could not read is an error, never a pass.
             errors.append(f"{rel}: {exc}")
@@ -2534,11 +2596,13 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         cov.extend(jenkins_mod.coverage(result, findings))
         summaries.append(jenkins_mod.summary(result))
     return CheckResult(findings=findings, files=rels, errors=errors, config=config, notes=notes,
-                       jenkins_files=jenkins_rels, coverage=cov, jenkins=summaries, today=today)
+                       jenkins_files=jenkins_rels, coverage=cov, jenkins=summaries, today=today,
+                       whole_repository=whole_repository)
 
 
 def _prepare_workflows(read: list, root: Path, actions_root: Path | None, config: "Config",
-                       declared: "_LaneDeclarations", script_cmds: list, agent_actions: list, unread_actions: list,
+                       declared: "_LaneDeclarations", script_cmds: list, agent_actions: "wf_mod.AgentActions",
+                       unread_actions: list,
                        action_cache: dict, steps_state: dict) -> list:
     """Classify every workflow read without error, and read the repository's scripts and local actions it
     uses, in the order the files were read. Returns (path, rel, workflow, what was reported) for every

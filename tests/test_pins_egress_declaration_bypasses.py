@@ -304,7 +304,9 @@ class FirewallPolicyTest(unittest.TestCase):
     """OBAAF-GHA-020 under GitHub's native firewall."""
 
     def firewall(self, policy, runs_on="ubuntu-24.04-firewall"):
-        return run_check(workflow(CHECKOUT + "\n      - run: claude -p 'review'", runs_on=runs_on), policy=policy)
+        # No action in the job: since the review of #357 a script beside an action is "cannot tell" on this route
+        # (`test_an_action_beside_a_script_is_cannot_tell`), which would hide what these tests are about.
+        return run_check(workflow("      - run: claude -p 'review'", runs_on=runs_on), policy=policy)
 
     @staticmethod
     def verdict(result):
@@ -327,6 +329,32 @@ class FirewallPolicyTest(unittest.TestCase):
                                runs_on="[ubuntu-24.04-firewall, ubuntu-24.04-firewall]")
         f = [f for f in result.findings if f.rule == "OBAAF-GHA-020"][0]
         self.assertEqual(f.state, "fixed")
+
+    def test_an_action_beside_a_script_is_cannot_tell(self):
+        """Reviews of #357 (run `ouzel`): the agent's own step can write GITHUB_PATH or GITHUB_ENV, which change
+        what a later step or actions/checkout's post step runs, and an action runs with the token that uploads
+        artifacts. An action before the agent with no post step is not counted, and neither is a plain `echo`
+        line as the script (the last case names the agent's step, not the `echo` before it)."""
+        policy = "mode: enforce\nallow: [api.example.com]\n"
+        b = "b" * 40
+        cases = {
+            CHECKOUT + "\n      - run: claude -p 'review'": ("cannot-tell", "what the post step of step 'actions/checkout@"),
+            "      - run: claude -p 'review'\n" + CHECKOUT: ("cannot-tell", "which runs after it, runs"),
+            "      - run: claude -p 'review'\n" + f"      - uses: actions/download-artifact@{b}":
+                ("cannot-tell", "which runs after it, runs"),
+            f"      - uses: actions/download-artifact@{b}\n      - run: claude -p 'review'": ("fixed", None),
+            f"      - uses: actions/cache/restore@{b}\n        with: {{path: x, key: k}}\n      - run: claude -p 'review'":
+                ("fixed", None),
+            CHECKOUT + "\n      - run: echo hello\n      - run: claude -p 'review'":
+                ("cannot-tell", "step 'step 3' in job 'agent' runs a script"),
+        }
+        for steps, (state, reason) in cases.items():
+            with self.subTest(steps=steps):
+                result = run_check(workflow(steps, runs_on="ubuntu-24.04-firewall"), policy=policy)
+                f = [f for f in result.findings if f.rule == "OBAAF-GHA-020"][0]
+                self.assertEqual(f.state, state)
+                if reason:
+                    self.assertIn(reason, f.controls[-1].detail)
 
     def test_a_cleared_finding_names_the_defaults_and_that_the_label_is_taken_at_its_word(self):
         result = self.firewall("mode: enforce\nallow: [api.example.com]\n")
@@ -412,14 +440,17 @@ class EgressActionTest(unittest.TestCase):
     def test_the_plain_form_clears(self):
         self.assertEqual(self.state(CHECKOUT + "\n" + action()), "fixed")
 
-    def test_only_upload_artifact_itself_may_run_after(self):
-        for uses in ("actions/upload-artifact/../../../evil/act/v1@v4", "actions/upload-artifact//x@v4",
-                     "actions/upload-artifact/./x@v4"):
+    def test_uploads_after_confinement_withhold_credit_and_invalid_paths_stay_untrusted(self):
+        for uses in ("actions/upload-artifact//x@v4", "actions/upload-artifact/./x@v4"):
             with self.subTest(uses=uses):
                 after = f"\n      - uses: {uses}\n        with: {{name: out, path: out}}"
                 self.assertEqual(self.state(CHECKOUT + "\n" + action() + after), "cannot-tell")
+        # Flagship slice 2d.11 (from its review): a path that climbs out of upload-artifact's repository can
+        # reach any action the runner downloaded for the job, so it is an agent outside the confined command.
+        after = "\n      - uses: actions/upload-artifact/../../../evil/act/v1@v4\n        with: {name: out, path: out}"
+        self.assertEqual(self.state(CHECKOUT + "\n" + action() + after), "new")
         after = "\n      - uses: actions/upload-artifact@v4\n        with: {name: out, path: out}"
-        self.assertEqual(self.state(CHECKOUT + "\n" + action() + after), "fixed")
+        self.assertEqual(self.state(CHECKOUT + "\n" + action() + after), "cannot-tell")
 
     def test_a_cache_or_earlier_step_that_may_reach_the_scratch_directory_by_a_pattern(self):
         for path in ("/t[m]p/obaaf-e*", "/t?p/*", "/*/obaaf*", "$(dirname $(mktemp -u))/obaaf-e*", "//tmp/x"):

@@ -62,13 +62,32 @@ _IDENT_PART = _IDENT_START | set("0123456789")
 _IDENT_RUN = re.compile(r"[A-Za-z0-9_$]*")
 _STRING_SPECIAL = set("\\$\n")
 _ORDINARY_RUN = re.compile(r"[^\\$\n]*")
+_UNICODE_ESCAPE = re.compile(r"u*([0-9a-fA-F]{4})")
+
+
+_SOURCE_UNICODE_ESCAPE = re.compile(r"(\\+)(u+)([0-9a-fA-F]{4})")
+
+
+def translate_unicode_escapes(text: str) -> str:
+    """The source as Groovy 2.4, which Jenkins runs, reads it: before lexing, its UnicodeEscapingReader turns
+    every `\\uXXXX` (and `\\uuXXXX`) preceded by an even number of other backslashes into the character it
+    names, so `"\\u0024{env.CHANGE_TITLE}"` is an interpolation (flagship slice 2d.2, OBAAF-JEN-009)."""
+    if "\\u" not in text:
+        return text
+
+    def one(m: re.Match) -> str:
+        slashes = m.group(1)
+        if len(slashes) % 2 == 0:
+            return m.group(0)
+        return slashes[:-1] + chr(int(m.group(3), 16))
+    return _SOURCE_UNICODE_ESCAPE.sub(one, text)
 
 
 class Lexer:
     def __init__(self, text: str, deadline: float | None = None):
         if len(text.encode("utf-8", errors="replace")) > MAX_BYTES:
             raise LimitExceeded(f"file exceeds {MAX_BYTES} bytes", 1, 1)
-        self.src = text
+        self.src = translate_unicode_escapes(text)
         self.pos = 0
         self.line = 1
         self.col = 1
@@ -278,6 +297,35 @@ class Lexer:
         nxt = self._peek(1)
         return nxt == "{" or (nxt != "" and nxt in _IDENT_START and nxt != "$")
 
+    def _value_can_start(self, begin: int) -> bool:
+        """Whether a value can start at the current position inside `${...}` that began at `begin`: after an operator,
+        an opening bracket, a comma, `return` or `in`, or at the start; not after a name, a closing bracket, a number,
+        `++` or `--` (where `/` divides). Comments (`/*`, `//`) are not values. Looks back over spaces only."""
+        src = self.src
+        if src.startswith(("/*", "//"), self.pos):
+            return True
+        j = self.pos - 1
+        while True:
+            while j >= begin and src[j] in " \t\r\n":
+                j -= 1
+            if j - 1 >= begin and src[j] == "/" and src[j - 1] == "*":
+                opening = src.rfind("/*", begin, j - 1)     # a comment before it: look past it
+                if opening != -1:
+                    j = opening - 1
+                    continue
+            break
+        if j < begin:
+            return True
+        c = src[j]
+        if c in "+-" and j - 1 >= begin and src[j - 1] == c:
+            return False                             # i++ / 2
+        if c in "(,=[{:?!&|+-*~<>;%^":
+            return True
+        word_end = j + 1
+        while j >= begin and (src[j].isalnum() or src[j] == "_"):
+            j -= 1
+        return src[j + 1:word_end] in ("return", "in", "case", "assert")
+
     def _interpolation(self) -> str:
         """Read `${...}` or `$name.path` at the current `$`; return the expression text."""
         src = self.src
@@ -287,10 +335,50 @@ class Lexer:
             self._advance()
             begin = self.pos
             depth = 1
+            steps = 0
             while True:
                 if self.pos >= len(src):
                     raise LexError("unterminated ${...} in a string", start_line, start_col)
+                steps += 1
+                if steps % 4096 == 0 and time.monotonic() > self.deadline:
+                    raise LimitExceeded(f"analysis exceeded {DEADLINE_SECONDS:.0f} seconds", start_line, start_col)
                 ch = src[self.pos]
+                if ch in "$/" and not self._value_can_start(begin):
+                    self._advance()                  # division, or `$` inside a name: not a string's start
+                    continue
+                if src.startswith("$/", self.pos):
+                    # A dollar-slashy string inside ${...}: text up to `/$`, with `$$` and `$/` as escapes.
+                    self._advance(2)
+                    while not src.startswith("/$", self.pos):
+                        if self.pos >= len(src):
+                            raise LexError("unterminated dollar-slashy string in ${...}", start_line, start_col)
+                        self._advance(2 if src.startswith(("$$", "$/"), self.pos) else 1)
+                    self._advance(2)
+                    continue
+                if ch == "/":
+                    # Inside ${...}, `/*` and `//` begin comments, whose braces do not count; a `/` where a value can
+                    # start begins a slashy string, whose `//`, `/*` and braces are text (flagship slice 2d.2, from
+                    # its first two reviews: `replaceFirst(/^https?:\/\//, '')` is a regex, not a comment).
+                    if src.startswith("/*", self.pos):
+                        end = src.find("*/", self.pos + 2)
+                        if end == -1:
+                            raise LexError("unterminated comment in ${...}", start_line, start_col)
+                        self._advance(end + 2 - self.pos)
+                        continue
+                    if src.startswith("//", self.pos):
+                        end = src.find("\n", self.pos)
+                        self._advance((len(src) if end == -1 else end) - self.pos)
+                        continue
+                    # Here a value can start (checked above): a slashy string, which may span lines.
+                    self._advance()
+                    while self.pos < len(src) and src[self.pos] != "/":
+                        if src[self.pos] == "\\" and self.pos + 1 < len(src):
+                            self._advance()
+                        self._advance()
+                    if self.pos >= len(src):
+                        raise LexError("unterminated slashy string in ${...}", start_line, start_col)
+                    self._advance()
+                    continue
                 if src.startswith("'''", self.pos) or src.startswith('"""', self.pos):
                     q = src[self.pos:self.pos + 3]
                     self._advance(3)
@@ -353,7 +441,11 @@ class Lexer:
                 self._advance(2)
                 # A backslash before a line end removes both: Groovy's line continuation in a string
                 # (flagship slice 2d.2i; it was kept as a line end, which split `gpg \\n--import`).
-                if nxt != "\n":
+                if nxt == "u" and (m := _UNICODE_ESCAPE.match(src, self.pos)):
+                    # \u0020 (and \uu0020) is the character it names (flagship slice 2d.2l: it was read as u0020).
+                    buf.append(chr(int(m.group(1), 16)))
+                    self._advance(m.end() - self.pos)
+                elif nxt != "\n":
                     buf.append({"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}.get(nxt, nxt))
                 continue
             if interpolate and ch == "$" and self._interpolation_starts():
