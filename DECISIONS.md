@@ -1219,14 +1219,12 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 **Status.** Proposed, 2026-11-21 (slice 2d.2o).
 
-### D-132 Egress credit follows an uploaded artifact to possible consumers
+### D-132 Withhold egress credit when the agent job may upload an artifact
 
-**Decision.** For GitHub's native firewall and OBAAF's egress action, withhold `egress-enforced` credit when the agent job uploads an artifact and another job may download it. Read jobs in the producing workflow and repository workflows that `workflow_run` may start for it, and, in every workflow of the repository, jobs that can download another run's artifacts (the checker's reading of such downloads, a call of another repository's workflow, or a local action). An upload is `actions/upload-artifact`, an action named like an artifact upload, or a local action. An incomplete inventory also makes the otherwise verified control "cannot tell" for an uploading producer.
+**Decision.** When the checker sees a possible artifact upload in an agent job, OBAAF-GHA-020 stays open even for an inspection-only upload with no visible downloader. Under either GitHub's native firewall or OBAAF's egress action, otherwise verified `egress-enforced` becomes "cannot tell". Under the action, the same applies to `key-out-of-reach`. An independently established "not met" verdict stands.
 
-**Reason.** Both controls restrict execution on the producer. A consumer that builds, tests or loads the uploaded files may run agent-written code with its own credentials and network access. A download is sufficient to withhold credit because the checker cannot establish how each file will be used.
+**Reason.** A build or test can execute the uploaded files with the consuming job's own credentials and network access. Consumers can be outside the repository. Reporting a job that downloads and runs agent output is separate pre-launch work (#355 item 7).
 
-**Consequence.** OBAAF-GHA-020 can stay open on the producing job, and OBAAF-GHA-005 cannot clear on the strength of the producer's controls. Uploads kept for inspection can still qualify when the inventory is complete and the checker finds no possible consumer.
+**Consequence.** OBAAF-GHA-005 loses credit for the affected controls. The checker does not trace all transfers through scripts, third-party actions, caches or job outputs.
 
-**Amended in review (run `gannet`, 2026-11-21).** The first version read only the producing workflow and `workflow_run` subscribers, so a dispatched, scheduled or push workflow that downloads the producer's artifact by run id (dawidd6's action with `workflow:`, `actions/download-artifact` with `run-id`, `gh run download`) left the producer verified, and so did an upload through `actions/upload-pages-artifact` on the firewall route. Both now give "cannot tell". A repository with any local action or any call of another repository's workflow in any workflow can no longer verify an uploading agent job's egress.
-
-**Status.** Proposed, 2026-11-21 (#354). Draft awaiting maintainer review.
+**Status.** Maintainer choice for #354, 2026-11-22.

@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 from obaaf import agent_tools
 from obaaf.catalog import Catalog
 from obaaf.checker import agent_flags
-from obaaf.checker.artifact_consumers import artifact_may_be_consumed
 from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
@@ -747,7 +746,7 @@ class WorkflowRules:
 
     def __init__(self, workflow: Workflow, catalog: Catalog, protected: dict | None = None,
                  agents: dict | None = None, firewall: "egress_mod.FirewallPolicy | None" = None,
-                 settings: SettingsEvidence | None = None, repository_workflows: list[Workflow] | None = None) -> None:
+                 settings: SettingsEvidence | None = None) -> None:
         self.wf = workflow
         self.catalog = catalog
         self.detection = catalog.detection
@@ -756,8 +755,6 @@ class WorkflowRules:
         # GitHub's native egress firewall (None when no repository was checked, only files).
         self.agents = dict(agents or {})
         self.settings = settings
-        self.repository_workflows = repository_workflows
-        self._artifact_consumers: dict[str, bool] = {}
         self.firewall = firewall
         self.findings: list[Finding] = []
 
@@ -833,7 +830,7 @@ class WorkflowRules:
             return
         view = _through_view(self.wf, self.detection, self.agents)
         second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
-                               firewall=self.firewall, settings=self.settings, repository_workflows=self.repository_workflows)
+                               firewall=self.firewall, settings=self.settings)
         second._through = True
         second._problems = self.wf.problems      # a problem the second pass finds is the file's
         found = second.run()
@@ -2531,14 +2528,34 @@ class WorkflowRules:
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
     EGRESS_ID = "egress-enforced"
 
-    def _artifact_may_be_consumed(self, job: Job) -> bool:
-        if job.id not in self._artifact_consumers:
-            self._artifact_consumers[job.id] = artifact_may_be_consumed(self.repository_workflows, self.wf, job)
-        return self._artifact_consumers[job.id]
+    # Actions whose ordinary operation the checker can identify without reading repository code.
+    # Cache transfers are assessed separately from GitHub Actions artifact uploads.
+    _NON_UPLOAD_ACTIONS = frozenset({
+        "actions/checkout", "actions/download-artifact", "actions/cache", "actions/cache/save",
+        "actions/cache/restore", "actions/setup-node", "actions/setup-python", "actions/setup-java",
+        "actions/setup-go", "actions/setup-dotnet", "actions/setup-ruby",
+    })
 
-    _ARTIFACT_NETWORK = ("the checker cannot rule out an artifact download in this workflow or a workflow_run "
-                         "subscriber. The producing job's network restriction does not cover code loaded from "
-                         "that artifact in another job")
+    def _artifact_upload(self, job: Job) -> str | None:
+        """Return producer-side evidence. A later job's existence or behavior is immaterial."""
+        direct_agents = (self.detection.get("agent_installs") or {}).values()
+        releases = self.detection.get("egress_action_releases") or ()
+        for step in job.steps:
+            action = step.clean_action
+            where = f"step '{one_line(step.name, 80)}' in job '{one_line(job.id, 80)}'"
+            if action in ("actions/upload-artifact", "actions/upload-artifact/merge", "actions/upload-pages-artifact"):
+                return f"{where} uploads an artifact"
+            if step.uses is not None:
+                if action in self._NON_UPLOAD_ACTIONS or (step.confines and step.uses.partition("@")[2] in releases):
+                    continue
+                return f"{where} uses an action whose implementation may upload an artifact"
+            if self._installs_only(job, step):
+                continue
+            words = self._one_command(job, step)
+            if words and (words[0] in direct_agents or words[0] in {"echo", "pwd", "true", ":"}):
+                continue
+            return f"{where} runs a script whose artifact uploads the checker cannot rule out"
+        return None
 
     def _egress(self, job: Job) -> tuple[Control, str, dict]:
         """What the checker can establish about a limit on the job's network access: the control,
@@ -2649,8 +2666,9 @@ class WorkflowRules:
                 unsure.append(f"the policy allows {one_line(', '.join(wide[:5]), 120)}, which is or has under it "
                               "a public suffix (where anyone can register a name), and the firewall's README does "
                               "not say whether an allowed name covers the names under it")
-        if self._artifact_may_be_consumed(job):
-            unsure.append(self._ARTIFACT_NETWORK)
+        upload = self._artifact_upload(job)
+        if upload:
+            unsure.append(f"{upload}. The job's network restriction does not extend to its artifact in another job")
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             listed = ", ".join(policy.allow) or "nothing"
@@ -3195,7 +3213,7 @@ class WorkflowRules:
           host. Both limit the network as the allow-list says, and both are said beside a cleared
           finding. A credential the checker cannot place is "cannot tell";
         - no step that can run after or beside it reads its `workspace` or `scratch` output or the
-          scratch directory, except to upload it as an artifact. Saving them to a cache is "not met";
+          scratch directory. A possible artifact upload is "cannot tell". Saving them to a cache is "not met";
           any other use is "cannot tell", because the checker cannot tell reading from running."""
         confined = [step for step in job.steps if step.confines]
         if not confined or job.reusable:
@@ -3382,13 +3400,14 @@ class WorkflowRules:
             group(unsure, after, " can run after it or beside it, and the checker cannot tell "
                   "whether it runs or loads anything the command wrote (only actions/upload-artifact is "
                   "taken to save files as data)")
-        if self._artifact_may_be_consumed(job):
-            unsure.append(self._ARTIFACT_NETWORK)
+        upload = self._artifact_upload(job)
+        if upload:
+            unsure.append(f"{upload}. The job's network restriction does not extend to its artifact in another job")
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             detail = (f"the agent's command runs under OBAAF's egress action at a commit OBAAF lists as released, "
-                      f"allowing {one_line(', '.join(allow_shown), 200)}, and nothing but actions/upload-artifact "
-                      f"runs after it. {self._leaks(placements)}")
+                      f"allowing {one_line(', '.join(allow_shown), 200)}, and no other step runs after it. "
+                      f"{self._leaks(placements)}")
         else:
             detail = egress_mod.joined(problems or unsure)
         action = ", ".join(sorted({one_line(step.uses or "", 120) for step in confined}))
@@ -3958,9 +3977,9 @@ class WorkflowRules:
             unsure.append("no key goes to AWF's API proxy or the command, and the checker recognises no agent in the "
                           "confined command, so it cannot tell where the agent runs: an agent that needs no key "
                           "could run in a step before or beside the one that holds the key")
-        if self._artifact_may_be_consumed(job):
-            unsure.append("the checker cannot rule out a later job downloading the agent's artifact and loading "
-                          "its contents with access to that job's credentials")
+        upload = self._artifact_upload(job)
+        if upload:
+            unsure.append(f"{upload}. Another job could load the artifact with access to its own credentials")
         if not held and not problems and not unsure:
             # Every secret of the job is in a confined step and none was placed: nothing to show.
             unsure.append("no secret of the job is placed by the checker in a step that uses the action")

@@ -185,9 +185,8 @@ def run(args, catalog=None):
             "For the checker to verify the egress control, the job runs on GitHub-hosted ubuntu-24.04 "
             "without a container; no other step and no job or workflow env holds a credential; the job "
             "cannot request OIDC tokens or the models permission; the allow-list holds literal hosts with "
-            "no public suffix; and only artifact uploads follow the confined step. If the job uploads an artifact, "
-            "the checker must be able to rule out a download in this workflow, in a workflow_run subscriber, "
-            "and in any workflow that can download another run's artifacts. "
+            "no public suffix; and no step follows the confined step. A possible artifact upload in this job makes "
+            "otherwise verified egress and key isolation 'cannot tell', even for inspection-only uploads. "
             "Keep later jobs from running or loading the agent's output. The conditions this job does not meet are "
             "listed below.",
             f"Checked on a private copy of {shown!r}, job {args.job!r}:",

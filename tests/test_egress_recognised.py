@@ -97,7 +97,7 @@ class NativeFirewallTest(unittest.TestCase):
     """GitHub's native egress firewall: `runs-on: ubuntu-24.04-firewall` and a policy file in
     enforce mode, which the firewall's README says is read only at `.github/egress-firewall.yaml`."""
 
-    PLAIN = "      - run: python -m agents.fix"
+    PLAIN = "      - run: claude -p review"
 
     def firewall(self, policy=FIREWALL, **kw):
         kw.setdefault("runs_on", "ubuntu-24.04-firewall")
@@ -112,7 +112,7 @@ class NativeFirewallTest(unittest.TestCase):
         self.assertIn("printed to the job's log or saved as an artifact is not blocked", detail(f))
 
     def test_it_clears_the_egress_control_of_a_secret_too(self):
-        steps = "      - run: python -m agents.fix\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
+        steps = "      - run: claude -p review\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
         result = run_check(workflow(steps, runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
         secret = next(f for f in result.findings if f.rule == "OBAAF-GHA-005")
         self.assertEqual(next(c.verdict for c in secret.controls if c.id == "egress-enforced"), VERIFIED)
@@ -376,12 +376,12 @@ class EgressActionTest(unittest.TestCase):
         f = self.check(action(run="./scripts/agent.sh"), files=files, config={"lanes": {}})
         self.assertEqual(verdict(f), VERIFIED)
 
-    def test_uploading_the_output_is_fine_and_running_it_is_not(self):
+    def test_output_uploads_and_later_steps_limit_egress_evidence(self):
         upload = (f"      - uses: actions/upload-artifact@{SHA}\n"
                   "        with: {name: out, path: '${{ steps.agent.outputs.workspace }}'}")
-        self.assertEqual(verdict(self.check(action() + "\n" + upload)), VERIFIED)
+        self.assertEqual(verdict(self.check(action() + "\n" + upload)), CANNOT_TELL)
         named = upload.replace("      - uses:", "      - name: Upload what obaaf-egress left\n        uses:")
-        self.assertEqual(verdict(self.check(action() + "\n" + named)), VERIFIED)
+        self.assertEqual(verdict(self.check(action() + "\n" + named)), CANNOT_TELL)
         unsure = {
             "any script after it": "      - run: echo done",
             "another output": "      - run: echo '${{ steps.agent.outputs.denied }}'",
@@ -1171,7 +1171,7 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertEqual(verdict(f), VERIFIED)
 
     def test_githubs_native_firewall_holds_no_key(self):
-        steps = "      - run: python -m agents.fix\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
+        steps = "      - run: claude -p review\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
         result = run_check(workflow(steps, runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
         secret = secret_finding(result)
         verdicts = {c.id: c.verdict for c in secret.controls}
@@ -1181,7 +1181,7 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertEqual(secret.state, "new")
 
     def test_a_job_with_no_confined_command_is_not_met(self):
-        steps = "      - run: python -m agents.fix\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
+        steps = "      - run: claude -p review\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
         control = self.key(steps)
         self.assertEqual(control.verdict, NOT_MET)
         self.assertIn("no step of the job runs the agent's command behind a proxy", control.detail)
@@ -1416,8 +1416,7 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
 
     def test_steps_after_it_cannot_reach_the_key(self):
         """The step's process has ended; a later step can still matter to OBAAF-GHA-020, not to this."""
-        steps = keyed() + f"\n      - uses: actions/upload-artifact@{SHA}\n        with: {{name: out, path: out}}\n" \
-                          "      - run: nohup ./later.sh &"
+        steps = keyed() + "\n      - run: echo completed"
         self.assertEqual(self.key(CHECKOUT + "\n" + steps).verdict, VERIFIED)
 
 
