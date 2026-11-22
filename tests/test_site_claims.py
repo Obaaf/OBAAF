@@ -185,9 +185,7 @@ jobs:
   triage:
     runs-on: {runs_on}
 {strategy}    steps:
-      - uses: anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # v1
-        with:
-          prompt: Triage this issue.
+      - run: claude -p "Triage this issue."
 """
 
 POLICY = "mode: enforce\nallow:\n  - api.anthropic.com\n"
@@ -225,7 +223,7 @@ class TheFirewallConditions(unittest.TestCase):
                           "sets mode: enforce",
                           "allows only plain host names, none of which is a public suffix or has one under it",
                           "the job's token has contents permission", "the job calls no reusable workflow",
-                          "no other workflow can call this one"):
+                          "no other workflow can call this one", "no step in the agent job may upload an artifact"):
             self.assertIn(condition, words)
 
     def test_a_job_that_calls_a_reusable_workflow_is_not_cleared(self):

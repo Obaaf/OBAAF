@@ -137,10 +137,12 @@ class SubActionTest(unittest.TestCase):
                 self.assertEqual(agents_of(result), [[f"agents.actions: {prefix}"]])
 
     def test_before_the_egress_action_it_is_not_an_agent_outside_it(self):
-        from test_egress_recognised import (CHECKOUT, NOT_MET, VERIFIED, action, egress, run_check, verdict,
+        from test_egress_recognised import (CANNOT_TELL, CHECKOUT, NOT_MET, action, detail, egress, run_check, verdict,
                                             workflow)
         before = CHECKOUT + "\n" + APPROVAL_STEP.rstrip("\n") + "\n" + action()
-        self.assertEqual(verdict(egress(run_check(workflow(before)))), VERIFIED)
+        approval = egress(run_check(workflow(before)))
+        self.assertEqual(verdict(approval), CANNOT_TELL)
+        self.assertIn("may upload an artifact", detail(approval))
         outside = CHECKOUT + "\n      - uses: anthropics/claude-code-action/base-action@v1\n" + action()
         self.assertEqual(verdict(egress(run_check(workflow(outside)))), NOT_MET)
 
