@@ -9,7 +9,7 @@ from helpers import TempDir, run_cli
 from obaaf.catalog import load
 from obaaf.fix_copy import private_copy
 
-PIN = "c" * 40
+PIN = "80db1e68769165c9ecf24e553254fa35d6e168d5"
 WORKFLOW = """on: workflow_dispatch
 permissions: {}
 jobs:
@@ -24,21 +24,20 @@ jobs:
 """
 
 
-def draft(*args, releases=(PIN,)):
-    cat = load()
-    catalog = dataclasses.replace(cat, detection={**cat.detection, "egress_action_releases": list(releases)})
-    with patch("obaaf.fix_egress.load", return_value=catalog):
-        return run_cli("fix", "egress", "--job", "review", *args)
+def draft(*args):
+    return run_cli("fix", "egress", "--job", "review", *args)
 
 
-def brief(*args, releases=(PIN,)):
-    return draft("--brief", *args, releases=releases)
+def brief(*args):
+    return draft("--brief", *args)
 
 
 class WorkOrderTests(unittest.TestCase):
     def test_release_hold_precedes_any_copy(self):
-        with patch("obaaf.fix_egress.private_copy", side_effect=AssertionError):
-            code, out, err = brief("absent", releases=())
+        cat = load()
+        empty = dataclasses.replace(cat, detection={**cat.detection, "egress_action_releases": []})
+        with patch("obaaf.fix_egress.load", return_value=empty), patch("obaaf.fix_egress.private_copy", side_effect=AssertionError):
+            code, out, err = brief("absent")
             self.assertEqual((code, err), (0, ""))
             self.assertIn("No released commit", out)
             self.assertNotIn("# Egress confinement work order", out)

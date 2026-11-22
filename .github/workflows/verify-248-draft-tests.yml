@@ -1,0 +1,42 @@
+name: Check the proposed pin against the draft and work order
+on:
+  push:
+    branches: [lead/verify-248-draft-tests-7266b86]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Check candidate sources and configure temporary storage
+        run: |
+          set -euo pipefail
+          git diff --exit-code 7266b8694173fab6f6bee685e951985e6ed98eae HEAD -- src
+          test "$(git hash-object tests/test_fix_egress.py)" = bd1e1af2f53858f7d97e49aa2b2daca2c3cdbe5a
+          test "$(git hash-object tests/test_fix_egress_brief.py)" = 5ea463026b1474e374acae4eb61952486d46390b
+          temp_dir="$(mktemp -d "$RUNNER_TEMP/obaaf-pin-tests.XXXXXX")"
+          if git -C "$temp_dir" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$temp_dir" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Exercise the proposed catalogue in the runner workspace
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("src/obaaf/data/detection.yaml")
+          original = path.read_text()
+          empty = "egress_action_releases: []\n"
+          assert original.count(empty) == 1
+          path.write_text(original.replace(empty, "egress_action_releases:\n  - 80db1e68769165c9ecf24e553254fa35d6e168d5\n"))
+          from obaaf.catalog import load
+          assert load().detection["egress_action_releases"] == ["80db1e68769165c9ecf24e553254fa35d6e168d5"]
+          PY
+          PYTHONPATH=tests python -m unittest -v test_fix_egress test_fix_egress_brief test_egress_artifact_producers
