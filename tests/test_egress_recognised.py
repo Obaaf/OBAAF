@@ -436,6 +436,9 @@ class EgressActionTest(unittest.TestCase):
             f = self.check(f"      - run: {json.dumps(run)}\n" + action())
             with self.subTest(run=run):
                 self.assertEqual(verdict(f), CANNOT_TELL)
+                # Since D-132 any such script is also a possible upload; the reason under test must still be given
+                # (review of #357, run `ouzel`).
+                self.assertIn("may leave a process running beside it", detail(f))
         self.assertFalse(egress_mod.leaves_process("make deps && make lint 2>&1"))
 
     def test_long_scripts_take_linear_time(self):
@@ -928,7 +931,12 @@ class BestControlTest(unittest.TestCase):
         late = f"{CHECKOUT}\n      - uses: step-security/harden-runner@{HR_2_22_0}\n        with: {{egress-policy: block}}"
         result = run_check(workflow(late + "\n      - run: claude -p x", runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
         f = egress(result)
-        self.assertEqual((f.kind, verdict(f)), ("firewall-runner", VERIFIED))
+        # The firewall's reading is the one kept. Since the review of #357 it is "cannot tell" here, not
+        # verified: the agent's step can change what the actions' post steps run (GITHUB_ENV, GITHUB_PATH).
+        self.assertEqual((f.kind, verdict(f)), ("firewall-runner", CANNOT_TELL))
+        self.assertIn("can change through GITHUB_ENV or GITHUB_PATH", detail(f))
+        alone = run_check(workflow("      - run: claude -p x", runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
+        self.assertEqual((egress(alone).kind, verdict(egress(alone))), ("firewall-runner", VERIFIED))
 
     def test_the_better_of_two_unproven_controls_stands(self):
         monitor = (f"      - uses: step-security/harden-runner@{HR_2_22_0}\n"
@@ -1415,9 +1423,16 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
                 self.assertIn("ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line", control.detail)
 
     def test_steps_after_it_cannot_reach_the_key(self):
-        """The step's process has ended; a later step can still matter to OBAAF-GHA-020, not to this."""
+        """The step's process has ended, so a later step that does not upload cannot reach the key. Since D-132 a
+        later step that may upload an artifact makes this control "cannot tell" (review of #357, run `ouzel`)."""
         steps = keyed() + "\n      - run: echo completed"
         self.assertEqual(self.key(CHECKOUT + "\n" + steps).verdict, VERIFIED)
+        for later in (f"      - uses: actions/upload-artifact@{SHA}\n        with: {{name: out, path: out}}",
+                      "      - run: nohup ./later.sh &"):
+            with self.subTest(later=later):
+                control = self.key(CHECKOUT + "\n" + keyed() + "\n" + later)
+                self.assertEqual(control.verdict, CANNOT_TELL)
+                self.assertIn("Another job could load the artifact", control.detail)
 
 
 # What slice 2c.10b's decision (D-070) rests on, at a commit of the action, as far as the workflow

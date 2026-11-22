@@ -105,7 +105,9 @@ def work_order(job, index, step, blocked, broken, options, result):
         "4. Use GitHub-hosted ubuntu-24.04 without a container. Keep credentials out of other steps and "
         "workflow or job environments. Remove OIDC and models permissions. Review steps that could run "
         "beside the agent. Keep the confined step last. A possible artifact upload makes otherwise verified "
-        "egress and key isolation 'cannot tell'. Plan a separate job for later commit, "
+        "egress and key isolation 'cannot tell': an upload step, an action other than actions/checkout, "
+        "download-artifact, cache and the actions/setup- actions, or a script such as npm ci or make, anywhere "
+        "in the job. Plan a separate job for builds, uploads and later commit, "
         "comment or pull request steps.",
         "5. For each protected secret, verify the configured environment, its protected-branch rule and "
         "that the secret exists only there. Review untrusted triggers, checkout sources and event inputs. "

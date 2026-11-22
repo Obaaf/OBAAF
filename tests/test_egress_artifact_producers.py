@@ -34,8 +34,8 @@ class ArtifactProducerTest(unittest.TestCase):
                     self.assertEqual(controls["egress-enforced"], expected)
                     key = CANNOT_TELL if action_name and route == "action" else baseline_key
                     self.assertEqual(controls["key-out-of-reach"], key)
-                    if action_name:
-                        self.assertNotEqual(finding.state, "fixed")
+                    egress_state = next(f.state for f in result.findings if f.rule == "OBAAF-GHA-020")
+                    self.assertEqual(egress_state, "fixed" if action_name is None else "cannot-tell")
 
     def test_a_sibling_jobs_upload_does_not_change_producer_egress(self):
         for route, (runner, steps, _) in ROUTES.items():
@@ -54,6 +54,48 @@ class ArtifactProducerTest(unittest.TestCase):
         _, agent, _ = ROUTES["firewall"]
         result = run_check(workflow(agent + "\n" + upload()))
         self.assertEqual(verdict(egress(result)), NOT_MET)
+
+    def test_an_upload_preserves_a_route_condition_that_is_not_met(self):
+        """Review of #357 (run `ouzel`): "not met" for a reason inside a route is not improved by an upload."""
+        firewall_log = run_check(workflow(ROUTES["firewall"][1] + "\n" + upload(), runs_on="ubuntu-24.04-firewall"),
+                                 policy="mode: log\nallow:\n  - api.example.com\n")
+        self.assertEqual(verdict(egress(firewall_log)), NOT_MET)
+        wide = run_check(workflow(CHECKOUT + "\n" + keyed(allow="github.io") + "\n" + upload()))
+        self.assertEqual(verdict(egress(wide)), NOT_MET)
+
+    def test_a_variable_that_makes_a_step_run_unread_code_withholds_credit(self):
+        """Review of #357 (run `ouzel`): `NODE_OPTIONS`, the loader's variables, bash's, git's config variables or
+        a job container can make an action the list trusts, `echo` or the agent's CLI run code the checker did
+        not read; in an action that code holds the token that uploads artifacts."""
+        firewall_agent = "      - run: claude -p review"
+        cases = {
+            "workflow NODE_OPTIONS, checkout": ("action", CHECKOUT + "\n" + keyed(), "", "env: {NODE_OPTIONS: --require ./x.js}"),
+            "job LD_PRELOAD, checkout": ("action", CHECKOUT + "\n" + keyed(), "    env: {LD_PRELOAD: ./x.so}", ""),
+            "step NODE_OPTIONS on checkout": ("action", f"      - uses: actions/checkout@{SHA}\n"
+                                              "        env: {NODE_OPTIONS: --require ./x.js}\n" + keyed(), "", ""),
+            "job GIT_CONFIG_COUNT, checkout": ("action", CHECKOUT + "\n" + keyed(), "    env: {GIT_CONFIG_COUNT: '1'}", ""),
+            "BASH_ENV on an echo before": ("action", CHECKOUT + "\n      - run: echo prep\n        env: {BASH_ENV: ./bg.sh}\n"
+                                           + keyed(), "", ""),
+            "BASH_ENV on the agent's step": ("firewall", firewall_agent + "\n        env: {BASH_ENV: ./x.sh}", "", ""),
+            "workflow ENV, echo after": ("firewall", firewall_agent + "\n      - run: echo done", "", "env: {ENV: ./x.sh}"),
+            "NODE_OPTIONS on the agent's step": ("firewall", firewall_agent + "\n        env: {NODE_OPTIONS: --require ./x.js}",
+                                                 "", ""),
+        }
+        for name, (route, steps, job_extra, top) in cases.items():
+            with self.subTest(name):
+                runner = ROUTES[route][0]
+                result = run_check(workflow(steps, runs_on=runner, job_extra=job_extra, top=top), policy=FIREWALL)
+                self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+                self.assertIn("can make it run code the checker did not read", egress(result).controls[0].detail)
+        plain = {
+            "identity names": ("action", CHECKOUT + "\n" + keyed(), "    env: {GIT_AUTHOR_NAME: bot, GIT_COMMITTER_EMAIL: b@x}", ""),
+            "NODE_ENV": ("firewall", firewall_agent + "\n        env: {NODE_ENV: production}", "", ""),
+        }
+        for name, (route, steps, job_extra, top) in plain.items():
+            with self.subTest(name):
+                runner = ROUTES[route][0]
+                result = run_check(workflow(steps, runs_on=runner, job_extra=job_extra, top=top), policy=FIREWALL)
+                self.assertEqual(verdict(egress(result)), VERIFIED)
 
     def test_opaque_steps_limit_what_the_checker_can_verify(self):
         unknown = (

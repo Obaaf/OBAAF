@@ -6,7 +6,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ### Artifact uploads affect GitHub Actions egress verdicts
 
-When the checker sees a possible artifact upload in an agent job, OBAAF-GHA-020 stays open even for an inspection-only upload with no visible downloader. Under either GitHub's native firewall or OBAAF's egress action, otherwise verified `egress-enforced` becomes "cannot tell". Under the action, the same applies to `key-out-of-reach`. An independently established "not met" verdict stands. OBAAF-GHA-005 loses credit for the affected controls (#354).
+When the checker sees a possible artifact upload in an agent job, OBAAF-GHA-020 stays open even for an inspection-only upload with no visible downloader. Under either GitHub's native firewall or OBAAF's egress action, otherwise verified `egress-enforced` becomes "cannot tell". Under the action, the same applies to `key-out-of-reach`. An independently established "not met" verdict stands. OBAAF-GHA-005 loses credit for the affected controls (#354). A possible upload is an upload step, any action outside a short list (`actions/checkout`, `actions/download-artifact`, `actions/cache`, the `actions/setup-` actions), any script other than plain `echo` lines and an agent's CLI with literal arguments (so `npm ci` or `make` anywhere in the job), any of those when an `env` sets a variable such as `NODE_OPTIONS`, `LD_PRELOAD` or `BASH_ENV` or the job runs in a container, and, under the firewall, any action beside a script, `actions/checkout` included (D-132; the last two from the review of #357).
 
 ### Companion scanner diagnostics in GitHub Actions
 

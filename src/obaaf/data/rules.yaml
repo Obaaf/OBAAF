@@ -204,9 +204,11 @@ rules:
       computed when the job runs, in an `env`, a step before or
       beside it whose script, `env` values or inputs name `GITHUB_ENV`, `exportVariable` or the runner's `_runner_file_commands` folder or whose
       words may leave a process running, a parallel step,
-      and service containers given volumes or options. Since those steps run no shell, look nothing up
+      and service containers given volumes or options; and, since decision D-132, a possible artifact
+      upload anywhere in the job, steps after it included, as OBAAF-GHA-020 reads it. Since those steps run no shell, look nothing up
       through the `PATH` and empty the loader's variables (slice 2c.9), bash's, Python's, the `PATH`'s and
-      the loader's variables and a write to `GITHUB_PATH` no longer count (slice 2c.10b); since the action
+      the loader's variables and a write to `GITHUB_PATH` no longer count as reasons of this control's own
+      (slice 2c.10b), though such a variable or step can make a step a possible upload; since the action
       removes every `OPENSSL_` variable from them before libcrypto loads (slice 2c.11a), OpenSSL's no
       longer count either (slice 2c.11b). The second control records the selected snapshot date and the evidence it supplies. Not read for the third
       control: what a script, an action other than `actions/checkout` or the agent itself fetches while the
@@ -752,8 +754,20 @@ rules:
       agent as its command (no other step and no `env` of the job is given a credential, and the job
       cannot request OIDC tokens) and no step after it.
       With either control, a possible artifact upload in the agent job makes otherwise verified
-      `egress-enforced` credit "cannot tell", even for inspection-only uploads with no visible download.
-      The same applies to `key-out-of-reach` under OBAAF's action. An independent "not met" verdict stands.
+      `egress-enforced` credit "cannot tell", even for inspection-only uploads with no visible download
+      (decision D-132). The same applies to `key-out-of-reach` under OBAAF's action. An independent "not
+      met" verdict stands. A possible upload is a step that uses upload-artifact or upload-pages-artifact;
+      one that uses any action but `actions/checkout`, `actions/download-artifact`, `actions/cache` and the
+      `actions/setup-` actions for Node.js, Python, Java, Go, .NET and Ruby, OBAAF's egress action and
+      Harden-Runner at listed commits (so an agent run through an action is "cannot tell"); one that runs a
+      script other than lines of `echo`, `pwd`, `true`, `:` or an agent's CLI with literal arguments in a
+      POSIX shell the checker reads, or an install of an agent's CLI (so `npm ci` or `make` is "cannot
+      tell"); any of these when an `env` sets a variable that can make it run code the checker did not read
+      (bash's, the loader's, Python's, `PATH`, `HOME`, `NODE_OPTIONS`, `NODE_PATH`, git's but its identity
+      names), when the job runs in a container, or after a step that may change later steps; and, on the
+      firewall only, any action in a job that also runs a script, because a script, the agent's included,
+      can change through `GITHUB_ENV` or `GITHUB_PATH` what a later step or an earlier action's post step
+      runs, and actions hold the token that uploads artifacts.
       Each credential
       given to the action's step is placed as the action reads its inputs: a model key named in
       `model-keys` goes to AWF's API proxy, whose provider host is then shown after the allow-list, and
@@ -785,7 +799,8 @@ rules:
       (slice 2d.4a), which then runs outside the confined command. Not followed, and so never a reason the
       finding clears: an agent run by a package script (`npm run`), a called workflow, an action from another
       repository or a local action the checker cannot read through (named in a note); code an earlier action
-      runs in its post step; uploads hidden in unread actions or scripts, transfers through caches or job outputs,
+      runs in its post step; an upload the agent's own command makes (with `sudo`, for one; not tested),
+      transfers through caches or job outputs, variables other programs read for their own settings,
       and what another job or repository does with an artifact;
       whether a pinned commit of upload-artifact is on its repository's own branches; and whether a
       runner with the firewall's label has the firewall, which the label is taken to mean.

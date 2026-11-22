@@ -186,7 +186,9 @@ def run(args, catalog=None):
             "without a container; no other step and no job or workflow env holds a credential; the job "
             "cannot request OIDC tokens or the models permission; the allow-list holds literal hosts with "
             "no public suffix; and no step follows the confined step. A possible artifact upload in this job makes "
-            "otherwise verified egress and key isolation 'cannot tell', even for inspection-only uploads. "
+            "otherwise verified egress and key isolation 'cannot tell', even for inspection-only uploads: an upload "
+            "step, an action other than actions/checkout, download-artifact, cache and the actions/setup- actions, "
+            "or a script other than plain echo lines (npm ci or make, before the confined step or after it). "
             "Keep later jobs from running or loading the agent's output. The conditions this job does not meet are "
             "listed below.",
             f"Checked on a private copy of {shown!r}, job {args.job!r}:",

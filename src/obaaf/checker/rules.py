@@ -2529,7 +2529,8 @@ class WorkflowRules:
     EGRESS_ID = "egress-enforced"
 
     # Actions whose ordinary operation the checker can identify without reading repository code.
-    # Cache transfers are assessed separately from GitHub Actions artifact uploads.
+    # They are not artifact uploads; what they save to a cache is not read here (only the egress action's
+    # route reads a cache of its output, as "not met").
     _NON_UPLOAD_ACTIONS = frozenset({
         "actions/checkout", "actions/download-artifact", "actions/cache", "actions/cache/save",
         "actions/cache/restore", "actions/setup-node", "actions/setup-python", "actions/setup-java",
@@ -2542,11 +2543,55 @@ class WorkflowRules:
         r"""([\w.:-]+)(?:[ \t]+(?:[\w/.,:@%+=-]+|'[^'\n]*'|"[^"$`\\\n]*"))*[ \t]*"""
     )
 
+    # Review of #357 (run `ouzel`): names that, in an `env`, make an action from the list above, Harden-Runner, an
+    # agent's CLI or `echo` run code the checker did not read, besides `steers` (bash's, the loader's, Python's,
+    # `PATH`, `HOME`): Node.js's, since every action above, Harden-Runner and most agents' CLIs are Node.js
+    # programs, run with the token that uploads artifacts; and git's, since actions/checkout runs git (identity
+    # names excepted). What other programs read for their settings is not read.
+    _UPLOAD_STEERING_NAMES = frozenset({"NODE_OPTIONS", "NODE_PATH"})
+    _UPLOAD_STEERING_PREFIXES = ("GIT_",)
+    _UPLOAD_PLAIN_PREFIXES = ("GIT_AUTHOR_", "GIT_COMMITTER_")
+
+    def _upload_env_steers(self, job: Job, step: Step) -> bool:
+        """Whether a variable given to the step, or the job's container, can make it run code the checker did
+        not read: `_bash_env` (bash's, the loader's, Python's, `PATH`, `HOME`, an `env` written as one
+        expression, a container's `env` or `options`, an earlier step that may change later steps), a job
+        container (its image is not read), or a name in `_UPLOAD_STEERING_NAMES` or under
+        `_UPLOAD_STEERING_PREFIXES` in the step's, the job's or the workflow's `env`."""
+        if job.raw.get("container") is not None or self._bash_env(job, step):
+            return True
+        for scope in (step.raw, job.raw, self.wf.raw):
+            env = scope.get("env") if isinstance(scope, dict) else None
+            if not isinstance(env, dict):
+                continue
+            for key in env:
+                name = str(key).strip().upper()
+                if name in self._UPLOAD_STEERING_NAMES or (name.startswith(self._UPLOAD_STEERING_PREFIXES)
+                                                           and not name.startswith(self._UPLOAD_PLAIN_PREFIXES)):
+                    return True
+        return False
+
+    def _script_steers_action(self, job: Job) -> str | None:
+        """GitHub's firewall route only (review of #357, run `ouzel`): the agent runs there as a step of its own,
+        with the runner's file commands. A step that runs a script, the agent's own included, can write
+        `GITHUB_ENV` and `GITHUB_PATH`, which change what every later step runs, the post steps of actions used
+        before it included (actions/checkout's runs `git`, found through the `PATH`). An action runs with the
+        token that uploads artifacts. So in a job with both, the checker cannot rule out an upload. Under OBAAF's
+        egress action the confined command cannot reach those files (slice 2c.9), so this is not read there."""
+        script = next((step for step in job.steps if step.uses is None), None)
+        action = next((step for step in job.steps if step.uses is not None), None)
+        if script is None or action is None:
+            return None
+        return (f"step '{one_line(script.name, 80)}' in job '{one_line(job.id, 80)}' runs a script, which can change "
+                f"through GITHUB_ENV or GITHUB_PATH what step '{one_line(action.name, 80)}' runs in its main or post "
+                "step, and an action runs with the token that uploads artifacts")
+
     def _artifact_upload(self, job: Job) -> str | None:
         """Return producer-side evidence. A later job's existence or behavior is immaterial."""
         direct_agents = (self.detection.get("agent_installs") or {}).values()
         releases = self.detection.get("egress_action_releases") or ()
         monitors = self.detection.get("harden_runner_releases") or {}
+        steered = "a variable in an env, or the job's container, can make it run code the checker did not read"
         for step in job.steps:
             action = step.clean_action
             where = f"step '{one_line(step.name, 80)}' in job '{one_line(job.id, 80)}'"
@@ -2554,12 +2599,20 @@ class WorkflowRules:
                 return f"{where} uploads an artifact"
             if step.uses is not None:
                 ref = step.uses.partition("@")[2]
-                if (action in self._NON_UPLOAD_ACTIONS or (step.confines and ref in releases)
-                        or (action == "step-security/harden-runner" and ref in monitors)):
+                if step.confines and ref in releases:
+                    continue    # its own steps' variables were examined by slices 2c.9 to 2c.12
+                if action in self._NON_UPLOAD_ACTIONS or (action == "step-security/harden-runner" and ref in monitors):
+                    if self._upload_env_steers(job, step):
+                        return (f"{where} uses an action that does not upload, but {steered}, with the token "
+                                "that uploads artifacts")
                     continue
                 return f"{where} uses an action whose implementation may upload an artifact"
             if self._installs_only(job, step):
+                if job.raw.get("container") is not None:
+                    return f"{where} installs an agent's CLI, but {steered}"
                 continue
+            if self._upload_env_steers(job, step):
+                return f"{where} runs a script, and {steered}"
             if self._failfast_shell(job, step) is not None and expr_mod.OPEN not in step.run:
                 lines = [line.strip(" \t") for line in step.run.split("\n")]
                 commands = (self._LITERAL_COMMAND.fullmatch(line) for line in lines
@@ -2679,7 +2732,7 @@ class WorkflowRules:
                 unsure.append(f"the policy allows {one_line(', '.join(wide[:5]), 120)}, which is or has under it "
                               "a public suffix (where anyone can register a name), and the firewall's README does "
                               "not say whether an allowed name covers the names under it")
-        upload = self._artifact_upload(job)
+        upload = self._artifact_upload(job) or self._script_steers_action(job)
         if upload:
             unsure.append(f"{upload}. The job's network restriction does not extend to its artifact in another job")
         verdict = egress_mod.worst(problems, unsure)
@@ -3203,8 +3256,7 @@ class WorkflowRules:
                          "the provider is asked to fetch or connect to for it (remote MCP servers, URLs); the proxy "
                          "refuses the providers' hosted web search and fetch tools, in the requests it can read, and "
                          "nothing else of that kind")
-        parts.append("and anything the command prints to the job's log or leaves for a later actions/upload-artifact "
-                     "step to save")
+        parts.append("and anything the command prints to the job's log")
         return "Not blocked: " + "; ".join(parts)
 
     def _egress_action(self, job: Job) -> egress_mod.Reading | None:
@@ -3374,9 +3426,9 @@ class WorkflowRules:
         if unread_token and not outside:
             unsure.append("the job does not declare its token's permissions, so the repository's default applies, "
                           "which the checker does not read, and every action is given that token")
-        # What runs after (or beside) the confined command. Only `actions/upload-artifact` may: it saves
-        # files as data. A script, or any other action, could run or load what the command wrote, and
-        # the checker cannot tell reading from running. Steps before it are read for what their post
+        # What runs after (or beside) the confined command. `actions/upload-artifact` is read by
+        # `_artifact_upload` as an upload (decision D-132). A script, or any other action, could run or
+        # load what the command wrote, and the checker cannot tell reading from running. Steps before it are read for what their post
         # steps or the processes they leave running could reach: the outputs, the scratch directory by
         # its name, or /tmp.
         ids = {str(step.raw.get("id")).lower() for step in confined if step.raw.get("id") is not None}
@@ -3411,8 +3463,8 @@ class WorkflowRules:
                               f"({egress_mod.leaves_process(step.run)}), which could reach what the command wrote")
         if after:
             group(unsure, after, " can run after it or beside it, and the checker cannot tell "
-                  "whether it runs or loads anything the command wrote (only actions/upload-artifact is "
-                  "taken to save files as data)")
+                  "whether it runs or loads anything the command wrote (an actions/upload-artifact step is "
+                  "read as an upload instead)")
         upload = self._artifact_upload(job)
         if upload:
             unsure.append(f"{upload}. The job's network restriction does not extend to its artifact in another job")

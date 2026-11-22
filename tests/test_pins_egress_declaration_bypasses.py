@@ -304,7 +304,9 @@ class FirewallPolicyTest(unittest.TestCase):
     """OBAAF-GHA-020 under GitHub's native firewall."""
 
     def firewall(self, policy, runs_on="ubuntu-24.04-firewall"):
-        return run_check(workflow(CHECKOUT + "\n      - run: claude -p 'review'", runs_on=runs_on), policy=policy)
+        # No action in the job: since the review of #357 a script beside an action is "cannot tell" on this route
+        # (`test_an_action_beside_a_script_is_cannot_tell`), which would hide what these tests are about.
+        return run_check(workflow("      - run: claude -p 'review'", runs_on=runs_on), policy=policy)
 
     @staticmethod
     def verdict(result):
@@ -327,6 +329,19 @@ class FirewallPolicyTest(unittest.TestCase):
                                runs_on="[ubuntu-24.04-firewall, ubuntu-24.04-firewall]")
         f = [f for f in result.findings if f.rule == "OBAAF-GHA-020"][0]
         self.assertEqual(f.state, "fixed")
+
+    def test_an_action_beside_a_script_is_cannot_tell(self):
+        """Review of #357 (run `ouzel`): the agent's own step can write GITHUB_PATH or GITHUB_ENV, which change
+        what actions/checkout's post step runs, and an action runs with the token that uploads artifacts."""
+        for steps in (CHECKOUT + "\n      - run: claude -p 'review'",
+                      "      - run: claude -p 'review'\n" + CHECKOUT,
+                      f"      - uses: actions/download-artifact@{'b' * 40}\n      - run: claude -p 'review'"):
+            with self.subTest(steps=steps):
+                result = run_check(workflow(steps, runs_on="ubuntu-24.04-firewall"),
+                                   policy="mode: enforce\nallow: [api.example.com]\n")
+                f = [f for f in result.findings if f.rule == "OBAAF-GHA-020"][0]
+                self.assertEqual(f.state, "cannot-tell")
+                self.assertIn("can change through GITHUB_ENV or GITHUB_PATH what step", f.controls[-1].detail)
 
     def test_a_cleared_finding_names_the_defaults_and_that_the_label_is_taken_at_its_word(self):
         result = self.firewall("mode: enforce\nallow: [api.example.com]\n")
