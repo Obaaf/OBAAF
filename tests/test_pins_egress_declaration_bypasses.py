@@ -333,8 +333,8 @@ class FirewallPolicyTest(unittest.TestCase):
     def test_an_action_beside_a_script_is_cannot_tell(self):
         """Reviews of #357 (run `ouzel`): the agent's own step can write GITHUB_PATH or GITHUB_ENV, which change
         what a later step or actions/checkout's post step runs, and an action runs with the token that uploads
-        artifacts. An action before the agent with no post step, and a job whose scripts are plain `echo` lines,
-        are not counted."""
+        artifacts. An action before the agent with no post step is not counted, and neither is a plain `echo`
+        line as the script (the last case names the agent's step, not the `echo` before it)."""
         policy = "mode: enforce\nallow: [api.example.com]\n"
         b = "b" * 40
         cases = {

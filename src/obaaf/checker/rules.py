@@ -2529,8 +2529,8 @@ class WorkflowRules:
     EGRESS_ID = "egress-enforced"
 
     # Actions whose ordinary operation the checker can identify without reading repository code: they are not
-    # artifact uploads, and the only programs they start are git and tar, whose variables the checker reads
-    # (`_UPLOAD_STEERING_*`). What they save to a cache is not read here (only the egress action's route reads a
+    # artifact uploads, and they start only git (git-lfs or ssh when asked for), tar and the compressors tar
+    # uses (zstd, gzip), whose code-loading variables the checker reads (`steers`, `_UPLOAD_STEERING_*`). What they save to a cache is not read here (only the egress action's route reads a
     # cache of its output, as "not met"). The second review of #357 (run `ouzel`) took the `actions/setup-`
     # actions out: they start the tools they install, which read the repository's files and variables the
     # checker does not read (by their source, not run: setup-node runs `yarn --version`, which Yarn 1 hands to
@@ -2626,7 +2626,7 @@ class WorkflowRules:
         steered = "a variable in an env, or an earlier step, can make it run code the checker did not read"
         if job.raw.get("container") is not None and job.steps:
             return (f"job '{one_line(job.id, 80)}' runs in a container, whose image the checker does not read, and "
-                    "every step of the job runs in it")
+                    "its scripts and JavaScript actions run in it")
         for step in job.steps:
             action = step.clean_action
             where = f"step '{one_line(step.name, 80)}' in job '{one_line(job.id, 80)}'"
