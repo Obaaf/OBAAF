@@ -1,0 +1,85 @@
+name: Validate guidance for the proposed egress pin
+on:
+  push:
+    branches: [lead/verify-248-public-guidance-7266b86]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Verify sources and set up the test workspace
+        run: |
+          set -euo pipefail
+          git diff --exit-code 7266b8694173fab6f6bee685e951985e6ed98eae HEAD -- src
+          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-guidance.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Check the proposed pin and settings through the installed CLI
+        run: |
+          set -euo pipefail
+          PYTHONPATH=tests python - <<'PY'
+          import json
+          from pathlib import Path
+          from subprocess import run
+          from obaaf.catalog import load
+          from test_settings_evidence import EvidenceTests
+          from test_egress_recognised import keyed, workflow
+          from test_egress_artifact_producers import upload
+          
+          pin = "80db1e68769165c9ecf24e553254fa35d6e168d5"
+          catalogue = Path("src/obaaf/data/detection.yaml")
+          text = catalogue.read_text()
+          empty = "egress_action_releases: []\n"
+          assert text.count(empty) == 1
+          catalogue.write_text(text.replace(empty, f"egress_action_releases:\n  - {pin}\n"))
+          assert load().detection["egress_action_releases"] == [pin]
+          
+          def report(root, *flags):
+              result = run(["obaaf", "check", str(root), "--format", "json", "--fail-on", "never", *flags],
+                           capture_output=True, text=True, check=True)
+              return json.loads(result.stdout)
+          
+          def verdicts(result, group, rule):
+              return {c["id"]: c["verdict"] for finding in result[group] if finding["rule"] == rule
+                      for c in finding["controls"]}
+          
+          EvidenceTests.setUpClass()
+          fixture = EvidenceTests()
+          fixture.setUp()
+          try:
+              folder = fixture._agent_repository("protected_secrets: {PACKAGE_INDEX_TOKEN: release}\n"
+                                                "lanes: {'.github/workflows/ci.yml#agent': agent}\n")
+              path = folder / "workflows/ci.yml"
+              step = keyed(ref=pin, step_env={"ANTHROPIC_API_KEY": "$" + "{{ secrets.PACKAGE_INDEX_TOKEN }}"})
+              path.write_text(workflow(step, job_extra="    environment: release"))
+              flags = ("--settings", str(fixture.path))
+              missing = report(fixture.root)
+              assert "cannot tell" in verdicts(missing, "findings", "OBAAF-GHA-005").values()
+              complete = report(fixture.root, *flags)
+              controls = verdicts(complete, "fixed", "OBAAF-GHA-005")
+              assert len(controls) == 5 and set(controls.values()) == {"verified"}, controls
+              assert verdicts(complete, "fixed", "OBAAF-GHA-020")["egress-enforced"] == "verified"
+              path.write_text(workflow(step + "\n" + upload(), job_extra="    environment: release"))
+              uploaded = report(fixture.root, *flags)
+              assert verdicts(uploaded, "findings", "OBAAF-GHA-005")["key-out-of-reach"] == "cannot tell"
+              assert verdicts(uploaded, "findings", "OBAAF-GHA-020")["egress-enforced"] == "cannot tell"
+              print("Missing settings keeps GHA-005 open. All five controls verify with complete settings. "
+                    "An agent upload withholds key isolation and egress credit.")
+          finally:
+              fixture.doCleanups()
+          PY
+      - name: Verify the site claims, adoption guide and local links
+        run: |
+          set -euo pipefail
+          PYTHONPATH=tests python -m unittest -v test_site_claims test_adoption_path
+          python site/build.py --output "$RUNNER_TEMP/pin-guidance-site"
