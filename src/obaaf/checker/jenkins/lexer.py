@@ -305,8 +305,15 @@ class Lexer:
         if src.startswith(("/*", "//"), self.pos):
             return True
         j = self.pos - 1
-        while j >= begin and src[j] in " \t\r\n":
-            j -= 1
+        while True:
+            while j >= begin and src[j] in " \t\r\n":
+                j -= 1
+            if j - 1 >= begin and src[j] == "/" and src[j - 1] == "*":
+                opening = src.rfind("/*", begin, j - 1)     # a comment before it: look past it
+                if opening != -1:
+                    j = opening - 1
+                    continue
+            break
         if j < begin:
             return True
         c = src[j]

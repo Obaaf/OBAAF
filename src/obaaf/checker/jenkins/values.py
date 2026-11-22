@@ -124,6 +124,7 @@ class Judge:
         self.depth = 0
         self.cut = False          # some part was read by the names in its text, past a limit
         self.recursed = False     # a method's result was cut where it called itself
+        self.spent = False        # a budget ran out
 
     # ---------------------------------------------------------------- entry points
     def value(self, node, scope: dict | None = None):
@@ -148,7 +149,7 @@ class Judge:
         if self.budget <= 0 or self.p.judge_budget <= 0 or len(self.stack) > 40:
             # Past the reader's budget for this value or this file, the rest is read by the names in its text and
             # is at least "cannot tell", never a pass (the second review of slice 2d.2).
-            self.cut = True
+            self.cut = self.spent = True
             return worst(self.by_text(m.source_texts(node)),
                          ("a value larger than the checker reads", "unknown",
                           "a value or file larger than the checker reads value by value"))
@@ -351,9 +352,13 @@ class Judge:
                         f"build cause text (currentBuild.{parts[1]})"
                     return (shown, "high", shown)
             for i in range(len(parts), 0, -1):         # m.title = x; "${m.title}", and "${m.anything}" for m
-                hit = _tainted(p, ".".join(parts[:i]))
+                key = ".".join(parts[:i])
+                hit = _tainted(p, key)
                 if hit is not None:
                     return hit
+                if key in p.caller_values and key not in scope:
+                    # opts.target = config.target in a vars/ step: a caller's value (the fourth review of 2d.2).
+                    return (path, "unknown", p.caller_values[key])
             if root in scope:
                 return scope[root]
             hit = self.name(root, scope) if len(parts) > 1 else None
@@ -466,6 +471,13 @@ class Judge:
 
     def method_result(self, name: str, call: Call, scope: dict):
         """What a method of this file returns, with its parameters given what the call passes."""
+        if self.p.judge_budget <= 0 or self.budget <= 0:
+            # A budget is spent: the call is not expanded again (the fourth review of 2d.2: 72,737 calls).
+            from obaaf.checker.jenkins import model as m
+            self.cut = self.spent = True
+            return worst(self.by_text(m.source_texts(call)),
+                         ("a value larger than the checker reads", "unknown",
+                          "a value or file larger than the checker reads value by value"))
         if name in self.stack:
             # A method calling itself: the recursive call can return what it is given (the third review of 2d.2).
             self.recursed = True
@@ -485,7 +497,10 @@ class Judge:
         # A method's result depends on what it is given and on the state of the names its body (and the methods it
         # calls) can read: worked out once for each (the first two reviews of slice 2d.2: helpers that each call the
         # next twice took seconds). A result computed under a cut (recursion, a budget) is not kept.
-        memo_key = (name, tuple(args), named, frozenset(self.function_params or ()), self.state_of(name))
+        # The stack is part of the key, so a result cut where the method calls itself or past twelve methods is kept
+        # only for the same place in the chain; a result computed after a budget ran out is never kept.
+        memo_key = (name, tuple(args), named, frozenset(self.function_params or ()), tuple(self.stack),
+                    self.state_of(name))
         hit = self.p.judge_cache.get(memo_key)
         if hit is not None:
             return hit[0]
@@ -498,15 +513,15 @@ class Judge:
                 inner[param] = worst(*args[i:])       # varargs: the rest
             else:
                 inner[param] = args[i] if i < len(args) else None
-        cut_before, recursed_before = self.cut, self.recursed
-        self.cut = self.recursed = False
+        spent_before = self.spent
+        self.spent = False
         self.stack.append(name)
         try:
             result = self.block_result(mdef.body, inner)
         finally:
             self.stack.pop()
-        clean = not (self.cut or self.recursed)
-        self.cut, self.recursed = self.cut or cut_before, self.recursed or recursed_before
+        clean = not self.spent
+        self.spent = self.spent or spent_before
         if clean:
             if len(self.p.judge_cache) > 50000:
                 self.p.judge_cache.clear()
