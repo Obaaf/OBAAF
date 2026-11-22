@@ -64,9 +64,9 @@ class ArtifactProducerTest(unittest.TestCase):
         self.assertEqual(verdict(egress(wide)), NOT_MET)
 
     def test_a_variable_that_makes_a_step_run_unread_code_withholds_credit(self):
-        """Review of #357 (run `ouzel`): `NODE_OPTIONS`, the loader's variables, bash's, git's config variables or
-        a job container can make an action the list trusts, `echo` or the agent's CLI run code the checker did
-        not read; in an action that code holds the token that uploads artifacts."""
+        """Reviews of #357 (run `ouzel`): `NODE_OPTIONS`, the loader's variables, bash's, git's config variables,
+        `TAR_OPTIONS`, a job container or an earlier step can make an action the list trusts, `echo` or the agent's
+        CLI run code the checker did not read; in an action that code holds the token that uploads artifacts."""
         firewall_agent = "      - run: claude -p review"
         cases = {
             "workflow NODE_OPTIONS, checkout": ("action", CHECKOUT + "\n" + keyed(), "", "env: {NODE_OPTIONS: --require ./x.js}"),
@@ -87,6 +87,36 @@ class ArtifactProducerTest(unittest.TestCase):
                 result = run_check(workflow(steps, runs_on=runner, job_extra=job_extra, top=top), policy=FIREWALL)
                 self.assertEqual(verdict(egress(result)), CANNOT_TELL)
                 self.assertIn("can make it run code the checker did not read", egress(result).controls[0].detail)
+        # The second review of #357: a job container, an earlier step that names GITHUB_PATH before an install, and
+        # the `actions/setup-` actions, which start tools that read the repository and variables the checker does not.
+        b = "b" * 40
+        more = {
+            "a job container, action route": ("action", CHECKOUT + "\n" + keyed(), "    container: node:20", "",
+                                              "runs in a container, whose image the checker does not read"),
+            "a job container, firewall": ("firewall", keyed(), "    container: node:20", "",
+                                          "runs in a container, whose image the checker does not read"),
+            "an install after a step naming GITHUB_PATH": (
+                "action", CHECKOUT + "\n      - run: echo GITHUB_PATH\n      - run: npm install -g @anthropic-ai/claude-code\n"
+                + keyed(), "", "", "can make it run code the checker did not read"),
+            "setup-go": ("action", CHECKOUT + f"\n      - uses: actions/setup-go@{b}\n" + keyed(), "", "",
+                         "uses an action whose implementation may upload an artifact"),
+            "setup-node": ("action", CHECKOUT + f"\n      - uses: actions/setup-node@{b}\n" + keyed(), "", "",
+                           "uses an action whose implementation may upload an artifact"),
+            "XDG_CONFIG_HOME": ("action", CHECKOUT + "\n" + keyed(), "    env: {XDG_CONFIG_HOME: ./cfg}", "",
+                                "can make it run code the checker did not read"),
+            "TAR_OPTIONS on a cache step": ("action", CHECKOUT + f"\n      - uses: actions/cache@{b}\n"
+                                            "        with: {path: deps, key: k}\n        env: {TAR_OPTIONS: --x}\n"
+                                            + keyed(), "", "", "can make it run code the checker did not read"),
+        }
+        for name, (route, steps, job_extra, top, reason) in more.items():
+            with self.subTest(name):
+                result = run_check(workflow(steps, runs_on=ROUTES[route][0], job_extra=job_extra, top=top), policy=FIREWALL)
+                self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+                self.assertIn(reason, egress(result).controls[0].detail)
+        # The action route's key-out-of-reach too (the commit message of the first review said so).
+        steered = workflow(f"      - uses: actions/checkout@{SHA}\n        env: {{NODE_OPTIONS: --require ./x.js}}\n" + keyed())
+        controls = {c.id: c.verdict for c in secret_finding(run_check(steered)).controls}
+        self.assertEqual((controls["egress-enforced"], controls["key-out-of-reach"]), (CANNOT_TELL, CANNOT_TELL))
         plain = {
             "identity names": ("action", CHECKOUT + "\n" + keyed(), "    env: {GIT_AUTHOR_NAME: bot, GIT_COMMITTER_EMAIL: b@x}", ""),
             "NODE_ENV": ("firewall", firewall_agent + "\n        env: {NODE_ENV: production}", "", ""),

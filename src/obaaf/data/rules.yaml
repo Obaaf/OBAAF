@@ -757,17 +757,18 @@ rules:
       `egress-enforced` credit "cannot tell", even for inspection-only uploads with no visible download
       (decision D-132). The same applies to `key-out-of-reach` under OBAAF's action. An independent "not
       met" verdict stands. A possible upload is a step that uses upload-artifact or upload-pages-artifact;
-      one that uses any action but `actions/checkout`, `actions/download-artifact`, `actions/cache` and the
-      `actions/setup-` actions for Node.js, Python, Java, Go, .NET and Ruby, OBAAF's egress action and
-      Harden-Runner at listed commits (so an agent run through an action is "cannot tell"); one that runs a
-      script other than lines of `echo`, `pwd`, `true`, `:` or an agent's CLI with literal arguments in a
-      POSIX shell the checker reads, or an install of an agent's CLI (so `npm ci` or `make` is "cannot
-      tell"); any of these when an `env` sets a variable that can make it run code the checker did not read
-      (bash's, the loader's, Python's, `PATH`, `HOME`, `NODE_OPTIONS`, `NODE_PATH`, git's but its identity
-      names), when the job runs in a container, or after a step that may change later steps; and, on the
-      firewall only, any action in a job that also runs a script, because a script, the agent's included,
-      can change through `GITHUB_ENV` or `GITHUB_PATH` what a later step or an earlier action's post step
-      runs, and actions hold the token that uploads artifacts.
+      one that uses any action but `actions/checkout`, `actions/download-artifact`, `actions/cache`, and
+      OBAAF's egress action and Harden-Runner at listed commits (so an agent run through an action, or an
+      `actions/setup-` action, is "cannot tell"); one that runs a script other than lines of `echo`, `pwd`,
+      `true`, `:` or an agent's CLI with literal arguments in a POSIX shell the checker reads, or an install
+      of an agent's CLI (so `npm ci` or `make` is "cannot tell"); every step of a job in a container; a step
+      otherwise not counted, the egress action aside, when an `env` sets a variable that can make it run
+      code the checker did not read (bash's, the loader's, Python's, `PATH`, `HOME`, `NODE_OPTIONS`,
+      `NODE_PATH`, git's but its identity names, `XDG_CONFIG_HOME`, `TAR_OPTIONS`) or after a step that may
+      change later steps; and, on the firewall only, an action after a script that is not plain `echo`
+      lines, or one with a post step before it (`actions/checkout`), because the script, the agent's
+      included, can change through `GITHUB_ENV` or `GITHUB_PATH` what those run, and actions hold the token
+      that uploads artifacts (read from the runner's code, not run).
       Each credential
       given to the action's step is placed as the action reads its inputs: a model key named in
       `model-keys` goes to AWF's API proxy, whose provider host is then shown after the allow-list, and

@@ -331,17 +331,30 @@ class FirewallPolicyTest(unittest.TestCase):
         self.assertEqual(f.state, "fixed")
 
     def test_an_action_beside_a_script_is_cannot_tell(self):
-        """Review of #357 (run `ouzel`): the agent's own step can write GITHUB_PATH or GITHUB_ENV, which change
-        what actions/checkout's post step runs, and an action runs with the token that uploads artifacts."""
-        for steps in (CHECKOUT + "\n      - run: claude -p 'review'",
-                      "      - run: claude -p 'review'\n" + CHECKOUT,
-                      f"      - uses: actions/download-artifact@{'b' * 40}\n      - run: claude -p 'review'"):
+        """Reviews of #357 (run `ouzel`): the agent's own step can write GITHUB_PATH or GITHUB_ENV, which change
+        what a later step or actions/checkout's post step runs, and an action runs with the token that uploads
+        artifacts. An action before the agent with no post step, and a job whose scripts are plain `echo` lines,
+        are not counted."""
+        policy = "mode: enforce\nallow: [api.example.com]\n"
+        b = "b" * 40
+        cases = {
+            CHECKOUT + "\n      - run: claude -p 'review'": ("cannot-tell", "what the post step of step 'actions/checkout@"),
+            "      - run: claude -p 'review'\n" + CHECKOUT: ("cannot-tell", "which runs after it, runs"),
+            "      - run: claude -p 'review'\n" + f"      - uses: actions/download-artifact@{b}":
+                ("cannot-tell", "which runs after it, runs"),
+            f"      - uses: actions/download-artifact@{b}\n      - run: claude -p 'review'": ("fixed", None),
+            f"      - uses: actions/cache/restore@{b}\n        with: {{path: x, key: k}}\n      - run: claude -p 'review'":
+                ("fixed", None),
+            CHECKOUT + "\n      - run: echo hello\n      - run: claude -p 'review'":
+                ("cannot-tell", "step 'step 3' in job 'agent' runs a script"),
+        }
+        for steps, (state, reason) in cases.items():
             with self.subTest(steps=steps):
-                result = run_check(workflow(steps, runs_on="ubuntu-24.04-firewall"),
-                                   policy="mode: enforce\nallow: [api.example.com]\n")
+                result = run_check(workflow(steps, runs_on="ubuntu-24.04-firewall"), policy=policy)
                 f = [f for f in result.findings if f.rule == "OBAAF-GHA-020"][0]
-                self.assertEqual(f.state, "cannot-tell")
-                self.assertIn("can change through GITHUB_ENV or GITHUB_PATH what step", f.controls[-1].detail)
+                self.assertEqual(f.state, state)
+                if reason:
+                    self.assertIn(reason, f.controls[-1].detail)
 
     def test_a_cleared_finding_names_the_defaults_and_that_the_label_is_taken_at_its_word(self):
         result = self.firewall("mode: enforce\nallow: [api.example.com]\n")

@@ -106,7 +106,7 @@ def work_order(job, index, step, blocked, broken, options, result):
         "workflow or job environments. Remove OIDC and models permissions. Review steps that could run "
         "beside the agent. Keep the confined step last. A possible artifact upload makes otherwise verified "
         "egress and key isolation 'cannot tell': an upload step, an action other than actions/checkout, "
-        "download-artifact, cache and the actions/setup- actions, or a script such as npm ci or make, anywhere "
+        "download-artifact and cache (an actions/setup- action counts), or a script such as npm ci or make, anywhere "
         "in the job. Plan a separate job for builds, uploads and later commit, "
         "comment or pull request steps.",
         "5. For each protected secret, verify the configured environment, its protected-branch rule and "

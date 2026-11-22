@@ -2528,37 +2528,45 @@ class WorkflowRules:
     EGRESS_NAME = "a control the checker recognises limits the job's network access to an allow-list"
     EGRESS_ID = "egress-enforced"
 
-    # Actions whose ordinary operation the checker can identify without reading repository code.
-    # They are not artifact uploads; what they save to a cache is not read here (only the egress action's
-    # route reads a cache of its output, as "not met").
+    # Actions whose ordinary operation the checker can identify without reading repository code: they are not
+    # artifact uploads, and the only programs they start are git and tar, whose variables the checker reads
+    # (`_UPLOAD_STEERING_*`). What they save to a cache is not read here (only the egress action's route reads a
+    # cache of its output, as "not met"). The second review of #357 (run `ouzel`) took the `actions/setup-`
+    # actions out: they start the tools they install, which read the repository's files and variables the
+    # checker does not read (by their source, not run: setup-node runs `yarn --version`, which Yarn 1 hands to
+    # a `yarn-path` in the repository's `.yarnrc`; setup-go runs `go`, which `GOTOOLCHAIN` can switch to a
+    # toolchain it downloads).
     _NON_UPLOAD_ACTIONS = frozenset({
         "actions/checkout", "actions/download-artifact", "actions/cache", "actions/cache/save",
-        "actions/cache/restore", "actions/setup-node", "actions/setup-python", "actions/setup-java",
-        "actions/setup-go", "actions/setup-dotnet", "actions/setup-ruby",
+        "actions/cache/restore",
     })
+    # Of those, the ones with no post step, by their action.yml.
+    _NO_POST_ACTIONS = frozenset({"actions/download-artifact", "actions/cache/restore"})
 
     # Literal arguments only. The step's shell must be known, but errexit and pipefail
     # do not affect whether one of these commands uploads an artifact.
     _LITERAL_COMMAND = re.compile(
         r"""([\w.:-]+)(?:[ \t]+(?:[\w/.,:@%+=-]+|'[^'\n]*'|"[^"$`\\\n]*"))*[ \t]*"""
     )
+    _PLAIN_COMMANDS = frozenset({"echo", "pwd", "true", ":"})
 
     # Review of #357 (run `ouzel`): names that, in an `env`, make an action from the list above, Harden-Runner, an
     # agent's CLI or `echo` run code the checker did not read, besides `steers` (bash's, the loader's, Python's,
     # `PATH`, `HOME`): Node.js's, since every action above, Harden-Runner and most agents' CLIs are Node.js
-    # programs, run with the token that uploads artifacts; and git's, since actions/checkout runs git (identity
-    # names excepted). What other programs read for their settings is not read.
-    _UPLOAD_STEERING_NAMES = frozenset({"NODE_OPTIONS", "NODE_PATH"})
+    # programs, run with the token that uploads artifacts; git's (identity names excepted) and
+    # `XDG_CONFIG_HOME`, where git finds its global configuration, since actions/checkout runs git; and
+    # `TAR_OPTIONS`, since actions/cache runs tar. What other programs read for their settings is not read.
+    _UPLOAD_STEERING_NAMES = frozenset({"NODE_OPTIONS", "NODE_PATH", "XDG_CONFIG_HOME", "TAR_OPTIONS"})
     _UPLOAD_STEERING_PREFIXES = ("GIT_",)
     _UPLOAD_PLAIN_PREFIXES = ("GIT_AUTHOR_", "GIT_COMMITTER_")
 
     def _upload_env_steers(self, job: Job, step: Step) -> bool:
-        """Whether a variable given to the step, or the job's container, can make it run code the checker did
-        not read: `_bash_env` (bash's, the loader's, Python's, `PATH`, `HOME`, an `env` written as one
-        expression, a container's `env` or `options`, an earlier step that may change later steps), a job
-        container (its image is not read), or a name in `_UPLOAD_STEERING_NAMES` or under
-        `_UPLOAD_STEERING_PREFIXES` in the step's, the job's or the workflow's `env`."""
-        if job.raw.get("container") is not None or self._bash_env(job, step):
+        """Whether a variable given to the step, or an earlier step, can make it run code the checker did not
+        read: `_bash_env` (bash's, the loader's, Python's, `PATH`, `HOME`, an `env` written as one expression, a
+        container's `env` or `options`, an earlier step that may change later steps), or a name in
+        `_UPLOAD_STEERING_NAMES` or under `_UPLOAD_STEERING_PREFIXES` in the step's, the job's or the
+        workflow's `env`."""
+        if self._bash_env(job, step):
             return True
         for scope in (step.raw, job.raw, self.wf.raw):
             env = scope.get("env") if isinstance(scope, dict) else None
@@ -2571,27 +2579,54 @@ class WorkflowRules:
                     return True
         return False
 
+    def _literal_script(self, job: Job, step: Step, programs) -> bool:
+        """Whether a `run` step's script, in a POSIX shell the checker reads and with no `${{`, is lines of one
+        command each with literal arguments, every command one of `programs` (comment lines skipped)."""
+        if step.uses is not None or self._failfast_shell(job, step) is None or expr_mod.OPEN in step.run:
+            return False
+        lines = [line.strip(" \t") for line in step.run.split("\n")]
+        commands = (self._LITERAL_COMMAND.fullmatch(line) for line in lines if line and not line.startswith("#"))
+        return all(match and match[1] in programs for match in commands)
+
     def _script_steers_action(self, job: Job) -> str | None:
-        """GitHub's firewall route only (review of #357, run `ouzel`): the agent runs there as a step of its own,
-        with the runner's file commands. A step that runs a script, the agent's own included, can write
-        `GITHUB_ENV` and `GITHUB_PATH`, which change what every later step runs, the post steps of actions used
-        before it included (actions/checkout's runs `git`, found through the `PATH`). An action runs with the
-        token that uploads artifacts. So in a job with both, the checker cannot rule out an upload. Under OBAAF's
-        egress action the confined command cannot reach those files (slice 2c.9), so this is not read there."""
-        script = next((step for step in job.steps if step.uses is None), None)
-        action = next((step for step in job.steps if step.uses is not None), None)
-        if script is None or action is None:
+        """GitHub's firewall route only (reviews of #357, run `ouzel`): the agent runs there as a step of its own,
+        with the runner's file commands. A step that runs a script the checker does not read as plain `echo`,
+        `pwd`, `true` or `:` lines (the agent's own, or an install, whose packages' scripts run) can write
+        `GITHUB_ENV` and `GITHUB_PATH`, which change what later steps run, the post steps of actions used before
+        it included (actions/checkout's runs `git`, found through the `PATH`). An action runs with the token that
+        uploads artifacts. Both are read from the runner's and the actions' code, not run. An action before every
+        such script that has no post step (`_NO_POST_ACTIONS`), and OBAAF's egress action at a listed commit,
+        whose own steps read nothing a workflow can set for them (slices 2c.9 to 2c.12), are not counted. Under
+        OBAAF's egress action the confined command cannot reach those files (slice 2c.9), so this is not read
+        on that route."""
+        releases = self.detection.get("egress_action_releases") or ()
+        scripts = [step for step in job.steps
+                   if step.uses is None and not self._literal_script(job, step, self._PLAIN_COMMANDS)]
+        if not scripts:
             return None
-        return (f"step '{one_line(script.name, 80)}' in job '{one_line(job.id, 80)}' runs a script, which can change "
-                f"through GITHUB_ENV or GITHUB_PATH what step '{one_line(action.name, 80)}' runs in its main or post "
-                "step, and an action runs with the token that uploads artifacts")
+        first = scripts[0]
+        for step in job.steps:
+            if step.uses is None or (step.confines and step.uses.partition("@")[2] in releases):
+                continue
+            where = f"step '{one_line(first.name, 80)}' in job '{one_line(job.id, 80)}' runs a script, which can change"
+            if step.index > first.index:
+                return (f"{where} through GITHUB_ENV or GITHUB_PATH what step '{one_line(step.name, 80)}', which runs "
+                        "after it, runs, and an action runs with the token that uploads artifacts")
+            if step.clean_action not in self._NO_POST_ACTIONS:
+                return (f"{where} through GITHUB_ENV or GITHUB_PATH what the post step of step "
+                        f"'{one_line(step.name, 80)}', used before it, runs if the action has one (actions/checkout's "
+                        "has), and an action runs with the token that uploads artifacts")
+        return None
 
     def _artifact_upload(self, job: Job) -> str | None:
         """Return producer-side evidence. A later job's existence or behavior is immaterial."""
-        direct_agents = (self.detection.get("agent_installs") or {}).values()
+        direct_agents = set((self.detection.get("agent_installs") or {}).values())
         releases = self.detection.get("egress_action_releases") or ()
         monitors = self.detection.get("harden_runner_releases") or {}
-        steered = "a variable in an env, or the job's container, can make it run code the checker did not read"
+        steered = "a variable in an env, or an earlier step, can make it run code the checker did not read"
+        if job.raw.get("container") is not None and job.steps:
+            return (f"job '{one_line(job.id, 80)}' runs in a container, whose image the checker does not read, and "
+                    "every step of the job runs in it")
         for step in job.steps:
             action = step.clean_action
             where = f"step '{one_line(step.name, 80)}' in job '{one_line(job.id, 80)}'"
@@ -2607,19 +2642,10 @@ class WorkflowRules:
                                 "that uploads artifacts")
                     continue
                 return f"{where} uses an action whose implementation may upload an artifact"
-            if self._installs_only(job, step):
-                if job.raw.get("container") is not None:
-                    return f"{where} installs an agent's CLI, but {steered}"
+            if self._installs_only(job, step) or self._literal_script(job, step, direct_agents | self._PLAIN_COMMANDS):
+                if self._upload_env_steers(job, step):
+                    return f"{where} runs a script, and {steered}"
                 continue
-            if self._upload_env_steers(job, step):
-                return f"{where} runs a script, and {steered}"
-            if self._failfast_shell(job, step) is not None and expr_mod.OPEN not in step.run:
-                lines = [line.strip(" \t") for line in step.run.split("\n")]
-                commands = (self._LITERAL_COMMAND.fullmatch(line) for line in lines
-                            if line and not line.startswith("#"))
-                if all(match and (match[1] in direct_agents or match[1] in {"echo", "pwd", "true", ":"})
-                       for match in commands):
-                    continue
             return f"{where} runs a script whose artifact uploads the checker cannot rule out"
         return None
 
