@@ -124,7 +124,7 @@ class Judge:
         self.depth = 0
         self.cut = False          # some part was read by the names in its text, past a limit
         self.recursed = False     # a method's result was cut where it called itself
-        self.spent = False        # a budget ran out
+        self.spent = False        # a budget ran out, or a value sat deeper than the reader reads: not cached
 
     # ---------------------------------------------------------------- entry points
     def value(self, node, scope: dict | None = None):
@@ -132,7 +132,7 @@ class Judge:
         # structural reading must not exhaust the stack (the first review of slice 2d.2).
         if self.depth > 150:
             from obaaf.checker.jenkins import model as m
-            self.cut = True
+            self.cut = self.spent = True                 # depends on where the value sits: never cached
             return self.by_text(m.source_texts(node)) if node is not None else None
         self.depth += 1
         try:
@@ -537,7 +537,7 @@ class Judge:
         # (`m.t = x`) is read through its first part (the third review of slice 2d.2).
         for w in list(words):
             words.update(p.literal_values.get(w, ()))
-        dotted = [k for k in p.tainted if "." in k and k.split(".")[0] in words]
+        dotted = [k for k in list(p.tainted) + list(p.caller_values) if "." in k and k.split(".")[0] in words]
         words.update(dotted)
         self.budget -= len(words)
         p.judge_budget -= len(words)
