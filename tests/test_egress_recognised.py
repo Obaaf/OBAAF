@@ -97,7 +97,7 @@ class NativeFirewallTest(unittest.TestCase):
     """GitHub's native egress firewall: `runs-on: ubuntu-24.04-firewall` and a policy file in
     enforce mode, which the firewall's README says is read only at `.github/egress-firewall.yaml`."""
 
-    PLAIN = "      - run: python -m agents.fix"
+    PLAIN = "      - run: claude -p review"
 
     def firewall(self, policy=FIREWALL, **kw):
         kw.setdefault("runs_on", "ubuntu-24.04-firewall")
@@ -112,7 +112,7 @@ class NativeFirewallTest(unittest.TestCase):
         self.assertIn("printed to the job's log or saved as an artifact is not blocked", detail(f))
 
     def test_it_clears_the_egress_control_of_a_secret_too(self):
-        steps = "      - run: python -m agents.fix\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
+        steps = "      - run: claude -p review\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
         result = run_check(workflow(steps, runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
         secret = next(f for f in result.findings if f.rule == "OBAAF-GHA-005")
         self.assertEqual(next(c.verdict for c in secret.controls if c.id == "egress-enforced"), VERIFIED)
@@ -376,12 +376,12 @@ class EgressActionTest(unittest.TestCase):
         f = self.check(action(run="./scripts/agent.sh"), files=files, config={"lanes": {}})
         self.assertEqual(verdict(f), VERIFIED)
 
-    def test_uploading_the_output_is_fine_and_running_it_is_not(self):
+    def test_output_uploads_and_later_steps_limit_egress_evidence(self):
         upload = (f"      - uses: actions/upload-artifact@{SHA}\n"
                   "        with: {name: out, path: '${{ steps.agent.outputs.workspace }}'}")
-        self.assertEqual(verdict(self.check(action() + "\n" + upload)), VERIFIED)
+        self.assertEqual(verdict(self.check(action() + "\n" + upload)), CANNOT_TELL)
         named = upload.replace("      - uses:", "      - name: Upload what obaaf-egress left\n        uses:")
-        self.assertEqual(verdict(self.check(action() + "\n" + named)), VERIFIED)
+        self.assertEqual(verdict(self.check(action() + "\n" + named)), CANNOT_TELL)
         unsure = {
             "any script after it": "      - run: echo done",
             "another output": "      - run: echo '${{ steps.agent.outputs.denied }}'",
@@ -436,7 +436,10 @@ class EgressActionTest(unittest.TestCase):
             f = self.check(f"      - run: {json.dumps(run)}\n" + action())
             with self.subTest(run=run):
                 self.assertEqual(verdict(f), CANNOT_TELL)
-        self.assertEqual(verdict(self.check("      - run: make deps && make lint 2>&1\n" + action())), VERIFIED)
+                # Since D-133 any such script is also a possible upload; the reason under test must still be given
+                # (review of #357, run `ouzel`).
+                self.assertIn("may leave a process running beside it", detail(f))
+        self.assertFalse(egress_mod.leaves_process("make deps && make lint 2>&1"))
 
     def test_long_scripts_take_linear_time(self):
         """Found by the third review: a regular expression with chained `[^\\n]*` took 43 seconds on a
@@ -468,7 +471,7 @@ class EgressActionTest(unittest.TestCase):
         self.assertEqual(verdict(self.check(action(), job_extra=services)), CANNOT_TELL)
 
     def test_a_step_before_it_is_not_after_it_but_one_beside_it_is(self):
-        before = "      - run: make deps"
+        before = "      - run: echo preparing"
         self.assertEqual(verdict(self.check(before + "\n" + action())), VERIFIED)
         names_tmp = "      - run: rm -rf /tmp/obaaf-egress.old"
         self.assertEqual(verdict(self.check(names_tmp + "\n" + action())), CANNOT_TELL)
@@ -928,7 +931,12 @@ class BestControlTest(unittest.TestCase):
         late = f"{CHECKOUT}\n      - uses: step-security/harden-runner@{HR_2_22_0}\n        with: {{egress-policy: block}}"
         result = run_check(workflow(late + "\n      - run: claude -p x", runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
         f = egress(result)
-        self.assertEqual((f.kind, verdict(f)), ("firewall-runner", VERIFIED))
+        # The firewall's reading is the one kept. Since the review of #357 it is "cannot tell" here, not
+        # verified: the agent's step can change what the actions' post steps run (GITHUB_ENV, GITHUB_PATH).
+        self.assertEqual((f.kind, verdict(f)), ("firewall-runner", CANNOT_TELL))
+        self.assertIn("can change through GITHUB_ENV or GITHUB_PATH", detail(f))
+        alone = run_check(workflow("      - run: claude -p x", runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
+        self.assertEqual((egress(alone).kind, verdict(egress(alone))), ("firewall-runner", VERIFIED))
 
     def test_the_better_of_two_unproven_controls_stands(self):
         monitor = (f"      - uses: step-security/harden-runner@{HR_2_22_0}\n"
@@ -1171,7 +1179,7 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertEqual(verdict(f), VERIFIED)
 
     def test_githubs_native_firewall_holds_no_key(self):
-        steps = "      - run: python -m agents.fix\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
+        steps = "      - run: claude -p review\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
         result = run_check(workflow(steps, runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
         secret = secret_finding(result)
         verdicts = {c.id: c.verdict for c in secret.controls}
@@ -1181,7 +1189,7 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertEqual(secret.state, "new")
 
     def test_a_job_with_no_confined_command_is_not_met(self):
-        steps = "      - run: python -m agents.fix\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
+        steps = "      - run: claude -p review\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
         control = self.key(steps)
         self.assertEqual(control.verdict, NOT_MET)
         self.assertIn("no step of the job runs the agent's command behind a proxy", control.detail)
@@ -1415,10 +1423,16 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
                 self.assertIn("ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line", control.detail)
 
     def test_steps_after_it_cannot_reach_the_key(self):
-        """The step's process has ended; a later step can still matter to OBAAF-GHA-020, not to this."""
-        steps = keyed() + f"\n      - uses: actions/upload-artifact@{SHA}\n        with: {{name: out, path: out}}\n" \
-                          "      - run: nohup ./later.sh &"
+        """The step's process has ended, so a later step that does not upload cannot reach the key. Since D-133 a
+        later step that may upload an artifact makes this control "cannot tell" (review of #357, run `ouzel`)."""
+        steps = keyed() + "\n      - run: echo completed"
         self.assertEqual(self.key(CHECKOUT + "\n" + steps).verdict, VERIFIED)
+        for later in (f"      - uses: actions/upload-artifact@{SHA}\n        with: {{name: out, path: out}}",
+                      "      - run: nohup ./later.sh &"):
+            with self.subTest(later=later):
+                control = self.key(CHECKOUT + "\n" + keyed() + "\n" + later)
+                self.assertEqual(control.verdict, CANNOT_TELL)
+                self.assertIn("Another job could load the artifact", control.detail)
 
 
 # What slice 2c.10b's decision (D-070) rests on, at a commit of the action, as far as the workflow
@@ -2007,7 +2021,10 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
         for name, before in cases.items():
             control = self.key(before + keyed())
             with self.subTest(name):
-                self.assertEqual(control.verdict, VERIFIED, control.detail)
+                self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+                reason = control.detail.split(". Another job could load", 1)[0]
+                self.assertRegex(reason, r"^step '[^']+' in job 'agent' (?:uses an action whose implementation "
+                                 r"may upload an artifact|runs a script whose artifact uploads the checker cannot rule out)$")
 
     def test_openssl_variables_no_longer_count_in_any_spelling(self):
         """Slice 2c.11b: the floor's egress.py removes every OPENSSL_ variable, matched trimmed and

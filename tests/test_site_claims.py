@@ -185,10 +185,8 @@ jobs:
   triage:
     runs-on: {runs_on}
 {strategy}    steps:
-      - uses: anthropics/claude-code-action@0123456789abcdef0123456789abcdef01234567 # v1
-        with:
-          prompt: Triage this issue.
-"""
+      - run: claude -p "Triage this issue."
+{more}"""
 
 POLICY = "mode: enforce\nallow:\n  - api.anthropic.com\n"
 
@@ -200,7 +198,8 @@ class TheFirewallConditions(unittest.TestCase):
 
     def _gha020(self, workflow: dict | None = None, policy: str | None = POLICY, policy_name="egress-firewall.yaml",
                 single_file=False) -> str:
-        values = {"on": "issues", "permissions": "contents: read", "runs_on": "ubuntu-24.04-firewall", "strategy": ""}
+        values = {"on": "issues", "permissions": "contents: read", "runs_on": "ubuntu-24.04-firewall", "strategy": "",
+                  "more": ""}
         values.update(workflow or {})
         with TempDir() as tmp:
             (tmp / ".github" / "workflows").mkdir(parents=True)
@@ -225,7 +224,8 @@ class TheFirewallConditions(unittest.TestCase):
                           "sets mode: enforce",
                           "allows only plain host names, none of which is a public suffix or has one under it",
                           "the job's token has contents permission", "the job calls no reusable workflow",
-                          "no other workflow can call this one"):
+                          "no other workflow can call this one", "no step in the agent job may upload an artifact",
+                          "in a job that also runs a script"):
             self.assertIn(condition, words)
 
     def test_a_job_that_calls_a_reusable_workflow_is_not_cleared(self):
@@ -237,7 +237,7 @@ class TheFirewallConditions(unittest.TestCase):
             (tmp / ".github" / "workflows").mkdir(parents=True)
             (tmp / ".github" / "workflows" / "agent.yml").write_text(
                 AGENT_JOB.format(on="[issues, workflow_call]", permissions="contents: read",
-                                 runs_on="ubuntu-24.04-firewall", strategy=""), encoding="utf-8")
+                                 runs_on="ubuntu-24.04-firewall", strategy="", more=""), encoding="utf-8")
             (tmp / ".github" / "workflows" / "caller.yml").write_text(
                 "name: caller\non: issues\npermissions:\n  contents: read\njobs:\n  call:\n"
                 "    uses: ./.github/workflows/agent.yml\n", encoding="utf-8")
@@ -271,6 +271,10 @@ class TheFirewallConditions(unittest.TestCase):
             "a public suffix": dict(policy="mode: enforce\nallow:\n  - github.io\n"),
             "no contents permission": dict(workflow={"permissions": "issues: read"}),
             "callable by another workflow": dict(workflow={"on": "[issues, workflow_call]"}),
+            # Review of #357 (run `ouzel`): the page's "may upload an artifact" and "in a job that also runs a script".
+            "an upload step": dict(workflow={"more": f"      - uses: actions/upload-artifact@{'b' * 40}\n"
+                                                    "        with: {name: out, path: out}\n"}),
+            "actions/checkout beside the agent's step": dict(workflow={"more": f"      - uses: actions/checkout@{'b' * 40}\n"}),
         }
         for case, arguments in cases.items():
             with self.subTest(case):
