@@ -238,16 +238,18 @@ as `env.NAME` is a parameter. `env.getEnvironment()` and `System.getenv()` as a 
 variable. A value is followed through variables, `def (a, b) = [...]`,
 `env.X = ...`, `env['X'] = ...`, `env.setProperty`, `binding.setVariable`, `this.X = ...`, `withEnv` entries
 (written with `+` too), `sb << x` (chained too), `.append` (chained too), `.add` and `.put`, a closure's or a `for`
-loop's parameter over the value (`each`, `collect`, `with` and other iteration methods; an implicit `it` only inside
-its own closure), a closure held in a variable or a map and called, what a method of the file returns (twelve
+loop's parameter over the value (`each`, `collect`, `with` and other iteration methods; an implicit `it` holds the
+value in the body of the closure it belongs to, nested loops and closures called with it included, and never as a
+name for the whole file), a closure held in a variable, an alias of one or a map and called, what a method of the file returns (twelve
 methods deep, then cannot tell), named arguments into a `Map` parameter and varargs. A result that is a number, a
 boolean or a digest (`.length()`, `.toInteger()`, `as Integer`, `==`, `.contains()`, `.encodeBase64()`), a
 ternary choosing between literals, `URLEncoder.encode` and a `replaceAll('[^A-Za-z0-9._-]', '')` whitelist (only
 `replaceAll`, and only a class of letters, digits and `._@:+,/-`) carry no text. A value from a caller outside the
 file (a parameter of a method nothing here calls, inside that method; a local copy of one, an `env.X` set from
 one, the map a `vars/` step's closure fills through `body.delegate` or `body.setDelegate`) is cannot tell. So is an
-interpolation the parser cannot read. What the reader does not follow (past a budget per value, or nested deeper
-than it reads) it reads by the names in its text, as before.
+interpolation the parser cannot read, and so is any value past the reader's budget (per value, and per file, about
+a million steps): past it the value is read by the names in its text and is at least cannot tell, never a pass.
+Values nested deeper than it reads are read by the names in their text, as before.
 
 The sinks are `sh`, `bat`, `powershell` and `pwsh` (also as `steps.sh`, through a variable holding `this`, a
 pointer such as `this.&sh`, and `sh(*: opts)`), `bat`'s `%NAME%` (and `%NAME:~0,5%`, in any letter case, for a
@@ -270,7 +272,9 @@ parameter named `params` or `env` is read as the build's; a check of the value b
 recognised, and a whitelist that keeps `-` can still let the value add an option where it starts a word; the
 contents of workspace files (`readFile`, `readJSON`, the output of commands other than git) are not counted as
 untrusted; text written with `writeFile` and run later is not followed; a computed step name and `invokeMethod`
-make the file cannot tell; a comment inside `${...}` makes the step cannot tell.
+make the file cannot tell; a closure variable given to `each(f)`, a closure called as `m['name'](x)`, a `bat`
+script variable assigned more than once, `this.sb << x`, `def s = sb << x` and an alias of
+`env.getEnvironment()` used whole are not followed.
 
 **AI agents.** An agent CLI in a shell step (the patterns in `src/obaaf/data/detection.yaml`), a
 repository script that runs one, the AI Agent plugin's `aiAgent` step, steps and commands declared

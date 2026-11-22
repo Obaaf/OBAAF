@@ -310,6 +310,43 @@ class Lexer:
                 if self.pos >= len(src):
                     raise LexError("unterminated ${...} in a string", start_line, start_col)
                 ch = src[self.pos]
+                if src.startswith("$/", self.pos):
+                    # A dollar-slashy string inside ${...}: text up to `/$`, with `$$` and `$/` as escapes.
+                    self._advance(2)
+                    while not src.startswith("/$", self.pos):
+                        if self.pos >= len(src):
+                            raise LexError("unterminated dollar-slashy string in ${...}", start_line, start_col)
+                        self._advance(2 if src.startswith(("$$", "$/"), self.pos) else 1)
+                    self._advance(2)
+                    continue
+                if ch == "/":
+                    # Inside ${...}, `/*` and `//` begin comments, whose braces do not count; a `/` where a value can
+                    # start begins a slashy string, whose `//`, `/*` and braces are text (flagship slice 2d.2, from
+                    # its first two reviews: `replaceFirst(/^https?:\/\//, '')` is a regex, not a comment).
+                    if src.startswith("/*", self.pos):
+                        end = src.find("*/", self.pos + 2)
+                        if end == -1:
+                            raise LexError("unterminated comment in ${...}", start_line, start_col)
+                        self._advance(end + 2 - self.pos)
+                        continue
+                    if src.startswith("//", self.pos):
+                        end = src.find("\n", self.pos)
+                        self._advance((len(src) if end == -1 else end) - self.pos)
+                        continue
+                    before = src[begin:self.pos].rstrip()
+                    if not before or before[-1] in "(,=[{:?!&|+-*~<>;" or re.search(r"(?:^|\W)(?:return|in)$",
+                                                                                      before):
+                        self._advance()
+                        while self.pos < len(src) and src[self.pos] != "/":
+                            if src[self.pos] == "\\" and self.pos + 1 < len(src):
+                                self._advance()
+                            elif src[self.pos] == "\n":
+                                raise LexError("unterminated slashy string in ${...}", start_line, start_col)
+                            self._advance()
+                        if self.pos >= len(src):
+                            raise LexError("unterminated slashy string in ${...}", start_line, start_col)
+                        self._advance()
+                        continue
                 if src.startswith("'''", self.pos) or src.startswith('"""', self.pos):
                     q = src[self.pos:self.pos + 3]
                     self._advance(3)

@@ -230,7 +230,8 @@ class Pipeline:
     closure_params: dict = field(default_factory=dict)  # def run = { x -> ... }: run -> [x]
     # values.Judge's cache of method results and the total work it may do for one file (flagship slice 2d.2).
     judge_cache: dict = field(default_factory=dict)
-    judge_budget: int = 3_000_000
+    judge_words: dict = field(default_factory=dict)
+    judge_budget: int = 1_000_000
     taint_version: int = 0
     # Names set in the environment by the file (env.X =, env['X'] =, withEnv, environment {}, webhook variables):
     # what bat's %NAME% expands (flagship slice 2d.2).
@@ -1582,6 +1583,7 @@ class Builder:
         self.methods: dict[str, Block] = {}        # parameterless methods, for conditions
         self.defs: dict[str, list] = {}            # every top-level method, by name
         self.it_stack: list = []                   # the implicit `it` of the closure bodies being walked (2d.2)
+        self.closure_bodies: dict = {}             # def g = f: g -> f's body, for OBAAF-JEN-009 only (2d.2)
         self.called: set[str] = set()
         self.stack: list[str] = []
         self.budget = self.INLINE_BUDGET
@@ -1698,12 +1700,17 @@ class Builder:
         self.block(tree, start, top=True)
         # Each call inside a closure body whose implicit `it` holds a value, wherever the body was walked from
         # (flagship slice 2d.2): read by OBAAF-JEN-009 at each step.
+        # Outer bodies first, so the innermost body with its own `it` decides (a literal loop inside a tainted one).
+        bodies = []
         for block, found in list(self.p.it_values.values()):
-            if found is None:
-                continue
-            for n in find_nodes(block, lambda n: isinstance(n, Call), limit=200_000):
-                prev = self.p.step_it.get(id(n))
-                self.p.step_it[id(n)] = (n, found if prev is None or prev[0] is not n else _worst_result(prev[1], found))
+            calls = list(find_nodes(block, lambda n: isinstance(n, Call), limit=200_000))
+            bodies.append((len(calls), calls, found))
+        for _size, calls, found in sorted(bodies, key=lambda b: -b[0]):
+            for n in calls:
+                if found is None:
+                    self.p.step_it.pop(id(n), None)
+                else:
+                    self.p.step_it[id(n)] = (n, found)
         return self.p
 
     def trigger(self, node) -> None:
@@ -1901,13 +1908,13 @@ class Builder:
                             key = next(iter(seen))
                     if key is not None:
                         # env['T'] = x (2d.2): T holds x for OBAAF-JEN-009; OBAAF-JEN-013 reads `env` as before.
-                        from obaaf.checker.jenkins.values import Judge
                         self.p.env_set.add(key)
-                        self.taint(key, Judge(self.p).value(stmt.value))
+                        self.taint(key, self.judge(stmt.value))
                     else:
                         self.taint_env_any(stmt.value)
-                    # As before 2d.2, `env` itself is recorded as holding the value, which OBAAF-JEN-013 reads.
-                    self.track_value(target.split(".")[0], stmt.value, merge=True)
+                    # As before 2d.2, `env` itself is recorded as holding the value, which OBAAF-JEN-013 reads; it is
+                    # not tainted, so `env.Y` and the names read in a text are not reported for it.
+                    self.track_value(target.split(".")[0], stmt.value, merge=True, no_taint=True)
                 else:
                     # x['key'] = value, x.y[0] = value: the container now holds the value.
                     self.track_value(target.split(".")[0], stmt.value, merge=True)
@@ -2000,7 +2007,7 @@ class Builder:
         elif isinstance(stmt, Opaque):
             self.p.opaque.append((stmt.line, f"statement not analyzed ({stmt.reason})"))
 
-    def track_value(self, name: str, value, merge: bool = False) -> None:
+    def track_value(self, name: str, value, merge: bool = False, no_taint: bool = False) -> None:
         """Remember values that matter later: docker images, literal strings, and text from untrusted
         sources, however the value is built (interpolation, +, ?:, .trim(), env['X'], maps, lists)."""
         if value is None:
@@ -2082,6 +2089,8 @@ class Builder:
         # the root source, so a chain of copies reads `u (from CHANGE_TITLE)`. The output of a git command run with
         # returnStdout is commit text, file names or branch names (values.Judge.shell_output).
         from obaaf.checker.jenkins.values import Judge
+        if no_taint:
+            return
         if not merge:
             self.p.shell_aliases.pop(name, None)
             arms = [value.then, value.otherwise] if isinstance(value, Ternary) else [value]
@@ -2094,6 +2103,9 @@ class Builder:
         scope = {"it": self.it_stack[-1]} if self.it_stack and self.it_stack[-1] is not None else None
         if not merge and isinstance(value, Name) and value.name in self.p.closure_params:
             self.p.closure_params[name] = self.p.closure_params[value.name]      # def g = f (a closure)
+            body = self.closure_bodies.get(value.name) or self.closure_vars.get(value.name)
+            if body is not None:
+                self.closure_bodies[name] = body          # for OBAAF-JEN-009's `it` only; other rules unchanged
         if not merge and isinstance(value, MapLit):
             for k, v in value.entries:
                 if isinstance(v, Closure) and isinstance(k, str):
@@ -2106,6 +2118,12 @@ class Builder:
         if kind is not None:
             return
         self.taint(name, judge.value(value, scope))
+
+    def judge(self, value):
+        """values.Judge on a value where it stands in the walk: inside a closure body, with that body's `it`."""
+        from obaaf.checker.jenkins.values import Judge
+        scope = {"it": self.it_stack[-1]} if self.it_stack and self.it_stack[-1] is not None else None
+        return Judge(self.p).value(value, scope)
 
     def taint(self, name: str, found) -> None:
         """Record that `name` can hold what `found` (a values.Judge result) says: a source and its severity, or a
@@ -2126,8 +2144,8 @@ class Builder:
 
     def taint_env_any(self, value) -> None:
         """A value assigned to an environment variable whose name the file computes: any `env.X` may hold it."""
-        from obaaf.checker.jenkins.values import Judge, worst
-        found = Judge(self.p).value(value)
+        from obaaf.checker.jenkins.values import worst
+        found = self.judge(value)
         if found and found[1] != "unknown":
             current = (self.p.env_any[0], self.p.env_any[1], self.p.env_any[0]) if self.p.env_any else None
             best = worst(current, found)
@@ -2139,13 +2157,12 @@ class Builder:
         """A closure given to an iteration method, or a for-in loop, gets the receiver's elements in its parameters
         (flagship slice 2d.2: `[env.CHANGE_TITLE].each { t -> sh "echo ${t}" }` was quiet)."""
         from obaaf.checker.jenkins.values import Judge
-        judge = Judge(self.p)
-        kind = judge.root_kind(receiver)
+        kind = Judge(self.p).root_kind(receiver)
         if kind is not None:
             found = ("params", "medium", "params") if kind == "params" else (
                 "every environment variable", "high", "every environment variable")
         else:
-            found = judge.value(receiver)
+            found = self.judge(receiver)
         if isinstance(receiver, Name) and receiver.name in self.p.lists:
             receiver = self.p.lists[receiver.name]
         keys = None
@@ -2154,7 +2171,9 @@ class Builder:
         for n in names:
             if not isinstance(n, str):
                 continue
-            if n == "it" and block is not None:
+            if n == "it" and block is None:
+                continue                         # an implicit `it` is never a name for the whole file
+            if n == "it":
                 # The implicit `it` holds the value only inside this closure's body: kept by the body, not by name
                 # for the whole file (the first review of slice 2d.2: one loop over commit text made every `it` high).
                 prev = self.p.it_values.get(id(block))
@@ -2617,7 +2636,8 @@ class Builder:
             # m.run(value), m.run.call(value), f.call(value): a closure held in a map or variable (2d.2).
             held = full_path if full_path in self.p.closure_params else full_path.removesuffix(".call")
             base, _, key = held.partition(".")
-            body = self.closure_vars.get(held) or self.closure_maps.get(base, {}).get(key)
+            body = self.closure_vars.get(held) or self.closure_bodies.get(held) or \
+                self.closure_maps.get(base, {}).get(key)
             for i, n in enumerate(self.p.closure_params[held]):
                 if i < len(call.args):
                     if n == "it" and body is not None:
@@ -2661,7 +2681,7 @@ class Builder:
         elif isinstance(callee, Name) and callee.name in self.p.closure_params:
             # run(value) for def run = { x -> ... }: the closure's parameters take the arguments (2d.2).
             names = self.p.closure_params[callee.name]
-            body = self.closure_vars.get(callee.name)
+            body = self.closure_vars.get(callee.name) or self.closure_bodies.get(callee.name)
             for i, n in enumerate(names):
                 if i < len(call.args):
                     if n == "it" and body is not None:

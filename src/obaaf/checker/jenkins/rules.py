@@ -3238,8 +3238,26 @@ class JenkinsRules:
         self.add("OBAAF-JEN-009", info.line, f"{name} at line {info.line} passes {found[0]} {what}.",
                  info.ctx.stage, severity=found[1])
 
-    # %NAME%, %NAME:~0,5% and %NAME:a=b%; not %%NAME%%, which a batch file prints as text.
-    _BAT_VAR = re.compile(r"(?<!%)%([A-Za-z_][\w.-]*)(?::[^%\n]*)?%(?!%)")
+    _BAT_NAME = re.compile(r"([A-Za-z_][\w.-]*)(?::[^%\n]*)?%")
+
+    @classmethod
+    def _bat_vars(cls, text: str):
+        """The names cmd expands in a batch file's text: %NAME%, %NAME:~0,5% and %NAME:a=b%, read left to right, so
+        `%A%%B%` is two; `%%` is a literal percent sign (so `%%NAME%%` prints the name)."""
+        i, n = 0, len(text)
+        while i < n:
+            j = text.find("%", i)
+            if j == -1 or j + 1 >= n:
+                return
+            if text[j + 1] == "%":
+                i = j + 2
+                continue
+            m = cls._BAT_NAME.match(text, j + 1)
+            if m is None:
+                i = j + 1
+                continue
+            yield m.group(1)
+            i = m.end()
 
     def _bat_percent(self, info, script) -> None:
         """cmd expands `%NAME%` before it parses the line, so `bat 'echo %CHANGE_TITLE%'`, the form that is safe in
@@ -3253,8 +3271,7 @@ class JenkinsRules:
         # is not one): the untrusted variables, parameters, and names the file sets in the environment.
         env_set = {n.lower(): n for n in self.p.env_set}
         params = {n.lower(): n for n in self.p.string_params if n not in self.p.safe_params}
-        for m in self._BAT_VAR.finditer(script.text()):
-            var = m.group(1)
+        for var in self._bat_vars(script.text()):
             hit = UNTRUSTED_FOLDED.get(var.lower())
             found = (hit[0], hit[1]) if hit else None
             name = env_set.get(var.lower())
@@ -3263,6 +3280,10 @@ class JenkinsRules:
                 found = (name if name == root else f"{name} (from {root})", sev)
             if found is None and var.lower() in params:
                 found = (f"parameter {params[var.lower()]}", "medium")
+            if found is None and name is not None and name in self.p.caller_values:
+                self.unknown("OBAAF-JEN-009", info.line,
+                             f"the bat step at line {info.line} expands %{var}%, {self.p.caller_values[name]}")
+                continue
             if found:
                 self.add("OBAAF-JEN-009", info.line,
                          f"The bat step in stage '{stage_label(info.ctx.stage)}' expands %{var}% ({found[0]}): cmd "

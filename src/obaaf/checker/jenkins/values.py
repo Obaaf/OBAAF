@@ -31,7 +31,7 @@ SAFE_METHODS = {
     "isBlank", "isAllWhitespace", "contains", "startsWith", "endsWith", "equals", "equalsIgnoreCase", "matches",
     "hashCode", "compareTo", "compareToIgnoreCase", "indexOf", "lastIndexOf", "count", "asBoolean", "toBoolean",
     "booleanValue", "intValue", "longValue", "any", "every", "isCase", "encodeBase64", "encodeBase64Url",
-    "encodeHex", "digest", "md5", "sha256", "containsKey", "containsValue",
+    "encodeHex", "digest", "md5", "sha256", "containsKey", "containsValue", "keySet",
 }
 SAFE_CASTS = {"int", "Integer", "long", "Long", "short", "Short", "byte", "Byte", "boolean", "Boolean", "double",
               "Double", "float", "Float", "BigInteger", "BigDecimal", "Number", "java.lang.Integer",
@@ -113,6 +113,7 @@ class Judge:
         self.function_params = function_params
         self.depth = 0
         self.cut = False          # some part was read by the names in its text, past a limit
+        self.recursed = False     # a method's result was cut where it called itself
 
     # ---------------------------------------------------------------- entry points
     def value(self, node, scope: dict | None = None):
@@ -135,8 +136,12 @@ class Judge:
         if node is None:
             return None
         if self.budget <= 0 or self.p.judge_budget <= 0 or len(self.stack) > 40:
+            # Past the reader's budget for this value or this file, the rest is read by the names in its text and
+            # is at least "cannot tell", never a pass (the second review of slice 2d.2).
             self.cut = True
-            return self.by_text(m.source_texts(node))
+            return worst(self.by_text(m.source_texts(node)),
+                         ("a value larger than the checker reads", "unknown",
+                          "a value or file larger than the checker reads value by value"))
         cast = getattr(node, "cast_type", None)
         if cast in SAFE_CASTS:
             return None
@@ -188,6 +193,8 @@ class Judge:
         return self.by_text(m.source_texts(node))
 
     def text(self, expr_text: str, scope: dict):
+        if not expr_text.strip():
+            return None                                  # "${}" is null
         node = parse_expr(expr_text)
         if node is None:
             # An interpolation the parser cannot read (a comment holding a brace, Groovy it does not know): read by
@@ -449,8 +456,8 @@ class Judge:
 
     def method_result(self, name: str, call: Call, scope: dict):
         """What a method of this file returns, with its parameters given what the call passes."""
-        key = (name, id(call))
-        if key in self.stack:
+        if name in self.stack:
+            self.recursed = True                         # a method calling itself: the cycle adds nothing new
             return None
         if len(self.stack) > 12:
             from obaaf.checker.jenkins import model as m
@@ -463,12 +470,13 @@ class Judge:
         mdef = next((d for d in defs if len(d.params) == len(call.args)), defs[0])
         args = [self.value(a, scope) for a in call.args]
         named = worst(*(self.value(v, scope) for _, v in call.named))
-        # A method's result depends on what it is given and on what is tainted: worked out once for each (flagship
-        # slice 2d.2's review: helpers that each call the next twice took seconds).
-        memo_key = (name, tuple(r[1:] if r else None for r in args), named[1:] if named else None,
-                    self.p.taint_version, frozenset(self.function_params or ()))
-        if memo_key in self.p.judge_cache:
-            return self.p.judge_cache[memo_key]
+        # A method's result depends on what it is given and on the state of the names its body (and the methods it
+        # calls) can read: worked out once for each (the first two reviews of slice 2d.2: helpers that each call the
+        # next twice took seconds). A result computed under a cut (recursion, a budget) is not kept.
+        memo_key = (name, tuple(args), named, frozenset(self.function_params or ()), self.state_of(name))
+        hit = self.p.judge_cache.get(memo_key)
+        if hit is not None:
+            return hit[0]
         inner: dict = {}
         params = [x for x in mdef.params if isinstance(x, str)]
         for i, param in enumerate(params):
@@ -478,15 +486,35 @@ class Judge:
                 inner[param] = worst(*args[i:])       # varargs: the rest
             else:
                 inner[param] = args[i] if i < len(args) else None
-        self.stack.append(key)
+        cut_before, recursed_before = self.cut, self.recursed
+        self.cut = self.recursed = False
+        self.stack.append(name)
         try:
             result = self.block_result(mdef.body, inner)
         finally:
             self.stack.pop()
-        if len(self.p.judge_cache) > 50000:
-            self.p.judge_cache.clear()
-        self.p.judge_cache[memo_key] = result
+        clean = not (self.cut or self.recursed)
+        self.cut, self.recursed = self.cut or cut_before, self.recursed or recursed_before
+        if clean:
+            if len(self.p.judge_cache) > 50000:
+                self.p.judge_cache.clear()
+            self.p.judge_cache[memo_key] = (result,)
         return result
+
+    def state_of(self, name: str) -> tuple:
+        """The state a method's result can depend on: what is recorded for every word its body and the methods it
+        calls contain, and the sizes of the pipeline's other records."""
+        p = self.p
+        words = _method_words(p, name)
+        state = []
+        for w in words:
+            entry = (p.tainted.get(w), p.caller_values.get(w), w in p.env_aliases, w in p.param_aliases,
+                     w in p.script_vars, w in p.string_params, w in p.safe_params, w in p.method_params,
+                     w in p.nonliteral_names, tuple(sorted(p.literal_values.get(w, ()))),
+                     tuple(p.key_lists.get(w, ())))
+            if any(entry):
+                state.append((w, entry))
+        return tuple(sorted(state, key=lambda x: x[0])), p.env_any
 
     def block_result(self, block: Block | None, scope: dict):
         """Every value a block can return: `return` statements and the last expression."""
@@ -497,6 +525,44 @@ class Judge:
         for value in _returned(block, local):
             results.append(self.value(value, local))
         return worst(*results)
+
+
+def _method_words(p, name: str) -> frozenset:
+    """Every identifier, property name and literal in a method of the file and in the methods it calls, transitively:
+    the names whose recorded taint its result can depend on."""
+    cache = p.judge_words
+    if name in cache:
+        return cache[name]
+    cache[name] = frozenset()                     # a cycle reads as what is found so far
+    words: set = set()
+    todo, seen = [name], set()
+    while todo:
+        n = todo.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        for d in p.method_defs.get(n, []):
+            for node in _walk(d.body):
+                if isinstance(node, Name):
+                    words.add(node.name)
+                    if node.name in p.method_defs:
+                        todo.append(node.name)
+                elif isinstance(node, Prop):
+                    words.add(node.name)
+                    if node.name in p.method_defs:
+                        todo.append(node.name)
+                elif isinstance(node, Str):
+                    words.add(node.text())
+                    for e in node.exprs:
+                        words.update(re.findall(r"[A-Za-z_]\w*", e))
+    result = frozenset(words)
+    cache[name] = result
+    return result
+
+
+def _walk(node, limit: int = 200_000):
+    from obaaf.checker.jenkins.model import find_nodes
+    return find_nodes(node, lambda n: isinstance(n, (Name, Prop, Str)), limit=limit)
 
 
 def _returned(block: Block, local: dict, depth: int = 0) -> list:
