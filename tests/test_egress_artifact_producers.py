@@ -65,6 +65,7 @@ class ArtifactProducerTest(unittest.TestCase):
         for route, (runner, steps, _) in ROUTES.items():
             for step in unknown:
                 with self.subTest(route=route, step=step):
-                    body = workflow(steps + "\n" + step, runs_on=runner)
+                    body = workflow(step + "\n" + steps, runs_on=runner)
                     result = run_check(body, policy=FIREWALL)
                     self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+                    self.assertIn("artifact", egress(result).controls[0].detail)

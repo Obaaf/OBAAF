@@ -2536,24 +2536,37 @@ class WorkflowRules:
         "actions/setup-go", "actions/setup-dotnet", "actions/setup-ruby",
     })
 
+    # Literal arguments only. The step's shell must be known, but errexit and pipefail
+    # do not affect whether one of these commands uploads an artifact.
+    _LITERAL_COMMAND = re.compile(
+        r"""([\w.:-]+)(?:[ \t]+(?:[\w/.,:@%+=-]+|'[^'\n]*'|"[^"$`\\\n]*"))*[ \t]*"""
+    )
+
     def _artifact_upload(self, job: Job) -> str | None:
         """Return producer-side evidence. A later job's existence or behavior is immaterial."""
         direct_agents = (self.detection.get("agent_installs") or {}).values()
         releases = self.detection.get("egress_action_releases") or ()
+        monitors = self.detection.get("harden_runner_releases") or {}
         for step in job.steps:
             action = step.clean_action
             where = f"step '{one_line(step.name, 80)}' in job '{one_line(job.id, 80)}'"
             if action in ("actions/upload-artifact", "actions/upload-artifact/merge", "actions/upload-pages-artifact"):
                 return f"{where} uploads an artifact"
             if step.uses is not None:
-                if action in self._NON_UPLOAD_ACTIONS or (step.confines and step.uses.partition("@")[2] in releases):
+                ref = step.uses.partition("@")[2]
+                if (action in self._NON_UPLOAD_ACTIONS or (step.confines and ref in releases)
+                        or (action == "step-security/harden-runner" and ref in monitors)):
                     continue
                 return f"{where} uses an action whose implementation may upload an artifact"
             if self._installs_only(job, step):
                 continue
-            words = self._one_command(job, step)
-            if words and (words[0] in direct_agents or words[0] in {"echo", "pwd", "true", ":"}):
-                continue
+            if self._failfast_shell(job, step) is not None and expr_mod.OPEN not in step.run:
+                lines = [line.strip(" \t") for line in step.run.split("\n")]
+                commands = (self._LITERAL_COMMAND.fullmatch(line) for line in lines
+                            if line and not line.startswith("#"))
+                if all(match and (match[1] in direct_agents or match[1] in {"echo", "pwd", "true", ":"})
+                       for match in commands):
+                    continue
             return f"{where} runs a script whose artifact uploads the checker cannot rule out"
         return None
 

@@ -436,7 +436,7 @@ class EgressActionTest(unittest.TestCase):
             f = self.check(f"      - run: {json.dumps(run)}\n" + action())
             with self.subTest(run=run):
                 self.assertEqual(verdict(f), CANNOT_TELL)
-        self.assertEqual(verdict(self.check("      - run: make deps && make lint 2>&1\n" + action())), VERIFIED)
+        self.assertFalse(egress_mod.leaves_process("make deps && make lint 2>&1"))
 
     def test_long_scripts_take_linear_time(self):
         """Found by the third review: a regular expression with chained `[^\\n]*` took 43 seconds on a
@@ -468,7 +468,7 @@ class EgressActionTest(unittest.TestCase):
         self.assertEqual(verdict(self.check(action(), job_extra=services)), CANNOT_TELL)
 
     def test_a_step_before_it_is_not_after_it_but_one_beside_it_is(self):
-        before = "      - run: make deps"
+        before = "      - run: echo preparing"
         self.assertEqual(verdict(self.check(before + "\n" + action())), VERIFIED)
         names_tmp = "      - run: rm -rf /tmp/obaaf-egress.old"
         self.assertEqual(verdict(self.check(names_tmp + "\n" + action())), CANNOT_TELL)
@@ -2006,7 +2006,10 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
         for name, before in cases.items():
             control = self.key(before + keyed())
             with self.subTest(name):
-                self.assertEqual(control.verdict, VERIFIED, control.detail)
+                self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+                reason = control.detail.split(". Another job could load", 1)[0]
+                self.assertRegex(reason, r"^step '[^']+' in job 'agent' (?:uses an action whose implementation "
+                                 r"may upload an artifact|runs a script whose artifact uploads the checker cannot rule out)$")
 
     def test_openssl_variables_no_longer_count_in_any_spelling(self):
         """Slice 2c.11b: the floor's egress.py removes every OPENSSL_ variable, matched trimmed and
