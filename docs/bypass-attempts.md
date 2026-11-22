@@ -24,7 +24,7 @@ Where a way past depends on what GitHub does and the documentation does not say,
 | **2d.2k** | **Pipeline code and pins: OBAAF-JEN-004, 008** | **2026-11-17** | `tests/test_jenkins_code_pins.py` |
 | **2d.2j** | **Agent stages and workspaces: OBAAF-JEN-002, 003, 006, 007** ([below](#2d2j-agent-stages-and-workspaces)) | **2026-11-17, 2026-11-20** | `tests/test_jenkins_workspaces.py` |
 | **2d.2l** | **Release approvals: OBAAF-JEN-005** ([below](#2d2l-release-approvals)) | **2026-11-21** | `tests/test_jenkins_approvals.py` |
-| Still open | The rest of 2d.2: OBAAF-JEN-009 to 012; see [the plan](flagship.md) | | |
+| **2d.2** | **Untrusted text in a command: OBAAF-JEN-009** ([below](#2d2-untrusted-text-in-a-command)) | **2026-11-22** | `tests/test_jenkins_injection.py` |
 
 The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs), [2d.2e](#2d2e-release-and-effect-jobs), [2d.2f](#2d2f-pins-egress-and-declarations), [2d.2g](#2d2g-the-settings-rules), [2d.2h](#2d2h-the-repository-and-instruction-file-rules), [2d.2i](#2d2i-jenkins-files-and-credentials), [2d.2k](#2d2k-pipeline-code-and-pins) and [2d.2j](#2d2j-agent-stages-and-workspaces).
 
@@ -3005,3 +3005,36 @@ Rule: OBAAF-JEN-011, a publish in a failure path, or a check before a publish wh
 **Speed.** The attacker's three slow inputs (2.8 to 4.1 s at `75dae58`) and the review passes' slow inputs take about as long as at `75dae58` (under 1.2 s), except two adversarial ones that are linear but slower: 30,000 checks on one line (2.4 s; 0.9 s at `75dae58`) and 40,000 check lines (4.5 s; 1.1 s), where every line is split into words by both the reader and the rule.
 
 On this repository the slice changes one result: `templates/jenkins/obaaf-release-publish.Jenkinsfile` gets two OBAAF-JEN-011 "cannot tell" (its checks follow `export PATH=...`, #344), as OBAAF-JEN-012 already did; exit status, JSON fields and SARIF are otherwise unchanged. Expectrail has no Jenkinsfile and is byte-identical in text, JSON, SARIF and `--no-fixes` output.
+
+## 2d.2: untrusted text in a command
+
+Rule: OBAAF-JEN-009, text others control built into a command or into Groovy code before it runs (decision D-132). Before the slice the rule searched each interpolation's text for names (`_UNTRUSTED_RE`, `_PARAM_RE` and the names of tainted variables), so whatever hid a name from that search hid the source.
+
+**First attempt** (an Opus 5.5 attacker that did not write the rule, 172 attempts on the rule as it was at `653b153`, 2026-11-22; ids A001 to A172; the run that took the slice added 29, ids B-a01 to B-a30). The rule was wrong on 124 of the 172: 77 ways past, 41 false positives, 4 wrong severities and 2 slow inputs. Fixed by class, with a reader of each value's syntax tree (`src/obaaf/checker/jenkins/values.py`):
+- the source spelled otherwise: `env?.X`, a comment before the dot, `env.change_title` (Jenkins reads environment names without regard to case), `env.getEnvironment().X`, `env[n]` and `env."${n}"` with `n` a literal, `def p = params`, `def e = env`, `this.env.X`;
+- `\u0024{...}`, which Groovy 2.4 (the version Jenkins runs) turns into an interpolation before lexing;
+- taint set only by assignment to a plain name: `sb << x`, `.append`, `list.add`, `map.put`, `m.t = x`, `env.setProperty`, `binding.setVariable`, `this.T = x`, `withEnv` entries built with `+`, `def (a, b) = [...]`;
+- bindings the rule never read: closure and `for` parameters, a closure variable called, named arguments into a `Map` parameter, varargs, a method's return value;
+- commit text lost through `.split('\n')[0]`, `git rev-list --format`, `git cat-file -p`, a format in a variable, `%%B` in `bat`, a second git command on a line; file names from `git diff --name-only`; branch names from git commands;
+- sources not listed: `gitlabTriggerPhrase`, ghprb e-mail variables, Bitbucket Push and Pull Request variables (from its README's table), pipeline-github's `pullRequest`, `currentBuild.changeSets` and build causes, `input` answers, parameters declared with `properties([parameters([...])])` and read by bare name; Generic Webhook header variables (lower-cased by the plugin) and a variables list held in a variable;
+- sinks not read: `def s = this; s.sh`, `this.&sh`, `sh(*: opts)`, Docker Pipeline's `build`, `run`, `withRun`, `push`, `tag`, `pull` and `inside(args)`, Publish Over SSH `execCommand`, `bat`'s `%NAME%` (cmd expands it before parsing), `Eval.me`, `GroovyShell`, Job DSL, and `build` parameters in a variable, in the `$class` form, from `params.collect`, or wrapped in `.trim()` or `?:`;
+- false positives from judging names in text: ternaries and comparisons choosing literals, numbers and booleans derived from the value, `replaceAll` whitelists, URL and base64 encoding, `booleanParam` and `choice`, `env.Y` after `env['X'] = value`, and a method on a literal (`'a,b'.split(',')`) making every Jenkins rule "cannot tell";
+- a wrong severity for a webhook payload variable holding `$` or an object (medium; now high unless its path ends in a number, count, identifier or state).
+
+**First review pass** (a second Opus 5.5 sub-agent that did not write the fix, 203 attempts and 66 size probes on `b8e1ce4`; its JEN-009 cases are the ids starting R1-). It found 11 blocking classes, each fixed by class:
+- the new skipping of comments inside `${...}` read `//` in a slashy regex (`replaceFirst(/^https?:\/\//, '')`) as a comment, so the whole file could not be read: removed; an interpolation the parser cannot read is now "cannot tell" instead;
+- one parameter or variable named `env` or `params` anywhere turned off the build's own for the whole file: removed (a method's own `params` is read as the build's, a stated limit);
+- `env.TARGET` for a declared string parameter, and `env.X` set from an uncalled method's parameter, were quiet;
+- `.replace('[^...]', '')` (a literal replace), `.asType(String)` and the file's own method named like a safe one were read as clearing the value;
+- `body.setDelegate(config)` in a `vars/` step was not read;
+- helpers that each call the next twice took up to 9.5 seconds: a method's result is now worked out once for each set of argument sources, and the reader has a budget for the whole file;
+- `getProperty(k)` over a literal list of names raised a TypeError, so every rule said "cannot tell";
+- chained `sb << 'a' << x` and `sb.append('a').append(x)`, `this` held in a variable or parameter not named `script` or `steps`, `bat`'s `%NAME:~0,5%`, lower-case names and a script held in a variable, a closure alias or a closure in a map, named arguments with a trailing closure, and a method ending in an assignment were not followed;
+- one loop's implicit `it` over a tainted value made every `it` in the file tainted: an implicit `it` now holds the value only inside its own closure;
+- messages changed for a map read through its property (`cfg.title (from ...)` where the base said `cfg (from ...)`): restored;
+- the documentation claimed more than the code (nothing lost, every caller value "cannot tell", messages unchanged) and said nothing of what the shared model's changes do to OBAAF-JEN-013 (a key held in a variable, `env['T'] = TOKEN`, changed its messages; new findings through `this.T =` and `env.setProperty`): the JEN-013 messages are restored and the new findings are stated.
+Non-blocking notes it made, also handled: a chain of 2,000 calls exhausted the stack (the reader now reads past 150 levels by the names in the text); more than eight nested helpers passed (now twelve, then "cannot tell"); `%%NAME%%` and a Groovy local were read as `bat` variables; the whitelist accepted space and `=`; `git status | wc -l` was read as file names; `$.after`, `$.action` and `$.pull_request.merged` were high. Still open from it: a `\u000a` in a comment moves later line numbers by one (as Groovy 2.4 counts it), stated in the changelog.
+
+@@PASS2@@
+
+**Stated limits** (each a case in `LIMITS` with its reason): taint is kept by name for the whole file and never cleared (an implicit `it` excepted); keys of one map are not told apart, and a map's property is followed only when read as that property; containers filled through another name, closures in lists or passed to methods, curried closures, parameter defaults, `env` inside a map, `docker` held in another variable and `Runtime.exec` are not followed; a guard on the value (`==~`, `when { branch }`, an `if`, the webhook's `regexpFilter`) is not read; quoting in Groovy is not recognised; a whitelist keeping `-` can still let the value add an option; workspace files' contents are not counted as untrusted; `writeFile` then a later run is not followed; a computed step name, `invokeMethod`, a method called on a closure parameter and a comment inside `${...}` make the file or step "cannot tell". No stated limit is quiet where something was judged unless the rule was quiet there before the slice too (a test holds this).

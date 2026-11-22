@@ -310,17 +310,6 @@ class Lexer:
                 if self.pos >= len(src):
                     raise LexError("unterminated ${...} in a string", start_line, start_col)
                 ch = src[self.pos]
-                # A comment inside ${...} is skipped as Groovy skips it: its braces do not count (2d.2).
-                if src.startswith("/*", self.pos):
-                    end = src.find("*/", self.pos + 2)
-                    if end == -1:
-                        raise LexError("unterminated comment in ${...}", start_line, start_col)
-                    self._advance(end + 2 - self.pos)
-                    continue
-                if src.startswith("//", self.pos):
-                    end = src.find("\n", self.pos)
-                    self._advance((len(src) if end == -1 else end) - self.pos)
-                    continue
                 if src.startswith("'''", self.pos) or src.startswith('"""', self.pos):
                     q = src[self.pos:self.pos + 3]
                     self._advance(3)

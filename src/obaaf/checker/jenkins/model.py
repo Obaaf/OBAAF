@@ -227,8 +227,18 @@ class Pipeline:
     webhook_unread: int | None = None                   # line of a GenericTrigger whose variables are not read
     shell_aliases: dict = field(default_factory=dict)   # def run = this.&sh: run -> sh
     uncalled_methods: set = field(default_factory=set)  # methods of the file that nothing in it calls
-    shadowed: set = field(default_factory=set)          # env or params declared by the file itself
     closure_params: dict = field(default_factory=dict)  # def run = { x -> ... }: run -> [x]
+    # values.Judge's cache of method results and the total work it may do for one file (flagship slice 2d.2).
+    judge_cache: dict = field(default_factory=dict)
+    judge_budget: int = 3_000_000
+    taint_version: int = 0
+    # Names set in the environment by the file (env.X =, env['X'] =, withEnv, environment {}, webhook variables):
+    # what bat's %NAME% expands (flagship slice 2d.2).
+    env_set: set = field(default_factory=set)
+    # The implicit `it` of a closure an iteration method calls: what each closure body's `it` holds, by its id, and
+    # what it held where each step was recorded (flagship slice 2d.2, from its first review).
+    it_values: dict = field(default_factory=dict)
+    step_it: dict = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------------- helpers
@@ -539,6 +549,11 @@ def _format_has_text(spec: str) -> bool:
     return bool(_GIT_REF_TEXT.search(spec)) or _GIT_SAFE_DATES.sub("", spec).count("%") > 0
 
 
+def _worst_result(a, b):
+    from obaaf.checker.jenkins.values import worst
+    return worst(a, b)
+
+
 def git_output(script: str):
     """(shown, severity, root) for what a script's git commands print, or None for hashes, dates and counts.
     Every git command on every line is read (a `%%` is `%`, as a batch file writes it)."""
@@ -550,6 +565,9 @@ def git_output(script: str):
             rest = line[m.end():]
             nxt = re.search(r"(?:&&|\|\||[;|&])", rest)
             args = rest[:nxt.start()] if nxt else rest
+            if nxt and nxt.group(0) == "|" and re.match(r"\s*(?:wc\b|grep\s+(?:-\w*[cq]\w*|--count|--quiet)\b)",
+                                                        rest[nxt.end():]):
+                continue                     # git status --porcelain | wc -l: a count, not the names
             formats = [f.group(2) if f.group(1) else (f.group(3) or "") for f in _GIT_ANY_FORMAT.finditer(args)]
             if cmd in ("log", "show", "whatchanged", "reflog") or (cmd == "cat-file" and re.search(
                     r"(?:^|\s)(?:-p|commit|tag)\b", args)):
@@ -1563,6 +1581,7 @@ class Builder:
         self.p = Pipeline()
         self.methods: dict[str, Block] = {}        # parameterless methods, for conditions
         self.defs: dict[str, list] = {}            # every top-level method, by name
+        self.it_stack: list = []                   # the implicit `it` of the closure bodies being walked (2d.2)
         self.called: set[str] = set()
         self.stack: list[str] = []
         self.budget = self.INLINE_BUDGET
@@ -1624,11 +1643,6 @@ class Builder:
         if self.defs:
             self.called = {callee_name(c) for c in find_calls(tree, set(self.defs))}
         self.p.uncalled_methods = {n for n in self.defs if n not in self.called}
-        # `env` or `params` declared by the file (a parameter, a closure's parameter or a variable) is not the
-        # build's (flagship slice 2d.2); assigning `env.X = ...` declares nothing.
-        for n in find_nodes(tree, lambda n: isinstance(n, (Decl, MethodDef, Closure, Block))):
-            names = [n.name] if isinstance(n, Decl) else [x for x in getattr(n, "params", ()) if isinstance(x, str)]
-            self.p.shadowed.update(x for x in names if x in ("env", "params"))
         # Every name the file declares anywhere, before the walk: a method's or closure's parameter, a variable, an
         # assigned name, a loop variable (flagship slice 2d.2l, from its fourth review: names collected while
         # walking missed methods defined below their use and closure parameters).
@@ -1682,6 +1696,14 @@ class Builder:
             self.trigger(node)
         start = Ctx(cr=CR_YES) if any(t.change_requests for t in self.p.triggers) else Ctx()
         self.block(tree, start, top=True)
+        # Each call inside a closure body whose implicit `it` holds a value, wherever the body was walked from
+        # (flagship slice 2d.2): read by OBAAF-JEN-009 at each step.
+        for block, found in list(self.p.it_values.values()):
+            if found is None:
+                continue
+            for n in find_nodes(block, lambda n: isinstance(n, Call), limit=200_000):
+                prev = self.p.step_it.get(id(n))
+                self.p.step_it[id(n)] = (n, found if prev is None or prev[0] is not n else _worst_result(prev[1], found))
         return self.p
 
     def trigger(self, node) -> None:
@@ -1726,7 +1748,8 @@ class Builder:
                     # which hold the title, were medium, and `$.pull_request.comments`, a count, was high).
                     last = re.split(r"[.\[\]]+", path.strip("$.[] "))[-1] if path.strip("$.[] ") else ""
                     numeric = re.search(r"(^|_)(id|number|count|size|sha|comments|commits|additions|deletions|"
-                                        r"changed_files|review_comments)$|_at$", last, re.I)
+                                        r"changed_files|review_comments|after|before|action|merged|draft|state|"
+                                        r"private|fork|forced|created|deleted)$|_at$", last, re.I)
                     severity = "medium" if source != "payload" or numeric else "high"
                     shown = f"webhook {source} {path or var}".strip()
                     names = {var, var + "_0"}
@@ -1737,9 +1760,11 @@ class Builder:
                         names |= {folded, folded + "_0", re.sub(r"[^a-z0-9_]", "_", folded),
                                   re.sub(r"[^a-z0-9_]", "_", folded) + "_0"}
                     for n in names:
+                        self.p.env_set.add(n)
                         current = self.p.tainted.get(n)
                         if current is None or _RANK[severity] > _RANK[current[1]]:
                             self.p.tainted[n] = (shown, severity)
+                            self.p.taint_version += 1
             change_requests = bool(re.search(r"pull|merge_request|mergeRequest|\bpr\b|pr:|changes", text, re.I))
         elif name in ("ghprbTrigger", "githubPullRequests", "GhprbTrigger", "bitbucketPR"):
             change_requests = True
@@ -1758,8 +1783,15 @@ class Builder:
             # A trailing closure's parameters take values from whoever calls it (the second review of 2d.2k).
             # They are not added to the names the file defines: a call through one stays unknown code.
             self.p.nonliteral_names.update(params)
-        for stmt in block.stmts:
-            self.stmt(stmt, ctx)
+        bound = self.p.it_values.get(id(block))
+        if bound is not None and bound[0] is block:
+            self.it_stack.append(bound[1])           # the implicit `it` of this closure body (2d.2)
+        try:
+            for stmt in block.stmts:
+                self.stmt(stmt, ctx)
+        finally:
+            if bound is not None and bound[0] is block:
+                self.it_stack.pop()
 
     def condition_tag(self, node, ctx: Ctx) -> str:
         """The hidden part of a condition's label: its structure's digest, cached per node, and, inside an
@@ -1802,8 +1834,14 @@ class Builder:
             return
         if isinstance(stmt, ExprStmt):
             e = stmt.expr
-            if isinstance(e, Binary) and e.op == "<<" and path_of(e.left):
-                self.track_value(path_of(e.left), e.right, merge=True)    # sb << value (2d.2)
+            if isinstance(e, Binary) and e.op == "<<":
+                # sb << value, and sb << 'a' << value: the leftmost holds every value shifted in (2d.2).
+                rights, root = [], e
+                while isinstance(root, Binary) and root.op == "<<":
+                    rights.append(root.right)
+                    root = root.left
+                if path_of(root):
+                    self.track_value(path_of(root), ListLit(rights, line=e.line), merge=True)
             self.expr(stmt.expr, ctx)
         elif isinstance(stmt, Decl):
             self.p.local_names.add(stmt.name)
@@ -1840,6 +1878,8 @@ class Builder:
                     if plain.startswith("env.") and "${" in plain:
                         self.taint_env_any(stmt.value)           # env."${n}" = x
                     else:
+                        if plain.startswith("env."):
+                            self.p.env_set.add(plain[4:])
                         self.track_value(plain.removeprefix("env."), stmt.value)
                     if target.endswith(".delegate") and target.split(".")[0] in (
                             self.p.method_params | set(self.p.caller_values)) and path_of(stmt.value):
@@ -1855,10 +1895,19 @@ class Builder:
                 elif isinstance(stmt.target, Index) and path_of(stmt.target.target) in {"env", "this.env"} | \
                         self.p.env_aliases:
                     key = literal(stmt.target.index)
+                    if key is None and isinstance(stmt.target.index, Name):
+                        seen = self.p.literal_values.get(stmt.target.index.name)
+                        if seen and len(seen) == 1 and stmt.target.index.name not in self.p.nonliteral_names:
+                            key = next(iter(seen))
                     if key is not None:
-                        self.track_value(key, stmt.value)          # env['T'] = x (2d.2)
+                        # env['T'] = x (2d.2): T holds x for OBAAF-JEN-009; OBAAF-JEN-013 reads `env` as before.
+                        from obaaf.checker.jenkins.values import Judge
+                        self.p.env_set.add(key)
+                        self.taint(key, Judge(self.p).value(stmt.value))
                     else:
                         self.taint_env_any(stmt.value)
+                    # As before 2d.2, `env` itself is recorded as holding the value, which OBAAF-JEN-013 reads.
+                    self.track_value(target.split(".")[0], stmt.value, merge=True)
                 else:
                     # x['key'] = value, x.y[0] = value: the container now holds the value.
                     self.track_value(target.split(".")[0], stmt.value, merge=True)
@@ -2042,6 +2091,13 @@ class Builder:
                 self.p.shell_aliases[name] = pointed[0]       # def run = this.&sh (the parser reads .& as .)
                 self.p.shell_aliases[name + ".call"] = pointed[0]
         judge = Judge(self.p)
+        scope = {"it": self.it_stack[-1]} if self.it_stack and self.it_stack[-1] is not None else None
+        if not merge and isinstance(value, Name) and value.name in self.p.closure_params:
+            self.p.closure_params[name] = self.p.closure_params[value.name]      # def g = f (a closure)
+        if not merge and isinstance(value, MapLit):
+            for k, v in value.entries:
+                if isinstance(v, Closure) and isinstance(k, str):
+                    self.p.closure_params[f"{name}.{k}"] = [x for x in v.params if isinstance(x, str)] or ["it"]
         kind = judge.root_kind(value)
         if kind == "env" and not merge:
             self.p.env_aliases.add(name)                 # def e = env; "${e.CHANGE_TITLE}"
@@ -2049,7 +2105,7 @@ class Builder:
             self.p.param_aliases.add(name)               # def p = params
         if kind is not None:
             return
-        self.taint(name, judge.value(value))
+        self.taint(name, judge.value(value, scope))
 
     def taint(self, name: str, found) -> None:
         """Record that `name` can hold what `found` (a values.Judge result) says: a source and its severity, or a
@@ -2058,12 +2114,15 @@ class Builder:
             return
         _shown, severity, root = found
         if severity == "unknown":
-            if name not in self.p.tainted:
-                self.p.caller_values.setdefault(name, root)
+            if name not in self.p.tainted and name not in self.p.caller_values:
+                self.p.caller_values[name] = root
+                self.p.taint_version += 1
             return
         current = self.p.tainted.get(name)
-        if current is None or _RANK[severity] >= _RANK[current[1]]:
+        if current is None or _RANK[severity] > _RANK[current[1]] or (
+                _RANK[severity] == _RANK[current[1]] and current[0] != root):
             self.p.tainted[name] = (root, severity)
+            self.p.taint_version += 1
 
     def taint_env_any(self, value) -> None:
         """A value assigned to an environment variable whose name the file computes: any `env.X` may hold it."""
@@ -2072,9 +2131,11 @@ class Builder:
         if found and found[1] != "unknown":
             current = (self.p.env_any[0], self.p.env_any[1], self.p.env_any[0]) if self.p.env_any else None
             best = worst(current, found)
-            self.p.env_any = (best[2], best[1])
+            if self.p.env_any != (best[2], best[1]):
+                self.p.env_any = (best[2], best[1])
+                self.p.taint_version += 1
 
-    def bind_each(self, names: list, receiver) -> None:
+    def bind_each(self, names: list, receiver, block=None) -> None:
         """A closure given to an iteration method, or a for-in loop, gets the receiver's elements in its parameters
         (flagship slice 2d.2: `[env.CHANGE_TITLE].each { t -> sh "echo ${t}" }` was quiet)."""
         from obaaf.checker.jenkins.values import Judge
@@ -2092,6 +2153,13 @@ class Builder:
             keys = [literal(x) for x in receiver.items]
         for n in names:
             if not isinstance(n, str):
+                continue
+            if n == "it" and block is not None:
+                # The implicit `it` holds the value only inside this closure's body: kept by the body, not by name
+                # for the whole file (the first review of slice 2d.2: one loop over commit text made every `it` high).
+                prev = self.p.it_values.get(id(block))
+                best = found if prev is None or prev[0] is not block else _worst_result(prev[1], found)
+                self.p.it_values[id(block)] = (block, best)
                 continue
             if keys is not None:
                 self.p.key_lists[n] = keys
@@ -2455,6 +2523,7 @@ class Builder:
                         var, eq, _ = head_text.partition("=")
                         if eq and var.strip():
                             self.p.nonliteral_names.add(var.strip())
+                            self.p.env_set.add(var.strip())
                             self.track_value(var.strip(), item)
                 for s in all_strings(arg):
                     var, eq, _ = s.text().partition("=")
@@ -2463,9 +2532,9 @@ class Builder:
                         # withEnv(["T2=${TOKEN}"]): T2 holds what TOKEN holds (flagship slice 2d.2i).
                         self.p.refs.setdefault(var.strip(), set()).update(
                             w for e in s.exprs for w in re.findall(r"[A-Za-z_]\w*", e))
-                        source = untrusted_source(s.exprs, self.p)
-                        if source:
-                            self.p.tainted[var.strip()] = source
+                        self.p.env_set.add(var.strip())
+                        if s.interpolated:
+                            self.track_value(var.strip(), s)
         # A step. Record it, then walk any closure with the bindings it adds.
         self.record_step(name, call, ctx)
         for arg in call.args:
@@ -2535,21 +2604,50 @@ class Builder:
         `env.setProperty('T', x)` and `binding.setVariable('T', x)` set T."""
         callee = call.callee
         closure_params = None
+        closure_block = None
         if call.closure is not None:
             closure_params = list(call.closure.params) or ["it"]
+            closure_block = call.closure
         elif call.args and isinstance(call.args[-1], Closure):
             closure_params = [p for p in call.args[-1].params if isinstance(p, str)] or ["it"]
+            closure_block = call.args[-1].body
+        full_path = path_of(callee) or ""
+        if full_path in self.p.closure_params or (full_path.endswith(".call") and
+                                                   full_path[:-5] in self.p.closure_params):
+            # m.run(value), m.run.call(value), f.call(value): a closure held in a map or variable (2d.2).
+            held = full_path if full_path in self.p.closure_params else full_path.removesuffix(".call")
+            base, _, key = held.partition(".")
+            body = self.closure_vars.get(held) or self.closure_maps.get(base, {}).get(key)
+            for i, n in enumerate(self.p.closure_params[held]):
+                if i < len(call.args):
+                    if n == "it" and body is not None:
+                        self.bind_each(["it"], ListLit([call.args[i]], line=call.line), body)
+                    else:
+                        self.track_value(n, call.args[i])
+            return
         if isinstance(callee, Prop):
             from obaaf.checker.jenkins.values import ITERATORS
             if closure_params is not None and callee.name in ITERATORS:
-                self.bind_each(closure_params, callee.target)
+                self.bind_each(closure_params, callee.target, closure_block)
+            if callee.name == "setDelegate" and call.args and path_of(callee.target) in (
+                    self.p.method_params | set(self.p.caller_values)) and path_of(call.args[0]):
+                # body.setDelegate(config); body(): the caller's closure fills config (a vars/ step).
+                self.p.caller_values.setdefault(path_of(call.args[0]),
+                                                "a map the caller's closure fills, outside this file")
             target = path_of(callee.target)
+            root = callee.target
+            while target is None and isinstance(root, Call) and isinstance(root.callee, Prop) and \
+                    root.callee.name in self._MUTATORS:
+                root = root.callee.target            # sb.append('a').append(value): sb holds it
+                target = path_of(root)
             full = path_of(callee) or ""
             if full in self._SETTERS or (callee.name in ("setProperty", "put", "putAt") and target in
                                          self.p.env_aliases):
                 if len(call.args) >= 2:
                     key = literal(call.args[0])
                     if key is not None:
+                        if full.startswith("env.") or target in self.p.env_aliases:
+                            self.p.env_set.add(key)
                         self.track_value(key, call.args[1])
                     elif full.startswith("env.") or target in self.p.env_aliases:
                         self.taint_env_any(call.args[1])
@@ -2563,9 +2661,13 @@ class Builder:
         elif isinstance(callee, Name) and callee.name in self.p.closure_params:
             # run(value) for def run = { x -> ... }: the closure's parameters take the arguments (2d.2).
             names = self.p.closure_params[callee.name]
+            body = self.closure_vars.get(callee.name)
             for i, n in enumerate(names):
                 if i < len(call.args):
-                    self.track_value(n, call.args[i])
+                    if n == "it" and body is not None:
+                        self.bind_each(["it"], ListLit([call.args[i]], line=call.line), body)
+                    else:
+                        self.track_value(n, call.args[i])
         elif isinstance(callee, Name) and callee.name in ("setProperty", "setVariable") and len(call.args) >= 2:
             key = literal(call.args[0])
             if key is not None:
@@ -2589,21 +2691,19 @@ class Builder:
                     candidates[0])
         # A trailing closure is the last argument, so it binds to the last parameter: a parameter before it with
         # a default value takes the default (flagship slice 2d.2l: `def withTimeout(int m = 60, Closure body)`).
-        pairs = list(zip(mdef.params, call.args))
-        if call.named and mdef.params:
-            # notify(title: x): Groovy passes the named arguments as a map in the first parameter (2d.2).
-            named_map = MapLit([(k, v) for k, v in call.named], line=call.line)
-            pairs = [(mdef.params[0], named_map)] + list(zip(mdef.params[1:], call.args))
-        if len(call.args) > len(mdef.params) >= 1 and call.closure is None:
+        # notify(title: x): Groovy passes the named arguments as a map before the positional ones (2d.2).
+        positional = ([MapLit([(k, v) for k, v in call.named], line=call.line)] if call.named else []) + list(call.args)
+        pairs = list(zip(mdef.params, positional))
+        if len(positional) > len(mdef.params) >= 1 and call.closure is None:
             # run('a', x): the last parameter of `def run(String... xs)` takes the rest (2d.2).
-            rest = ListLit(list(call.args[len(mdef.params) - 1:]), line=call.line)
-            pairs = list(zip(mdef.params[:-1], call.args)) + [(mdef.params[-1], rest)]
+            rest = ListLit(positional[len(mdef.params) - 1:], line=call.line)
+            pairs = list(zip(mdef.params[:-1], positional)) + [(mdef.params[-1], rest)]
         if call.closure is not None and mdef.params:
             closure = Closure([], call.closure, line=call.line)
-            if len(call.args) < len(mdef.params):
-                pairs = list(zip(mdef.params[:-1], call.args)) + [(mdef.params[-1], closure)]
+            if len(positional) < len(mdef.params):
+                pairs = list(zip(mdef.params[:-1], positional)) + [(mdef.params[-1], closure)]
             else:
-                pairs = list(zip(mdef.params, list(call.args) + [closure]))
+                pairs = list(zip(mdef.params, positional + [closure]))
         for param, value in pairs:
             self.track_value(param, value)
         frame: dict = {}
@@ -2633,6 +2733,7 @@ class Builder:
     def record_step(self, name: str, call: Call, ctx: Ctx) -> None:
         if name:
             self.p.steps.append(StepUse(name, call, ctx, call.line))
+
 
     # -- libraries -------------------------------------------------------------------------
     def annotation_libraries(self, stmt: Annotated) -> None:
@@ -2827,6 +2928,7 @@ class Builder:
                 lanes += ((None if text is None else text.strip(), stmt.line),)
             if isinstance(value, Str):
                 self.p.env_values[var] = value
+            self.p.env_set.add(var)
             self.track_value(var, value)
         return replace(ctx, creds=ctx.creds + tuple(new), lane=lane, lane_line=lane_line, lanes=lanes)
 

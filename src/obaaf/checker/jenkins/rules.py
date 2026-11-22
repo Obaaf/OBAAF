@@ -3077,16 +3077,17 @@ class JenkinsRules:
         names, so `def e = env` then `${e.CHANGE_TITLE}` passed and `${env.CHANGE_TITLE.length()}` was high."""
         from obaaf.checker.jenkins.values import Judge, worst
         memo: dict = {}
-        current: list = [frozenset()]
+        current: list = [frozenset(), None]          # the step's uncalled method's parameters, its closure's `it`
 
         def judged(node):
             if node is None:
                 return None
-            key = (id(node), current[0])
+            key = (id(node), current[0], id(current[1]))
             hit = memo.get(key)
             if hit is not None and hit[0] is node:
                 return hit[1]
-            found = Judge(self.p, function_params=set(current[0])).value(node)
+            it = current[1]
+            found = Judge(self.p, function_params=set(current[0])).value(node, {"it": it} if it else None)
             memo[key] = (node, found)
             return found
 
@@ -3112,6 +3113,8 @@ class JenkinsRules:
             name = info.use.name
             call = info.use.call
             current[0] = params_of(info.ctx)
+            held = self.p.step_it.get(id(call))
+            current[1] = held[1] if held is not None and held[0] is call else None
             if info.shell:
                 self.applicable.add("OBAAF-JEN-009")
                 script = shell_script(call)
@@ -3168,6 +3171,8 @@ class JenkinsRules:
         # the value (flagship slice 2d.2; before, only `load` and `evaluate` by those names were read).
         for kind, cname, ccall, ctx, _certain in self.p.code_loads:
             current[0] = params_of(ctx)
+            held = self.p.step_it.get(id(ccall))
+            current[1] = held[1] if held is not None and held[0] is ccall else None
             bare = cname.rsplit(".", 1)[-1]
             if (cname in ("load", "evaluate") and (cname, ccall.line) in loads_seen) or "(a pointer)" in cname:
                 continue
@@ -3211,7 +3216,7 @@ class JenkinsRules:
             what = ("as docker run options, so it can add options of its own (a host mount, --privileged)"
                     if method == "inside" else "to a docker command the Docker Pipeline plugin runs through a shell "
                     "step, so it can run commands of its own")
-        elif method == "execute" and isinstance(call.callee, Prop) and not call.args:
+        elif method == "execute" and isinstance(call.callee, Prop):
             # "...".execute(): Groovy starts the process on the controller, splitting the text into words.
             values.append(judged(call.callee.target))
             what = "to a process the controller starts (String.execute()), so it can run commands of its own"
@@ -3233,23 +3238,31 @@ class JenkinsRules:
         self.add("OBAAF-JEN-009", info.line, f"{name} at line {info.line} passes {found[0]} {what}.",
                  info.ctx.stage, severity=found[1])
 
-    _BAT_VAR = re.compile(r"%([A-Za-z_][\w.-]*)%")
+    # %NAME%, %NAME:~0,5% and %NAME:a=b%; not %%NAME%%, which a batch file prints as text.
+    _BAT_VAR = re.compile(r"(?<!%)%([A-Za-z_][\w.-]*)(?::[^%\n]*)?%(?!%)")
 
     def _bat_percent(self, info, script) -> None:
         """cmd expands `%NAME%` before it parses the line, so `bat 'echo %CHANGE_TITLE%'`, the form that is safe in
         sh, runs whatever the title holds (flagship slice 2d.2)."""
         from obaaf.checker.jenkins.model import UNTRUSTED_FOLDED
+        if isinstance(script, Name) and isinstance(self.p.literals.get(script.name), Str):
+            script = self.p.literals[script.name]          # def cmd = 'echo %CHANGE_TITLE%'; bat cmd
         if not isinstance(script, Str):
             return
+        # cmd reads environment names without regard to case; only names in the environment count (a Groovy local
+        # is not one): the untrusted variables, parameters, and names the file sets in the environment.
+        env_set = {n.lower(): n for n in self.p.env_set}
+        params = {n.lower(): n for n in self.p.string_params if n not in self.p.safe_params}
         for m in self._BAT_VAR.finditer(script.text()):
             var = m.group(1)
             hit = UNTRUSTED_FOLDED.get(var.lower())
             found = (hit[0], hit[1]) if hit else None
-            if found is None and var in self.p.tainted:
-                root, sev = self.p.tainted[var]
-                found = (var if var == root else f"{var} (from {root})", sev)
-            if found is None and var in self.p.string_params and var not in self.p.safe_params:
-                found = (f"parameter {var}", "medium")
+            name = env_set.get(var.lower())
+            if found is None and name is not None and name in self.p.tainted:
+                root, sev = self.p.tainted[name]
+                found = (name if name == root else f"{name} (from {root})", sev)
+            if found is None and var.lower() in params:
+                found = (f"parameter {params[var.lower()]}", "medium")
             if found:
                 self.add("OBAAF-JEN-009", info.line,
                          f"The bat step in stage '{stage_label(info.ctx.stage)}' expands %{var}% ({found[0]}): cmd "

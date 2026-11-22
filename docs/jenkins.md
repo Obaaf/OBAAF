@@ -231,22 +231,28 @@ causes; an `input` step's answer; and what `git log`, `git show`, `git cat-file 
 and `git rev-parse --abbrev-ref` or `git describe` (branch names, low), run with `returnStdout`.
 
 Each value is read from its structure, not by searching its text for names. `env` is read through aliases
-(`def e = env`, `this.env`, `env.getEnvironment()`, `System.getenv`), `?.`, comments and any letter case (Jenkins
-reads environment names without regard to case); `env[n]` and `env."${n}"` through a variable that only holds a
-literal, and a computed name is cannot tell. A value is followed through variables, `def (a, b) = [...]`,
+(`def e = env`, `this.env`, a variable or parameter given `this`, `env.getEnvironment()`, `System.getenv`), `?.`,
+comments and any letter case (Jenkins reads environment names without regard to case); `env[n]` and `env."${n}"`
+through a variable that only holds a literal, and a computed name is cannot tell; a declared string parameter read
+as `env.NAME` is a parameter. `env.getEnvironment()` and `System.getenv()` as a whole are every environment
+variable. A value is followed through variables, `def (a, b) = [...]`,
 `env.X = ...`, `env['X'] = ...`, `env.setProperty`, `binding.setVariable`, `this.X = ...`, `withEnv` entries
-(written with `+` too), `sb << x`, `.append`, `.add` and `.put`, a closure's or a `for` loop's parameter over the
-value (`each`, `collect`, `with` and other iteration methods), a closure held in a variable and called, what a
-method of the file returns, named arguments into a `Map` parameter and varargs. A result that is a number, a
+(written with `+` too), `sb << x` (chained too), `.append` (chained too), `.add` and `.put`, a closure's or a `for`
+loop's parameter over the value (`each`, `collect`, `with` and other iteration methods; an implicit `it` only inside
+its own closure), a closure held in a variable or a map and called, what a method of the file returns (twelve
+methods deep, then cannot tell), named arguments into a `Map` parameter and varargs. A result that is a number, a
 boolean or a digest (`.length()`, `.toInteger()`, `as Integer`, `==`, `.contains()`, `.encodeBase64()`), a
-ternary choosing between literals, `URLEncoder.encode` and a `replaceAll('[^A-Za-z0-9._-]', '')` whitelist carry
-no text. A value from a caller outside the file (a parameter of a method nothing here calls, a local copy of one,
-the map a `vars/` step's closure fills through `body.delegate`) is cannot tell. What the reader does not follow
-(past a budget per value) it reads by the names in its text, as before.
+ternary choosing between literals, `URLEncoder.encode` and a `replaceAll('[^A-Za-z0-9._-]', '')` whitelist (only
+`replaceAll`, and only a class of letters, digits and `._@:+,/-`) carry no text. A value from a caller outside the
+file (a parameter of a method nothing here calls, inside that method; a local copy of one, an `env.X` set from
+one, the map a `vars/` step's closure fills through `body.delegate` or `body.setDelegate`) is cannot tell. So is an
+interpolation the parser cannot read. What the reader does not follow (past a budget per value, or nested deeper
+than it reads) it reads by the names in its text, as before.
 
 The sinks are `sh`, `bat`, `powershell` and `pwsh` (also as `steps.sh`, through a variable holding `this`, a
-pointer such as `this.&sh`, and `sh(*: opts)`), `bat`'s `%NAME%`, which cmd expands before it parses the line
-(so `bat 'echo %CHANGE_TITLE%'` is not the safe form it is in `sh`), the Docker Pipeline plugin's
+pointer such as `this.&sh`, and `sh(*: opts)`), `bat`'s `%NAME%` (and `%NAME:~0,5%`, in any letter case, for a
+name in the environment), which cmd expands before it parses the line (so `bat 'echo %CHANGE_TITLE%'` is not the
+safe form it is in `sh`), the Docker Pipeline plugin's
 `docker.build`, `image.run`, `withRun`, `push`, `tag` and `pull`, which it runs through a shell step, and
 `inside(args)`, whose args become `docker run` options; Publish Over SSH's `execCommand` and SSH Steps' `command`;
 `"...".execute()`; `load`, `evaluate`, `Eval.me`, a `GroovyShell` or script engine and Job DSL's `scriptText`
@@ -254,11 +260,17 @@ pointer such as `this.&sh`, and `sh(*: opts)`), `bat`'s `%NAME%`, which cmd expa
 `[$class: 'StringParameterValue', ...]` form or built from `params`.
 
 Not read (each is a test case with its reason in `tests/test_jenkins_injection.py`): taint is kept by name for the
-whole file and never cleared, so a name reused elsewhere, or reassigned to a constant, is still reported; keys of
-one map are not told apart; a check of the value before it is used (`==~`, `when { branch ... }`, an `if`, the
-webhook's `regexpFilter`) is not read; quoting done in Groovy is not recognised; the contents of workspace files
-(`readFile`, `readJSON`, the output of commands other than git) are not counted as untrusted; text written with
-`writeFile` and run later is not followed; a computed step name and `invokeMethod` make the file cannot tell.
+whole file and never cleared, so a name reused elsewhere, or reassigned to a constant, is still reported (an
+implicit `it` excepted); keys of one map are not told apart, and a map's property is followed only when read as
+that property; a container filled through another name (an alias, a parameter, `with`) is not followed; a closure
+held in a list, passed to a method or curried is not followed to its parameters; a parameter's default value is not
+read; `env` inside a map or list, `docker` in another variable and `Runtime.exec` are not read; a method's own
+parameter named `params` or `env` is read as the build's; a check of the value before it is used (`==~`,
+`when { branch ... }`, an `if`, the webhook's `regexpFilter`) is not read; quoting done in Groovy is not
+recognised, and a whitelist that keeps `-` can still let the value add an option where it starts a word; the
+contents of workspace files (`readFile`, `readJSON`, the output of commands other than git) are not counted as
+untrusted; text written with `writeFile` and run later is not followed; a computed step name and `invokeMethod`
+make the file cannot tell; a comment inside `${...}` makes the step cannot tell.
 
 **AI agents.** An agent CLI in a shell step (the patterns in `src/obaaf/data/detection.yaml`), a
 repository script that runs one, the AI Agent plugin's `aiAgent` step, steps and commands declared
