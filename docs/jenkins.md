@@ -272,7 +272,7 @@ parameter named `params` or `env` is read as the build's; a check of the value b
 recognised, and a whitelist that keeps `-` can still let the value add an option where it starts a word; the
 contents of workspace files (`readFile`, `readJSON`, the output of commands other than git) are not counted as
 untrusted; text written with `writeFile` and run later is not followed; a computed step name and `invokeMethod`
-make the file cannot tell; a closure variable given to `each(f)`, a closure called as `m['name'](x)`, a `bat`
+make the file cannot tell; a closure variable given to `each(f)`, a closure in a map called through an index, a `bat`
 script variable assigned more than once, `this.sb << x`, `def s = sb << x` and an alias of
 `env.getEnvironment()` used whole are not followed.
 
