@@ -204,7 +204,7 @@ rules:
       computed when the job runs, in an `env`, a step before or
       beside it whose script, `env` values or inputs name `GITHUB_ENV`, `exportVariable` or the runner's `_runner_file_commands` folder or whose
       words may leave a process running, a parallel step,
-      and service containers given volumes or options; and, since decision D-132, a possible artifact
+      and service containers given volumes or options; and, since decision D-133, a possible artifact
       upload anywhere in the job, steps after it included, as OBAAF-GHA-020 reads it. Since those steps run no shell, look nothing up
       through the `PATH` and empty the loader's variables (slice 2c.9), bash's, Python's, the `PATH`'s and
       the loader's variables and a write to `GITHUB_PATH` no longer count as reasons of this control's own
@@ -755,7 +755,7 @@ rules:
       cannot request OIDC tokens) and no step after it.
       With either control, a possible artifact upload in the agent job makes otherwise verified
       `egress-enforced` credit "cannot tell", even for inspection-only uploads with no visible download
-      (decision D-132). The same applies to `key-out-of-reach` under OBAAF's action. An independent "not
+      (decision D-133). The same applies to `key-out-of-reach` under OBAAF's action. An independent "not
       met" verdict stands. A possible upload is a step that uses upload-artifact or upload-pages-artifact;
       one that uses any action but `actions/checkout`, `actions/download-artifact`, `actions/cache`, and
       OBAAF's egress action and Harden-Runner at listed commits (so an agent run through an action, or an
@@ -1409,10 +1409,15 @@ rules:
     description: >-
       A sh, bat or powershell step builds its script with Groovy interpolation (`"${...}"`) or
       concatenation of text that others control: a change request's title, source branch or author
-      name (high), build parameters (medium), or branch and tag names (low), directly or through a
-      variable assigned from them, or commit text read with git log. The value becomes part of the
-      command before the shell runs. Parameters passed to other jobs from such values are reported at
-      medium.
+      name (high), build parameters other than booleans and choices (medium), or branch and tag names
+      (low), directly or through a variable, closure parameter, method result or map assigned from
+      them, or commit text and file names read with git. The value becomes part of the command before
+      the shell runs. Also reported: a bat step's `%NAME%` of such a value (cmd expands it before
+      parsing), Docker Pipeline commands, remote SSH commands and `String.execute()` built from such
+      values, Groovy compiled from them (load, evaluate, Eval, GroovyShell, Job DSL; high), and
+      parameters passed to other jobs from them (medium). A value from a caller outside the file is
+      "cannot tell". A result that is a number or a boolean, a ternary choosing literals, URL or base64
+      encoding and a whitelist replaceAll are not reported.
     fix: >-
       Use single-quoted Groovy strings and let the shell expand the value: `sh 'echo "$CHANGE_TITLE"'`,
       with the value in the environment (it already is for CHANGE_* and parameters, or set it with

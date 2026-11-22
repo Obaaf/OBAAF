@@ -431,8 +431,8 @@ class Parser:
         nxt, after = at(j), at(j + 1)
         return nxt.kind == "ident" and (after.kind in ("nl", "eof") or after.value in ("=", "(", ";", "}"))
 
-    def skip_type(self) -> None:
-        self.qualified_name()
+    def skip_type(self) -> str:
+        name = self.qualified_name()
         if self.at_op("<"):
             depth = 0
             while not self.at("eof"):
@@ -446,6 +446,8 @@ class Parser:
         while self.at_op("[") and self.peek().value == "]":
             self.advance()
             self.advance()
+            name += "[]"
+        return name
 
     def declaration(self):
         t = self.tok
@@ -798,8 +800,9 @@ class Parser:
                 self.advance()
             self.skip_nl_in_expr()
             if op in ("instanceof", "!instanceof", "as"):
-                self.skip_type()
+                type_name = self.skip_type()
                 right = Name("type", line=t.line, col=t.col)
+                right.type_name = type_name       # `x as Integer`: OBAAF-JEN-009 reads the type (2d.2)
             elif op == "**":           # right-associative
                 self.enter()
                 try:
@@ -844,9 +847,12 @@ class Parser:
             return self.postfix(node)
         if t.kind == "op" and t.value == "(" and self.is_cast():
             self.advance()
-            self.skip_type()
+            type_name = self.skip_type()
             self.expect_op(")")
-            return self.unary()
+            operand = self.unary()
+            if isinstance(operand, Node):
+                operand.cast_type = type_name      # `(int) x`: OBAAF-JEN-009 reads the type (2d.2)
+            return operand
         return self.postfix(self.primary())
 
     def is_cast(self) -> bool:

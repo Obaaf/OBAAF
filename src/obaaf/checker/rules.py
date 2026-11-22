@@ -3453,7 +3453,7 @@ class WorkflowRules:
             unsure.append("the job does not declare its token's permissions, so the repository's default applies, "
                           "which the checker does not read, and every action is given that token")
         # What runs after (or beside) the confined command. `actions/upload-artifact` is read by
-        # `_artifact_upload` as an upload (decision D-132). A script, or any other action, could run or
+        # `_artifact_upload` as an upload (decision D-133). A script, or any other action, could run or
         # load what the command wrote, and the checker cannot tell reading from running. Steps before it are read for what their post
         # steps or the processes they leave running could reach: the outputs, the scratch directory by
         # its name, or /tmp.

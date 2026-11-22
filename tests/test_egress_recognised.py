@@ -436,7 +436,7 @@ class EgressActionTest(unittest.TestCase):
             f = self.check(f"      - run: {json.dumps(run)}\n" + action())
             with self.subTest(run=run):
                 self.assertEqual(verdict(f), CANNOT_TELL)
-                # Since D-132 any such script is also a possible upload; the reason under test must still be given
+                # Since D-133 any such script is also a possible upload; the reason under test must still be given
                 # (review of #357, run `ouzel`).
                 self.assertIn("may leave a process running beside it", detail(f))
         self.assertFalse(egress_mod.leaves_process("make deps && make lint 2>&1"))
@@ -1423,7 +1423,7 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
                 self.assertIn("ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line", control.detail)
 
     def test_steps_after_it_cannot_reach_the_key(self):
-        """The step's process has ended, so a later step that does not upload cannot reach the key. Since D-132 a
+        """The step's process has ended, so a later step that does not upload cannot reach the key. Since D-133 a
         later step that may upload an artifact makes this control "cannot tell" (review of #357, run `ouzel`)."""
         steps = keyed() + "\n      - run: echo completed"
         self.assertEqual(self.key(CHECKOUT + "\n" + steps).verdict, VERIFIED)
