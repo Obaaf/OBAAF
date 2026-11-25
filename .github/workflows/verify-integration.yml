@@ -1,0 +1,207 @@
+name: Validate revised portable patches with artifact consumers
+
+on:
+  push:
+    branches: [lead/rehearse-368-366-098b2f0]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        test: [suite, comparisons]
+        head: [098b2f06761b869e2fbb6b3997388f489de59ca3]
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Reproduce and verify both branches' changes
+        env:
+          PATCH: 098b2f06761b869e2fbb6b3997388f489de59ca3
+          CONSUMER: 7fb9bec7af6310bb59d8918ebd3fcc356958da1b
+          BASE: 2f98aba89b991bf77e188f9895f5a3f1c127eb63
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PATCH"
+          test "$(git merge-base "$PATCH" "$CONSUMER")" = "$BASE"
+          work="$(mktemp -d "$RUNNER_TEMP/combined.XXXXXX")"
+          if git -C "$work" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$work" >> "$GITHUB_ENV"
+          git -c user.name=Validation -c user.email=validation@example.invalid merge --no-commit --no-ff "$CONSUMER" || test -n "$(git diff --name-only --diff-filter=U)"
+          python - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          def git(*args, **kwargs):
+              return subprocess.check_output(["git", *args], **kwargs)
+
+          base, patch, consumer = [os.environ[k] for k in ("BASE", "PATCH", "CONSUMER")]
+          conflicts = git("diff", "--name-only", "--diff-filter=U").decode().splitlines()
+          print("Conflicted paths:", conflicts, flush=True)
+          assert conflicts in ([], ["CHANGELOG.md"])
+          def contents(rev, path):
+              return git("show", rev + ":" + path)
+          path = "CHANGELOG.md"
+          original, patched, consumed = [contents(r, path) for r in (base, patch, consumer)]
+          marker = b"## [Unreleased]\n\n"
+          prefix, rest = original.split(marker, 1)
+          assert patched.startswith(prefix + marker) and patched.endswith(rest)
+          section = patched[len(prefix + marker):-len(rest)]
+          assert section.startswith(b"### Save a proven fix as a patch") and section not in consumed
+          assert consumed.count(marker) == 1
+          expected = consumed.replace(marker, marker + section, 1)
+          if conflicts:
+              Path(path).write_bytes(expected)
+              git("add", path)
+          else:
+              assert Path(path).read_bytes() == expected
+
+          def changed(a, b):
+              return set(git("diff", "--name-only", a, b).decode().splitlines())
+
+          a, b = changed(base, patch), changed(base, consumer)
+          common = a & b
+          assert common == {path, "DECISIONS.md", "docs/upgrading.md"}
+          tree = git("write-tree").decode().strip()
+          assert changed(base, tree) == a | b
+          for head, unique in [(patch, a - b), (consumer, b - a)]:
+              for filename in unique:
+                  assert git("ls-tree", head, "--", filename) == git("ls-tree", tree, "--", filename), filename
+          for filename in sorted(common - {path}):
+              for head, other in [(patch, consumer), (consumer, patch)]:
+                  delta = git("diff", "--binary", base, head, "--", filename)
+                  with __import__("tempfile").TemporaryDirectory(dir=os.environ["RUNNER_TEMP"]) as scratch:
+                      file = Path(scratch, filename)
+                      file.parent.mkdir(parents=True, exist_ok=True)
+                      file.write_bytes(contents(other, filename))
+                      git("apply", "--whitespace=nowarn", "-", cwd=scratch, input=delta)
+                      assert file.read_bytes() == contents(tree, filename), filename
+          print(f"Combined tree {tree}; verified {len(a | b)} paths", flush=True)
+          PY
+          git diff --cached --check "$BASE"
+          git -c user.name=Validation -c user.email=validation@example.invalid commit --no-edit
+          test -z "$(git status --porcelain)"
+      - name: Prepare the checker and Git-free temporary storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^1)" = ${{ matrix.head }}
+          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Run the full acceptance suite and repository checks
+        if: matrix.test == 'suite'
+        run: |
+          set -euo pipefail
+
+          obaaf docs build --check
+          python -m unittest discover -s tests > "$RUNNER_TEMP/tests.log" 2>&1 || { tail -100 "$RUNNER_TEMP/tests.log"; exit 1; }
+          grep -E '^(Ran [0-9]+ tests|OK)' "$RUNNER_TEMP/tests.log"
+          obaaf catalog > /dev/null
+          obaaf docs build --check
+          python site/build.py --output "$RUNNER_TEMP/resource-site"
+          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
+      - name: Compare text, JSON, SARIF and summary on both repositories
+        if: matrix.test == 'comparisons'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/base-src"
+          git archive 7fb9bec7af6310bb59d8918ebd3fcc356958da1b src | tar -x -C "$RUNNER_TEMP/base-src"
+          git init -q "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout init --no-cone
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout set --no-cone '/*' '!/bugs/' '!/fresh-*/'
+          git -C "$RUNNER_TEMP/expectrail" fetch -q --filter=blob:none --depth=1 https://github.com/Expectrail/Expectrail.git de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          git -C "$RUNNER_TEMP/expectrail" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/expectrail" rev-parse HEAD)" = de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          cd "$RUNNER_TEMP"
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          candidate = Path(os.environ["GITHUB_WORKSPACE"])
+          sources = [temp / "base-src/src", candidate / "src"]
+          for path, level, expected in [(candidate, "medium", 0), (temp / "expectrail", "low", 1)]:
+              extra = ["--no-fixes"] if level == "low" else []
+              for mode in [["--format", "text"], ["--format", "json"], ["--format", "sarif"], ["--summary"]]:
+                  observations = []
+                  for src in sources:
+                      env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
+                      module = subprocess.check_output(
+                          [sys.executable, "-c", "import obaaf.cli; print(obaaf.cli.__file__)"],
+                          env=env, text=True,
+                      ).strip()
+                      assert Path(module).resolve().is_relative_to(src.resolve())
+                      argv = ["obaaf", "check", str(path), "--baseline", str(path / ".github/obaaf-baseline.json"),
+                              "--fail-on", level, *extra, *mode]
+                      run = subprocess.run(argv, env=env, capture_output=True)
+                      observations.append((run.returncode, run.stdout, run.stderr))
+                  before, after = observations
+                  assert (before[0], before[2]) == (after[0], after[2])
+                  assert before == after, (path.name, mode)
+                  assert observations[0][0] == expected, (level, mode, observations[0][0])
+                  print(f"Compared {path.name} {' '.join(mode)} exit={expected}", flush=True)
+          PY
+
+  portable-patch:
+    name: Apply exported patch on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 098b2f06761b869e2fbb6b3997388f489de59ca3
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Set up temporary storage outside Git
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import tempfile
+          from pathlib import Path
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert head == "098b2f06761b869e2fbb6b3997388f489de59ca3"
+          work = tempfile.mkdtemp(prefix="portable-patch-", dir=os.environ["RUNNER_TEMP"])
+          assert subprocess.run(["git", "-C", work, "rev-parse", "--git-dir"], capture_output=True).returncode
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              for key in ["TMPDIR", "TEMP", "TMP"]:
+                  env.write(f"{key}={work}\n")
+      - name: Install the candidate
+        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+      - name: Export, check, apply, and compare resulting bytes
+        shell: python
+        run: |
+          import os
+          import sys
+          import unittest
+          from pathlib import Path
+          sys.path.insert(0, str(Path("tests").resolve()))
+          tests = ["test_git_checks_and_applies_exact_bytes", "test_generated_gate_patch_uses_the_proven_workflow"]
+          suite = unittest.defaultTestLoader.loadTestsFromNames(["test_fix_patch.FixPatchTest." + name for name in tests])
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not result.wasSuccessful() or result.testsRun != 2 or result.skipped:
+              sys.exit(1)
