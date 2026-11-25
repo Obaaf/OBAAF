@@ -3056,3 +3056,74 @@ Non-blocking notes handled: `${i++ / 2}` and `a$/2` were read as strings; a mult
 **Fifth review pass** (the same sub-agent, 11 new cases and its 342 earlier cases and the corpus re-run, on `1833b81`; ids R5-). It found two holes in the new caching, each a pass, both fixed: a result computed with part of it more than 150 levels deep (read by names only) was cached and reused for a plain call, and the cache key did not hold map properties that hold a caller's value (`opts.target = config.target`, walked after an earlier call). Such results are no longer cached, and the key holds those properties. Left: a nested-looking comment (`/* a /* b */`) before a slashy string holding `//` inside `${...}` makes the file unreadable, so every rule is "cannot tell". A closing check of these two fixes by the same sub-agent (on `cd4cb70`) found nothing blocking; it noted that a map property written with `this.` and read without it, or the reverse, is not linked (as before the slice).
 
 **Stated limits** (each a case in `LIMITS` with its reason): taint is kept by name for the whole file and never cleared (an implicit `it` excepted); keys of one map are not told apart, and a map's property is followed only when read as that property; containers filled through another name, closures in lists or passed to methods, curried closures, parameter defaults, `env` inside a map, `docker` held in another variable and `Runtime.exec` are not followed; a guard on the value (`==~`, `when { branch }`, an `if`, the webhook's `regexpFilter`) is not read; quoting in Groovy is not recognised; a whitelist keeping `-` can still let the value add an option; workspace files' contents are not counted as untrusted; `writeFile` then a later run is not followed; a computed step name, `invokeMethod`, a method called on a closure parameter and an interpolation the parser cannot read make the file or step "cannot tell"; past the reader's budget a value is at least "cannot tell"; a closure variable given to `each(f)`, a closure in a map called through an index, a `bat` script variable assigned twice, `this.sb << x`, `def s = sb << x` and an alias of `env.getEnvironment()` used whole are not followed. No stated limit is quiet where something was judged unless the rule was quiet there before the slice too (a test holds this).
+
+## Review of #365: a check under a changed `PATH` (OBAAF-JEN-010, 011 and 012)
+
+Pull request #365 (the lead session's, for #344) moved the publish template's `export PATH` into
+`withEnv(["PATH+OBAAF=..."])`, and its test asserted that OBAAF-JEN-010, 011 and 012 then passed. They passed because
+the shell reader read only the check's own script: the same `withEnv` with a folder from the workspace
+(`PATH+X=${env.WORKSPACE}/tools`) cleared all three. The review made such a check "cannot tell" (decision D-135; the
+record of cases is `tests/test_jenkins_check_environment.py`).
+
+**Attack on the first version** (an Opus 5.5 sub-agent that did not write it, about 285 attempts on `16872fb`, each
+run through the checker; Groovy and Jenkins were not run). Four classes got past it, each fixed with cases:
+
+- Groovy octal escapes were not decoded (`'\120ATH'` was read as `120ATH`), in every Jenkins rule;
+- `env` reached through the script object or a variable holding it (`this.env.setProperty`, `script.env['PATH']`,
+  `steps.env`, `def s = this; s.env.PATH`, `getProperty('env')`);
+- `withEnv` called through another receiver (`s.withEnv`), a method pointer, a quoted name, or in `options { }`;
+- writes in Groovy the walker does not walk: a `when { expression { } }`, a method an `environment` value or another
+  directive calls, a GString, a `for` loop's start.
+
+Non-blocking items handled: a matrix axis and a credential binding's variable around the step are read; the
+file-wide part is worked out once (2,000 assignments and 2,000 checks took 4.2 s, 6,300 took 27 s; now 1.2 and 3.4 s).
+Stated limits: the agent's own environment (`tools { }`, a container's image or `-e` options, a pod template's
+`envVars`, wrappers such as `withPythonEnv`), `env` handed on through a list or map, and false "cannot tell" for a
+parameter or local named `env`, a copy from `env.getEnvironment()`, a comment or string showing a write, and names
+such as `PYTHON_VERSION`.
+
+**Second attack pass** (the same sub-agent, about 265 attempts on `9f9ffee`). The four classes were fixed (the attacker's 39
+cases `unknown`), but the second version found writes to `env` in Groovy the walker does not walk with a scan of the
+file's text, and that scan was got past with an alias of `env`, a comment between `env` and the name, `(env)`, a
+`\u0050` escape, a triple-quoted or quoted name, `this."env"`, a multiple assignment, a computed setter name, a
+method pointer (`env.&setProperty`), `env.identity { }`, `getProperty('e' + 'nv')`, a computed `withEnv` or a
+pointer to one; and one 256 KiB line of `env[` took 135 s. The scan is replaced by a reading of every node of the
+parsed file, and of every `${...}` parsed as statements; a call or pointer whose name is computed, and a statement
+the parser could not read near `env`, are "cannot tell". The same pass found the lexer change correct: colour codes
+give the verdicts they gave, `'\174\174 true'` and `'\046'`, which passed, now give their findings, and slashy
+strings are not decoded.
+
+**Third attack pass** (the same sub-agent, about 360 attempts on `6007f19`). All earlier cases were `unknown` and
+the slow inputs took under a quarter of a second. It got past the node reading with `env` reached as a value:
+through a ternary, `?:`, `as`, a method's or closure's result, a closure whose `delegate` is `env` (the usual
+Jenkins configuration idiom), a script property (`this.e = env`); and with Groovy the parser keeps no node for (a
+method's parameter default, a switch case label). Now any use of `env` other than a read, a write or a method call
+on it counts as a name the checker cannot read, and those texts, a loop's header and a postfix `++` are searched.
+Code from outside the file that runs in a `when` expression (`load`, a shared-library step) is not read by any rule
+there, before or after this change (#370). The claims reviewer's third pass found that writes inside a `${...}` were
+reported with the interpolation's own line numbers and that an unreadable statement there was looked for in the
+file's first lines; both are fixed, and a loop bounded by an `env` value no longer counts.
+
+**Fourth attack pass** (the same sub-agent, about 220 attempts on `75146e9`). All earlier cases were `unknown`. It
+got past with `getProperty('env')` on a closure's `owner`, `delegate` or `thisObject`, a computed property of one
+of them, a pointer to `getProperty`, a `\u0065nv` escape in the texts the parser drops (they were searched before
+the escapes were translated), `getProperty` with a computed name in a default or a loop's header, and a case label
+over several lines; it also found false "cannot tell" for `buildInfo.env.collect()` and a YAML file's `env`. Each
+is fixed: `getProperty` and `getAt` reach `env` on any receiver, a property named `env` counts on a receiver that
+can be the script (or where it is written to), the texts are translated first and searched for `getProperty` too,
+and a case label runs to the next case.
+
+**Fifth attack pass** (the same sub-agent, about 100 attempts on `3bb3520`). It found `getProperty('env')` on a
+method's result or an index (`me().getProperty('env')`, `[this][0].getAt('env')`, `getOwner().getProperty`) and
+`this['env']` or `this.'env'` in the dropped texts, both fixed; and, needing data flow, `this` through a ternary,
+`it`, `owner.owner`, now read, and `me().env`, a stated limit with other reflection the checker does not model.
+A last pass (about 60 attempts on `8d98aea`) found a triple-quoted `env` in the dropped texts, fixed; and the claims
+reviewer found that `targets.each { echo(it.env) }` was "cannot tell", so a parameter's or `it`'s `env` now counts
+only where it is written to or given a method that may set a variable, and a variable given one is followed.
+
+**Claims review** (a second Opus 5.5 sub-agent): the template is "cannot tell" for its `PATH` change only (replacing
+both `withEnv` calls with `dir('.')` gives three passes); a check under such a variable before a publish in a later
+stage's failure-path `post` block gives a new high OBAAF-JEN-011, which the texts now say; `--revision-file`
+accepted only 40 or 64 lower-case hex digits with at most one line ending, refused every other file it could read
+with exit 2 and gave no traceback; a FIFO with no writer waits. Its second pass found the computed setter name the
+attack found too.

@@ -42,6 +42,20 @@ class WorkOrderTests(unittest.TestCase):
             self.assertIn("No released commit", out)
             self.assertNotIn("# Egress confinement work order", out)
 
+    def test_named_harness_uses_catalogued_release(self):
+        with TempDir() as root:
+            workflows = root / ".github/workflows"
+            workflows.mkdir(parents=True)
+            path = workflows / "review.yml"
+            original = WORKFLOW.replace('claude -p "repository command text"', "python review.py")
+            path.write_text(original)
+            code, out, err = brief("--step", "Step name from a repository", root)
+            self.assertEqual((code, err), (0, ""))
+            self.assertIn(PIN, out)
+            self.assertIn("Step number = 1", out)
+            self.assertNotIn("python review.py", out)
+            self.assertEqual(path.read_text(), original)
+
     def test_trusted_instructions_and_real_verdicts(self):
         with TempDir() as root:
             workflows = root / ".github/workflows"

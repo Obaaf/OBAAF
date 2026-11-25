@@ -11,7 +11,8 @@
 //             key service, so no step can read the private key (FR11)
 //   verify    checks the release before anyone is asked to approve it
 //   approve   waits for a named release manager
-//   publish   checks everything again, now including who approved, then uploads
+//   verify approval  checks everything again, now including who approved
+//   publish   uploads after the full verification succeeds
 //
 // Jenkins enforces the boundary, and the checks below only hold while this file is the one that
 // runs: keep this job's credentials in its folder, run it on agents that run nothing else (labels
@@ -22,6 +23,7 @@ pipeline {
   agent { label 'obaaf-release' }
   options {
     disableConcurrentBuilds()
+    disableRestartFromStage()   // Every publish run must complete both verification stages.
     skipDefaultCheckout()
     timeout(time: 3, unit: 'DAYS')
   }
@@ -96,6 +98,7 @@ pipeline {
           sh '''
             set -eu
             export PATH="$WORKSPACE/.obaaf-venv/bin:$PATH"
+            test "$(command -v obaaf)" = "$WORKSPACE/.obaaf-venv/bin/obaaf"   # the records are made by the job's checker
             rev="$(cat release-sha.txt)"
             origin="$(git remote get-url origin)"
             obaaf attest slsa --artifact dist --builder-id "$JOB_URL" \
@@ -126,13 +129,15 @@ pipeline {
       when { not { changeRequest() } }
       steps {
         // Everything except the approvals, which do not exist yet. The approver reads this log.
-        sh '''
-          set -eu
-          export PATH="$WORKSPACE/.obaaf-venv/bin:$PATH"
-          obaaf verify release --policy .obaaf/policy.yaml --artifacts dist \
-            --dsse attestations/slsa.dsse.json --dsse attestations/build-record.dsse.json \
-            --release-run release-run.json --repo-dir . --source-revision "$(cat release-sha.txt)" --pre-approval
-        '''
+        withEnv(["PATH+OBAAF=${env.WORKSPACE}/.obaaf-venv/bin"]) {
+          sh 'test "$(command -v obaaf)" = "$WORKSPACE/.obaaf-venv/bin/obaaf"'
+          sh '''
+            set -eu
+            obaaf verify release --policy .obaaf/policy.yaml --artifacts dist \
+              --dsse attestations/slsa.dsse.json --dsse attestations/build-record.dsse.json \
+              --release-run release-run.json --repo-dir . --revision-file release-sha.txt --pre-approval
+          '''
+        }
       }
     }
     stage('Approve') {
@@ -144,9 +149,8 @@ pipeline {
               id: 'release', submitter: 'release-managers'
       }
     }
-    stage('Publish') {
+    stage('Verify approval') {
       when { not { changeRequest() } }
-      environment { OBAAF_LANE = 'release' }
       steps {
         withCredentials([usernamePassword(credentialsId: 'obaaf-jenkins-reader', usernameVariable: 'READER',
                                           passwordVariable: 'READER_TOKEN')]) {
@@ -160,14 +164,22 @@ pipeline {
         // FR6: stop here unless provenance, the build record, the approvals and every agent record verify
         // against the policy, and the artifacts came from the tag build that started this one. An
         // approval by whoever started either build does not count.
-        sh '''
-          set -eu
-          export PATH="$WORKSPACE/.obaaf-venv/bin:$PATH"
-          obaaf verify release --policy .obaaf/policy.yaml --artifacts dist \
-            --dsse attestations/slsa.dsse.json --dsse attestations/build-record.dsse.json \
-            --approvals publish-run.json --release-run release-run.json \
-            --repo-dir . --source-revision "$(cat release-sha.txt)"
-        '''
+        withEnv(["PATH+OBAAF=${env.WORKSPACE}/.obaaf-venv/bin"]) {
+          sh 'test "$(command -v obaaf)" = "$WORKSPACE/.obaaf-venv/bin/obaaf"'
+          sh '''
+            set -eu
+            obaaf verify release --policy .obaaf/policy.yaml --artifacts dist \
+              --dsse attestations/slsa.dsse.json --dsse attestations/build-record.dsse.json \
+              --approvals publish-run.json --release-run release-run.json \
+              --repo-dir . --revision-file release-sha.txt
+          '''
+        }
+      }
+    }
+    stage('Publish') {
+      when { not { changeRequest() } }
+      environment { OBAAF_LANE = 'release' }
+      steps {
         // EDIT: your upload, with a dedicated identity that can only publish (G6.1), to a beta or
         // staging channel; a person sets the build live in the store (G6.2).
         withCredentials([usernamePassword(credentialsId: 'store-upload', usernameVariable: 'STORE_UPLOAD_USER',
