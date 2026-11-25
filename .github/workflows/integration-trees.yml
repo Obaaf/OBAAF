@@ -1,0 +1,85 @@
+name: Verify individual integration trees
+on:
+  push:
+    branches: [lead/integrate-366-368-9e29f29]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: [366, 368]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 9e29f29e9a782b51d18762d4269af86d4654594a
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare isolated Git integration
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 9e29f29e9a782b51d18762d4269af86d4654594a
+          worktemp="$(mktemp -d "$RUNNER_TEMP/proof.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+      - name: Resolve PR 366 against flagship
+        if: matrix.pr == 366
+        run: |
+          set -euo pipefail
+          worktemp="$TMPDIR"
+          if ! git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit 7d8478ec2d1ef22a49ec52457d091a4a4d0473ae; then
+            test "$(git diff --name-only --diff-filter=U)" = DECISIONS.md
+            git show :1:DECISIONS.md > "$worktemp/base"
+            git show :2:DECISIONS.md > "$worktemp/ours"
+            git show :3:DECISIONS.md > "$worktemp/theirs"
+            python - "$worktemp" <<'PY'
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          ours = (root / "ours").read_bytes()
+          marker = b"\n### D-135 "
+          assert ours.count(marker) == 1
+          cut = ours.index(marker)
+          (root / "ours").write_bytes(ours[:cut])
+          (root / "jenkins-decision").write_bytes(ours[cut:])
+          PY
+            git merge-file -p "$worktemp/ours" "$worktemp/base" "$worktemp/theirs" > DECISIONS.md
+            cat "$worktemp/jenkins-decision" >> DECISIONS.md
+            git add DECISIONS.md
+            git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' commit --no-edit
+          fi
+          git diff --check 9e29f29e9a782b51d18762d4269af86d4654594a HEAD
+          echo "PR 366 integrated tree $(git rev-parse HEAD^{tree})"
+      - name: Resolve PR 368 against flagship
+        if: matrix.pr == 368
+        run: |
+          set -euo pipefail
+          worktemp="$TMPDIR"
+          if ! git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit d9e643f7e4cf7c284fd6c1e568c696de82d5ed92; then
+            test "$(git diff --name-only --diff-filter=U)" = CHANGELOG.md
+            git show :1:CHANGELOG.md > "$worktemp/base-log"
+            git show :2:CHANGELOG.md > "$worktemp/ours-log"
+            git show :3:CHANGELOG.md > "$worktemp/theirs-log"
+            python - "$worktemp" <<'PY'
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          base, ours, theirs = [(root / (name + "-log")).read_bytes() for name in ("base", "ours", "theirs")]
+          heading = b"### Save a proven fix as a patch\n"
+          assert theirs.count(heading) == 1 and heading not in ours
+          start = theirs.index(heading)
+          end = theirs.index(b"\n### ", start + len(heading)) + 1
+          assert theirs[:start] + theirs[end:] == base
+          marker = b"## [Unreleased]\n\n"
+          assert ours.count(marker) == 1
+          Path("CHANGELOG.md").write_bytes(ours.replace(marker, marker + theirs[start:end], 1))
+          PY
+            git add CHANGELOG.md
+            git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' commit --no-edit
+          fi
+          git diff --check 9e29f29e9a782b51d18762d4269af86d4654594a HEAD
+          echo "PR 368 integrated tree $(git rev-parse HEAD^{tree})"
