@@ -88,6 +88,24 @@ class RunnerLabelTest(unittest.TestCase):
         self.assertEqual(verdict(f), VERIFIED)
         self.assertEqual(provenance_findings(provenance_workflow(runs_on="Ubuntu-Latest")), [])
 
+    def test_space_round_the_expression_is_space_round_the_label(self):
+        """Found by the third review pass: `runs-on: " ${{ matrix.os }}"` is `" ubuntu-24.04"` once GitHub fills
+        it in, and the expression readers trimmed the value first."""
+        matrix = "\n    strategy:\n      matrix:\n        os: [ubuntu-24.04]"
+        for runs_on in ('" ${{ matrix.os }}"', '"${{ matrix.os }} "', '"${{ matrix.os }}\\n"'):
+            with self.subTest(runs_on=runs_on):
+                result = run_check(workflow(CHECKOUT + "\n" + keyed(ref=REVIEWED_PIN), runs_on=runs_on + matrix),
+                                   cat=checker.load())
+                self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+                self.assertEqual(key_control(result).verdict, CANNOT_TELL)
+                self.assertIn("OBAAF-GHA-013", {f.rule for f in result.findings})
+        plain = run_check(workflow(CHECKOUT + "\n" + keyed(ref=REVIEWED_PIN), runs_on='"${{ matrix.os }}"' + matrix),
+                          cat=checker.load())
+        self.assertEqual(verdict(egress(plain)), VERIFIED)
+        text = provenance_workflow(runs_on='" ${{ matrix.os }}"').replace(
+            "    steps:\n", "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n    steps:\n", 1)
+        self.assertEqual(len(provenance_findings(text)), 1)
+
 
 def check_files(files):
     with TempDir() as tmp:
@@ -266,6 +284,15 @@ class RunnerSelectorTest(unittest.TestCase):
                                              "'self-hosted' || %s", form)
                 (found,) = [f for f in check_files({".github/workflows/b.yml": text}).findings if f.rule == "OBAAF-GHA-013"]
                 self.assertEqual(found.severity, "info", form)
+
+    def test_space_round_the_selector_is_not_the_form(self):
+        for pad in (" %s", "%s ", "%s\\n"):
+            with self.subTest(pad=pad):
+                text = self.SELECTOR.replace('"${{', '"' + pad.split("%s")[0] + "${{").replace(
+                    '}}"', "}}" + pad.split("%s")[1] + '"')
+                (found,) = [f for f in check_files({".github/workflows/b.yml": text % "'ubuntu-latest'"}).findings
+                            if f.rule == "OBAAF-GHA-013"]
+                self.assertNotEqual(found.severity, "info")
 
 
 class ReviewFindingsTest(unittest.TestCase):

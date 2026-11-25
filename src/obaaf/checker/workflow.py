@@ -2350,7 +2350,11 @@ class Job:
             return [labels] if labels else None
         if len(labels) != 1:
             return None
-        text = labels[0].strip()
+        text = labels[0]
+        if text != text.strip():
+            # GitHub keeps text round an expression, so `" ${{ matrix.os }}"` is `" ubuntu-24.04"`, a label with
+            # space round it (flagship slice 2d.15, #148, from its third review pass).
+            return None
         if not (text.startswith(expr_mod.OPEN) and text.endswith("}}")):
             return None
         found = expr_mod.bodies(text)
@@ -2451,7 +2455,7 @@ class Job:
         `pull_request.head.repo`; on any other event the form picks the second value."""
         if self.runner_label_sets() is not None or self.self_hosted or len(self.runs_on) != 1:
             return False
-        text = self.runs_on[0].strip()
+        text = self.runs_on[0]          # not trimmed: space round the expression is part of the label (#148)
         found = expr_mod.bodies(text)
         if len(found) != 1 or text != expr_mod.OPEN + found[0] + "}}":
             return False
