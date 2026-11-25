@@ -199,6 +199,60 @@ To clear it, publish in a later stage or in `post { success }`, and put each che
 with literal arguments and nothing that ignores its failure. The limits are listed in
 [bypass-attempts.md](bypass-attempts.md#2d2o-a-publish-after-a-failed-or-skipped-check).
 
+**A check under a variable that changes what its shell runs** (OBAAF-JEN-010, 011 and 012; decision D-135). A
+check does not clear any of the three rules when its shell may run another program than the one it names: when a
+variable that changes what a shell runs is set around the step, or written to the build's `env` anywhere in the
+file.
+
+- *The names* are `PATH` (`PATH+NAME` included: Jenkins puts the value in front of `PATH`), `HOME`, `ENV`,
+  `SHELLOPTS`, `PS4`, `PROMPT_COMMAND`, `EXECIGNORE`, `GCONV_PATH`, `ACTIONS_ALLOW_UNSECURE_COMMANDS` and those
+  beginning `BASH`, `LD_`, `DYLD_` or `PYTHON` (six of Python's that load nothing, such as `PYTHONUNBUFFERED`,
+  excepted), in any letter case, with Groovy's `\uXXXX` and octal escapes read (`'\120ATH'` is `PATH`): the names
+  the GitHub Actions rules read since slice 2d.13.
+- *Around the step*: a `withEnv` entry (through any receiver: `withEnv`, `this.withEnv`, `s.withEnv`), an
+  `environment { }` block, a matrix axis, or a credential binding's variable.
+- *Anywhere in the file*: `env.X = ...` (any assignment operator), `env['X'] = ...`, `env.X++`,
+  `env.setProperty(...)`, `put`, `putAt`, or another method of `env` that does not only read it (`with { }`,
+  `identity { }`, `putAll`, a pointer such as `env.&setProperty`). `env` is reached by its name, by
+  `getProperty('env')` or `getAt('env')` on any receiver, and by `x.env`, `x['env']` or a computed property where
+  `x` can be the script (`this`, `script`, `steps`, a closure's `owner`, `delegate` or `thisObject` and chains of
+  them, `getOwner()`, a variable given an expression that names one of these, such as `c ? this : null`). Through
+  a method's or closure's parameter, `it`, or a variable given one's `env`, which may be the script or a map with
+  an `env` key, only a write or a method that may set a variable counts (`s.env.putAll(...)`, not
+  `echo(it.env)`); but once the file calls `with`, `identity` or `tap` on the script (`this.with { it.env }`), `it`
+  and that closure's parameter count as the script everywhere in the file. A property named `env` of anything else
+  (`buildInfo.env`) counts only where it is written to. Every node of the parsed file is read for this, and every `${...}` of its
+  strings as statements, whether the walker reaches it or not (a `when { expression { } }`, a method a directive
+  calls), and so is the text the parser keeps no node for (a loop's header, a method's parameter defaults, a switch's
+  case labels, a postfix `++`).
+- *Counted the same*: a name the checker cannot read (a computed entry or key, a list held in a variable, a setter
+  given a computed name); `env` used as a value, which the checker does not follow (given to a variable, as a
+  closure's `delegate`, to a method or a list, in a ternary, returned); a call or pointer whose name is computed
+  (`"$m"(...)`, `this.&"$m"`, `invokeMethod`, a pointer to `getProperty`); a statement the parser could not read
+  that names `env` on its line or the ten after it; and a place the file names `withEnv` that the checker does not
+  read as a call (a method pointer, `options { withEnv(...) }`, a `when` expression).
+
+Such a check is "cannot tell", and the reason names the variable and its line, with two exceptions: a check whose
+failure the step already ignores stays a finding, and a `--pre-approval` check stays a medium OBAAF-JEN-012. A
+publish in a later stage's failure-path `post` block, whose only check is such a check, gets a high OBAAF-JEN-011,
+as after an `export PATH` in the script: the check may not run the reviewed checker, so nothing shows that it fails
+and skips the stage before the post block runs. A variable set around another step changes nothing; a write to
+`env` counts for every step of the file, whatever its place.
+
+Not read: what the agent's own environment holds (the controller's node properties, `tools { }`, a container's
+image, `docker.image(...).inside('-e ...')`, a pod template's `envVars`); code from outside the file that runs
+where the walker does not reach (`load` or a shared-library step in a `when` expression), which the other rules do
+not read there either (#370); `this` or `env` carried through a method's result (`me().env`) or other reflection
+the checker does not model; and a step that checks which program the shell finds (`command -v obaaf`). Some safe files get "cannot tell": a parameter or local
+variable named `env`, a copy from `env.getEnvironment()`, `env` given to a variable only to read it
+(`def e = env; echo e.X`), `println env`, `env.metaClass` read, a harmless `withEnv` in a `when` expression, a
+statement the parser cannot read near a mention of `env`, `getProperty` or a string holding the word `env`
+(`'dev env x'`) in a loop's header, a default or a case label, and names such as `PYTHON_VERSION` that the
+prefix rule counts. Before the review of #365 only an `export`
+inside the check's own script stopped the reader, so `withEnv(["PATH+X=${env.WORKSPACE}/tools"])` around
+`obaaf verify release` cleared all three rules whatever `tools` held. OBAAF's own publish template is "cannot
+tell" under all three for this reason (below).
+
 **Credentials.** `withCredentials` with every binding type, `environment` `credentials()`,
 `sshagent`, `withSonarQubeEnv`, `docker.withRegistry` (also with a computed ID),
 `configFileProvider`, `wrap` with a credential or Vault wrapper class, wrapper steps that supply
@@ -523,6 +577,17 @@ or start each tag build by hand, in which case that person cannot approve the re
 The publish job takes no parameters. It finds the build that started it from its own start cause
 (`currentBuild.getBuildCauses`), refuses to run if a person started it, and requires that build to be
 in the tag project. The tag is the name of that build's job, resolved to a commit through your SCM.
+The publish job writes that commit to `release-sha.txt` before copying the build's `dist/` artifacts.
+Both verification steps use `--revision-file release-sha.txt`. Set `OBAAF_REVISION` to a reviewed
+OBAAF commit that supports this option. Each verification step, and the signing step, first checks that the shell
+finds `obaaf` in the job’s virtual environment, where the Resolve stage installed the checker from that commit;
+nothing checks that file again after the install. The publish pipeline disables
+Declarative stage restarts. A fresh publish run must start from the tag build and collect a new approval.
+OBAAF's own rules cannot tell about this template under OBAAF-JEN-010, 011 and 012: both checks run under
+`withEnv(["PATH+OBAAF=..."])`, a `PATH` change can make a check's shell run another program, and the checker does
+not read the `command -v` step, which shows only which file the shell finds (decision D-135). Jenkins coverage is advisory, so this
+changes no exit status.
+
 At the end, the verifier checks the same facts again from the controller's JSON for both builds,
 which the publish job fetches with a read-only API token:
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -669,6 +670,15 @@ def cmd_verify_release(args) -> int:
 
     try:
         policy = Policy.load(args.policy)
+        source_revision = args.source_revision
+        if args.revision_file is not None:
+            if not args.revision_file:
+                raise ValueError("--revision-file: no file named")
+            with Path(args.revision_file).open("rb") as fh:
+                raw = fh.read(67)
+            if not re.fullmatch(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})(?:\r?\n)?", raw):
+                raise ValueError(f"{args.revision_file}: expected one full lowercase Git commit ID")
+            source_revision = raw.rstrip(b"\r\n").decode("ascii")
         approvals = json.loads(Path(args.approvals).read_text(encoding="utf-8")) if args.approvals else None
         release_run = json.loads(Path(args.release_run).read_text(encoding="utf-8")) if args.release_run else None
     except (PolicyError, OSError, ValueError) as exc:
@@ -679,7 +689,7 @@ def cmd_verify_release(args) -> int:
         decision = release.verify_release(
             policy, [Path(a) for a in args.artifacts], gh=gh, dsse_files=[Path(p) for p in args.dsse or []],
             approvals=approvals, actors=args.actor or [], repo_dir=Path(args.repo_dir) if args.repo_dir else None,
-            git_range=args.range, source_revision=args.source_revision, pre_approval=args.pre_approval,
+            git_range=args.range, source_revision=source_revision, pre_approval=args.pre_approval,
             release_run=release_run)
     except (RecordError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1125,8 +1135,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip the approvals check, to show the result to the approver before they approve")
     x.add_argument("--repo-dir", help="git checkout with history, to read agent records from")
     x.add_argument("--range", help="git range to check for agent commits (default: from the policy's "
-                                   "agents.since to --source-revision)")
-    x.add_argument("--source-revision", help="the commit being released")
+                                   "agents.since to --source-revision or --revision-file)")
+    revision = x.add_mutually_exclusive_group()
+    revision.add_argument("--source-revision", help="the commit being released")
+    revision.add_argument("--revision-file",
+                          help="read the commit being released from this file: one full lower-case commit ID (40 or "
+                               "64 hex digits) and at most one line ending, as `git rev-parse` prints it")
     x.add_argument("--format", choices=("text", "json"), default="text")
     x.add_argument("--output", "-o")
     x.set_defaults(func=cmd_verify_release)
@@ -1183,6 +1197,7 @@ def main(argv: list[str] | None = None) -> int:
         _fix_check_options(parser)
         parser.add_argument("--settings", help=argparse.SUPPRESS)
         parser.add_argument("--job", required=True, help="GitHub Actions job ID")
+        parser.add_argument("--step", help="exact name or ID of the run step to confine")
         parser.add_argument("--brief", action="store_true", help="print a Markdown work order for a trusted branch")
         parser.set_defaults(func=run)
         argv = argv[2:]
