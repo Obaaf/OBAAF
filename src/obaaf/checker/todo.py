@@ -87,6 +87,10 @@ def tightening_prerequisite(result: CheckResult) -> str:
 def owner_preview_prerequisite(result: CheckResult) -> str:
     if result.errors:
         return "Resolve the scan errors before previewing an owner for ignore entries."
+    # The proof refuses while an entry matches no finding, and the paperwork preview cannot remove one
+    # from an old-format baseline, so every owner it proposes is refused (review of #364).
+    if result.baseline_format == baseline.FORMAT_V1:
+        return "Migrate the old-format baseline, then rerun the check before previewing an owner for ignore entries."
     if not result.whole_repository:
         return "Check the whole repository on every platform before previewing an owner for ignore entries."
     for flag, value in (("--config", result.config.path), ("--baseline", result.baseline_path),
@@ -122,20 +126,24 @@ class _Group:
             "command": self.cause.next_action if self.cause.id == "acceptance-old-baseline" else None,
         }
         if self.ownerless_ignores:
-            manual = (" Review missing owners in baseline entries by hand."
+            # The manual part comes first, so that a printed command ends its line (review of #364).
+            manual = ("Review missing owners in baseline entries by hand. "
                       if self.ownerless_ignores < item["count"] else "")
-            action = owner_prerequisite
-            if not action:
+            if owner_prerequisite:
+                action = f"{self.cause.next_action} {manual}{owner_prerequisite}"
+            else:
                 command = tightening_command(result, ["--owner", "OWNER"])
-                action = ("Review each risk. Replace OWNER with its responsible owner to preview the ignore changes. "
-                          "The preview lists every finding you would accept.")
+                action = (f"{manual}Review each risk, then replace OWNER with the owner responsible for these ignore "
+                          "entries: the preview writes that owner into every ignore entry missing one, proposes "
+                          "removing the baseline and ignore entries that match no finding, and lists every finding "
+                          "you would accept.")
                 if command == one_line(command):
                     item["command"] = command
                     action += " " + command
                 else:
                     action += (" Run obaaf fix --owner OWNER with the original check paths and options, including "
                                "any settings snapshot. The full command cannot be printed on one line.")
-            item["nextAction"] = action + manual
+            item["nextAction"] = action
         if self.cause.id == "checkout-credentials":
             if result.errors:
                 item["nextAction"] = "Resolve the scan errors before previewing checkout tightening."
