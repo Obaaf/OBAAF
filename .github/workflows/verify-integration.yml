@@ -1,0 +1,174 @@
+name: Verify integrated portable patches
+
+on:
+  push:
+    branches: [lead/validate-patch-2f98aba]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        test: [suite, comparisons]
+        head: [6d2f33d775633988c12d4670193791caf1e1b0e5]
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Prepare the checker and Git-free temporary storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ${{ matrix.head }}
+          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Run the full acceptance suite and repository checks
+        if: matrix.test == 'suite'
+        run: |
+          set -euo pipefail
+
+          obaaf docs build --check
+          python -m unittest discover -s tests > "$RUNNER_TEMP/tests.log" 2>&1 || { tail -100 "$RUNNER_TEMP/tests.log"; exit 1; }
+          grep -E '^(Ran [0-9]+ tests|OK)' "$RUNNER_TEMP/tests.log"
+          obaaf catalog > /dev/null
+          obaaf docs build --check
+          python site/build.py --output "$RUNNER_TEMP/resource-site"
+          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
+      - name: Compare text, JSON, SARIF and summary on both repositories
+        if: matrix.test == 'comparisons'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/base-src"
+          git archive 2f98aba89b991bf77e188f9895f5a3f1c127eb63 src | tar -x -C "$RUNNER_TEMP/base-src"
+          git init -q "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout init --no-cone
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout set --no-cone '/*' '!/bugs/' '!/fresh-*/'
+          git -C "$RUNNER_TEMP/expectrail" fetch -q --filter=blob:none --depth=1 https://github.com/Expectrail/Expectrail.git de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          git -C "$RUNNER_TEMP/expectrail" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/expectrail" rev-parse HEAD)" = de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          cd "$RUNNER_TEMP"
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          candidate = Path(os.environ["GITHUB_WORKSPACE"])
+          sources = [temp / "base-src/src", candidate / "src"]
+          for path, level, expected in [(candidate, "medium", 0), (temp / "expectrail", "low", 1)]:
+              extra = ["--no-fixes"] if level == "low" else []
+              for mode in [["--format", "text"], ["--format", "json"], ["--format", "sarif"], ["--summary"]]:
+                  observations = []
+                  for src in sources:
+                      env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
+                      module = subprocess.check_output(
+                          [sys.executable, "-c", "import obaaf.cli; print(obaaf.cli.__file__)"],
+                          env=env, text=True,
+                      ).strip()
+                      assert Path(module).resolve().is_relative_to(src.resolve())
+                      argv = ["obaaf", "check", str(path), "--baseline", str(path / ".github/obaaf-baseline.json"),
+                              "--fail-on", level, *extra, *mode]
+                      run = subprocess.run(argv, env=env, capture_output=True)
+                      observations.append((run.returncode, run.stdout, run.stderr))
+                  before, after = observations
+                  assert (before[0], before[2]) == (after[0], after[2])
+                  assert before == after, (path.name, mode)
+                  assert observations[0][0] == expected, (level, mode, observations[0][0])
+                  print(f"Compared {path.name} {' '.join(mode)} exit={expected}", flush=True)
+          PY
+
+  portable-patch:
+    name: Apply exported patch on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 6d2f33d775633988c12d4670193791caf1e1b0e5
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Set up temporary storage outside Git
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import tempfile
+          from pathlib import Path
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert head == "6d2f33d775633988c12d4670193791caf1e1b0e5"
+          work = tempfile.mkdtemp(prefix="portable-patch-", dir=os.environ["RUNNER_TEMP"])
+          assert subprocess.run(["git", "-C", work, "rev-parse", "--git-dir"], capture_output=True).returncode
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              for key in ["TMPDIR", "TEMP", "TMP"]:
+                  env.write(f"{key}={work}\n")
+      - name: Install the candidate
+        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+      - name: Export, check, apply, and compare resulting bytes
+        shell: python
+        run: |
+          import os
+          import sys
+          import unittest
+          from pathlib import Path
+          assert Path("tests/test_fix_patch.py").is_file()
+          suite = unittest.defaultTestLoader.discover("tests", pattern="test_fix_patch.py")
+          assert suite.countTestCases() > 0
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not result.wasSuccessful() or result.testsRun <= len(result.skipped):
+              sys.exit(1)
+
+  native-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 2f98aba89b991bf77e188f9895f5a3f1c127eb63
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reproduce the integration tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -c user.name=Validation -c user.email=validation@example.invalid merge --no-commit --no-ff f2e3082017ca6f9017922185481d38627c2b7459 || test "$(git diff --name-only --diff-filter=U)" = CHANGELOG.md
+          if git ls-files -u CHANGELOG.md | grep -q .; then
+            python - <<'PY'
+          import subprocess
+          from pathlib import Path
+
+          base, flagship, patch = [subprocess.check_output(["git","show",f":{i}:CHANGELOG.md"]) for i in (1,2,3)]
+          marker = b"## [Unreleased]\n\n"
+          prefix, rest = base.split(marker,1)
+          assert patch.startswith(prefix + marker) and patch.endswith(rest)
+          section = patch[len(prefix + marker):-len(rest)]
+          assert section.startswith(b"### Save a proven fix as a patch")
+          assert flagship.count(marker) == 1
+          Path("CHANGELOG.md").write_bytes(flagship.replace(marker, marker + section, 1))
+          PY
+            git add CHANGELOG.md
+          fi
+          tree="$(git write-tree)"
+          echo "Native integration tree $tree"
+          test "$tree" = 9803eca3b2b8d32921b17bea1b0f08f7e8a14f8e
+          test "$tree" = "$(git rev-parse 6d2f33d775633988c12d4670193791caf1e1b0e5^{tree})"
+          git diff --cached --check 2f98aba89b991bf77e188f9895f5a3f1c127eb63
