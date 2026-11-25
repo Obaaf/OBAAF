@@ -1,0 +1,89 @@
+name: Verify the reported owner command and patch export
+
+on:
+  push:
+    branches: [lead/check-owner-patch-8c75dee-d9e643f]
+
+permissions:
+  contents: read
+
+jobs:
+  integrated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 8c75deeac2830bffbb9e26f8aa04f92675a2e16b
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Prepare the checker and Git-free temporary storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 8c75deeac2830bffbb9e26f8aa04f92675a2e16b
+          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit d9e643f7e4cf7c284fd6c1e568c696de82d5ed92 # PR 368
+          git rev-parse HEAD^{tree}
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Follow the reported owner command on a disposable repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import shlex
+          import subprocess
+          import tempfile
+          from datetime import date, timedelta
+          from pathlib import Path
+          
+          with tempfile.TemporaryDirectory() as temp:
+              root = Path(temp) / "sample project"
+              config = Path(".github") / "policý review.yml"
+              baseline = Path(".github") / "team baseline.json"
+              workflow = Path(".github/workflows/build.yml")
+              (root / workflow.parent).mkdir(parents=True)
+              (root / workflow).write_text("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n")
+              until = (date.today() + timedelta(days=30)).isoformat()
+              before = ("ignore:\r\n  - rule: OBAAF-GHA-008\r\n    path: .github/workflows/build.yml\r\n    reason: accepted in test fixture\r\n    until: " + until).encode()
+              (root / config).write_bytes(before)
+              def run(*args):
+                  return subprocess.run(args, cwd=root, check=True, text=True, stdout=subprocess.PIPE).stdout
+              def report():
+                  return json.loads(run("obaaf", "check", ".", "--config", str(config), "--baseline", str(baseline), "--format", "json", "--fail-on", "never"))["todo"]
+              def owner(groups):
+                  return next(g for g in groups if g["id"] == "acceptance-owner-missing")
+              run("git", "init", "-q")
+              run("git", "config", "core.autocrlf", "false")
+              for version in ("v0.1", "v0.2"):
+                  (root / baseline).write_text(json.dumps({"format":"obaaf-baseline/" + version, "findings":[], "tool":"fixture"}))
+                  groups = report()
+                  entry = owner(groups)
+                  if version == "v0.1":
+                      assert entry["command"] is None and "Migrate the old-format baseline" in entry["nextAction"]
+                      ids = [g["id"] for g in groups]
+                      assert ids.index("acceptance-old-baseline") < ids.index(entry["id"])
+              assert entry["nextAction"].endswith(entry["command"])
+              args = shlex.split(entry["command"])
+              assert args[:2] == ["obaaf", "fix"] and args.count("OWNER") == 1
+              args[args.index("OWNER")] = "@sample-team"
+              run("git", "add", ".")
+              output = str(Path(temp) / "owner.patch")
+              preview = run(*args, "--patch", output)
+              assert "You are accepting risk (1 finding)" in preview and (root / config).read_bytes() == before
+              run("git", "apply", "--check", output)
+              run("git", "apply", output)
+              expected = before.replace(b"- rule:", b'- owner: "@sample-team"\r\n    rule:')
+              assert (root / config).read_bytes() == expected
+              assert run("git", "diff", "--name-only", "-z") == str(config) + "\0"
+              assert not any(g["id"] == "acceptance-owner-missing" for g in report())
+              print("Legacy baseline requested migration first. The current baseline produced a copyable command. The exported patch applied exactly one reviewed owner edit with CRLF and no final newline; the subsequent check cleared the missing-owner item.")
+          PY
