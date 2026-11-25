@@ -102,9 +102,9 @@ jobs:
         return dict(line.split(": ", 1) for line in stdout.getvalue().splitlines() if ": " in line)
 
     def test_a_lane_is_omitted_only_where_the_checkout_finds_the_agent(self):
-        """Review of #362: a job whose agent the checker finds only in a script Git does not track
-        (untracked, ignored or in a submodule) would get no lane from init and none in CI, whose
-        checkout does not hold the script. Init declares it, and says why."""
+        """Review of #362: a job whose agent the checker finds only in a script the last commit does
+        not hold (untracked, ignored, in a submodule, or edited since) would get no lane from init and
+        none in CI, whose checkout does not hold the script. Init declares it, and says why."""
         from helpers import git, init_repo
         init_repo(self.root)
         workflow = self.workflow.with_name("script.yml")
@@ -120,22 +120,31 @@ jobs:
     steps:
       - run: claude -p review
 """)
-        (self.root / "review.sh").write_text("codex exec 'review'\n")
+        script = self.root / "review.sh"
+        script.write_text("codex exec 'review'\n")
         git(self.root, "add", workflow.relative_to(self.root).as_posix())
+        git(self.root, "commit", "-qm", "workflow")
+        reason = "the files of the last commit outside submodules"
         status, text = self.invoke()
         self.assertEqual(status, 0, text)
         self.assertIn('+  .github/workflows/script.yml#review: agent', text)
         self.assertNotIn("script.yml#direct: agent", text)
-        self.assertIn("Git tracks outside submodules", text)
-        self.assertIn("script.yml#review", text.split("Git tracks outside submodules")[1])
+        self.assertIn(reason, text)
+        self.assertIn("script.yml#review", text.split(reason)[1])
         (self.root / ".gitignore").write_text("review.sh\n")
         self.assertIn('+  .github/workflows/script.yml#review: agent', self.invoke()[1])
         (self.root / ".gitignore").unlink()
+        # Committed as an agent the checker cannot see, edited in the working tree into one it can.
+        script.write_text('A=codex; "$A" exec review\n')
         git(self.root, "add", "review.sh")
+        git(self.root, "commit", "-qm", "script")
+        script.write_text("codex exec 'review'\n")
+        self.assertIn('+  .github/workflows/script.yml#review: agent', self.invoke()[1])
+        git(self.root, "commit", "-qam", "script")
         status, text = self.invoke("--apply")
         self.assertEqual(status, 0, text)
         self.assertEqual(Config.load(self.root).lanes, {})
-        self.assertNotIn("Git tracks outside submodules", text)
+        self.assertNotIn(reason, text)
         lanes = self.lanes_after_check()
         for job in ("review", "direct"):
             self.assertTrue(lanes[f".github/workflows/script.yml#{job}"].startswith("agent ("), lanes)
@@ -172,6 +181,7 @@ jobs:
 """)
         (folder / "b.yml").write_text("on: workflow_call\njobs:\n  inner:\n    steps:\n      - run: npx @openai/codex exec x\n")
         git(self.root, "add", "-A")
+        git(self.root, "commit", "-qm", "workflows")
         status, text = self.invoke("--apply")
         self.assertEqual(status, 0, text)
         named = [line.split(":")[0] for line in text.splitlines() if line.startswith(".github/workflows/")]

@@ -6,13 +6,13 @@ import difflib
 import os
 import re
 import shlex
-import shutil
+import subprocess
 import sys
 import tempfile
 from collections import defaultdict
 from importlib.resources import files
 from pathlib import Path
-from stat import S_ISLNK, S_ISREG
+from stat import S_ISREG
 from tempfile import NamedTemporaryFile
 
 import yaml
@@ -90,42 +90,96 @@ def _agent_jobs(prepared: list, catalog, config) -> dict:
     return found
 
 
-def _tracked_agent_jobs(root: Path, catalog, config) -> set | None:
-    """The jobs the checker puts in the agent lane from the files Git tracks, outside submodules,
-    which is what the generated workflow's checkout holds. None when `root` is not the top of a Git
-    work tree, where the folder is all there is. An empty set when Git cannot list its files, so that
-    every agent job is then declared.
+# A committed file larger than this is left out of the committed copy; a job the checker finds only
+# through it is then declared.
+_COMMITTED_LIMIT = 8 * 1024 * 1024
 
-    Review of #362: the folder can hold what that checkout will not, a script in a submodule or one
-    Git ignores or does not track. A job the checker finds only through such a file would get no
-    declaration from init and no agent lane in CI."""
-    if not (root / ".git").exists():
+
+def _git(git: Path, root: Path, args: list, data: bytes = b"") -> bytes | None:
+    """git's output for `args` at `root`, run as `repo._run_git` runs it, with `data` on its input."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    try:
+        done = subprocess.run([str(git), "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+                               "-c", "core.hooksPath=/dev/null", *args],
+                              cwd=str(root), env=env, input=data, capture_output=True, timeout=120, check=False)
+    except (OSError, subprocess.SubprocessError):
         return None
-    how = {}
-    tracked = repo._git_tracked(root, how)
-    if tracked is None:
-        return set()
-    gitlinks = [link.rstrip("/") + "/" for link in how.get("gitlinks", ())]
+    return done.stdout if done.returncode == 0 else None
+
+
+def _committed_copy(git: Path, root: Path, dest: Path) -> bool:
+    """Write into `dest` the files of `root` as its last commit holds them, outside submodules: what a
+    checkout of that commit writes, before any LFS or other filter. False when git cannot say."""
+    listing = _git(git, root, ["ls-tree", "-r", "-z", "HEAD"])
+    if listing is None:
+        return False
+    entries = []
+    for record in listing.split(b"\0"):
+        if not record:
+            continue
+        meta, _, name = record.partition(b"\t")
+        mode, kind, sha = meta.split(b" ")
+        rel = Path(os.fsdecode(name))
+        if rel.is_absolute() or ".." in rel.parts:
+            return False
+        if kind == b"blob":
+            entries.append((mode, sha, rel))
+    sizes = _git(git, root, ["cat-file", "--batch-check"], b"".join(sha + b"\n" for _, sha, _ in entries))
+    if sizes is None:
+        return False
+    small = {line.split(b" ")[0] for line in sizes.splitlines()
+             if len(line.split(b" ")) == 3 and int(line.split(b" ")[2]) <= _COMMITTED_LIMIT}
+    wanted = sorted(small)
+    batch = _git(git, root, ["cat-file", "--batch"], b"".join(sha + b"\n" for sha in wanted))
+    if batch is None:
+        return False
+    blobs, at = {}, 0
+    while at < len(batch):
+        header_end = batch.index(b"\n", at)
+        sha, _, size = batch[at:header_end].split(b" ")
+        start = header_end + 1
+        blobs[sha] = batch[start:start + int(size)]
+        at = start + int(size) + 1
+    for mode, sha, rel in entries:
+        if sha not in blobs:
+            continue
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if mode == b"120000":
+            os.symlink(os.fsdecode(blobs[sha]), target)
+        else:
+            target.write_bytes(blobs[sha])
+    return True
+
+
+def _committed_agent_jobs(root: Path, catalog, config) -> tuple[set, str] | None:
+    """The jobs the checker puts in the agent lane from the files of the last commit, outside
+    submodules, which is what the generated workflow checks once that commit is pushed, with the
+    reason for any it could not read. None when `root` is in no Git work tree, where the folder is all
+    there is.
+
+    Review of #362: the folder can hold what that checkout will not: a script in a submodule, one Git
+    ignores or does not track, an edit not yet committed, or a file an LFS filter turns from a pointer
+    into its content. A job the checker finds only through such a file would get no declaration from
+    init and no agent lane in CI."""
+    if not any((folder / ".git").exists() for folder in (root, *root.parents)):
+        return None
+    git = repo.find_git(root)
+    unread = "Git could not give the files of the last commit"
+    if git is None:
+        return set(), unread
     with tempfile.TemporaryDirectory() as tmp:
         copy = Path(tmp)
-        for rel in tracked:
-            if any(rel.startswith(link) for link in gitlinks):
-                continue
-            source, dest = root / rel, copy / rel
-            try:
-                info = source.lstat()
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                if S_ISLNK(info.st_mode):
-                    os.symlink(os.readlink(source), dest)
-                elif S_ISREG(info.st_mode):
-                    shutil.copyfile(source, dest)
-            except OSError:
-                return set()
+        try:
+            if not _committed_copy(git, root, copy):
+                return set(), unread
+        except (ValueError, OSError):
+            return set(), unread
         try:
             read = _read_workflows(copy)
         except (ValueError, OSError):
-            return set()
-        return set(_agent_jobs(_prepare(copy, read, catalog, config, []), catalog, config))
+            return set(), "the checker could not read the workflows of the last commit"
+        return set(_agent_jobs(_prepare(copy, read, catalog, config, []), catalog, config)), ""
 
 
 def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[str]]:
@@ -144,7 +198,8 @@ def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[s
         if errors:
             raise ValueError(errors[0])
     inferred_jobs = _agent_jobs(prepared, catalog, config)
-    tracked_agents = _tracked_agent_jobs(root, catalog, config) if inferred_jobs else None
+    committed = _committed_agent_jobs(root, catalog, config) if inferred_jobs else None
+    tracked_agents, unread_commit = committed if committed is not None else (None, "")
     for _, rel, workflow, errors in prepared:
         for job in workflow.jobs.values():
             key = f"{rel}#{job.id}"
@@ -161,7 +216,7 @@ def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[s
             if not tools and job.agent_step_why:
                 tools = sorted(set(job.agent_step_why.values()))
             classified = inferred_jobs.get(key)
-            # Omitted only where the checker finds the agent in what the checkout will hold, too.
+            # Omitted only where the checker finds the agent in the last commit, too.
             inferred = classified is not None and (tracked_agents is None or key in tracked_agents)
             if classified is not None or tools or provider:
                 found_agent = True
@@ -199,9 +254,11 @@ def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[s
             notes.append(f"Review {name}: no single literal environment can be proposed.")
     notes.extend(checker._local_action_notes(unread))
     if untracked_evidence:
-        notes.append("Declared as agent jobs although the checker finds their agent here, because it does not "
-                     "find it in the files Git tracks outside submodules, which is what the generated workflow "
-                     "checks: " + ", ".join(untracked_evidence))
+        why = (f"{unread_commit}, which is what the generated workflow checks" if unread_commit else
+               "it does not find it in the files of the last commit outside submodules, which is what the "
+               "generated workflow checks")
+        notes.append("Declared as agent jobs although the checker finds their agent here, because "
+                     + why + ": " + ", ".join(untracked_evidence))
     if not found_agent:
         notes.append("To create an agent workflow, start with GitHub Agentic Workflows: https://github.github.com/gh-aw/")
     config = yaml.safe_dump({"lanes": lanes, "protected_secrets": protected}, sort_keys=False)
