@@ -1,0 +1,94 @@
+name: Rehearse portable patch and consumer integration
+on:
+  push:
+    branches: [lead/rehearse-368-366-2f98aba]
+permissions:
+  contents: read
+jobs:
+  rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BASE: 2f98aba89b991bf77e188f9895f5a3f1c127eb63
+      PATCH: 6d2f33d775633988c12d4670193791caf1e1b0e5
+      CONSUMER: 7fb9bec7af6310bb59d8918ebd3fcc356958da1b
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 6d2f33d775633988c12d4670193791caf1e1b0e5
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Reproduce and verify both branches' changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PATCH"
+          test "$(git merge-base "$PATCH" "$CONSUMER")" = "$BASE"
+          work="$(mktemp -d "$RUNNER_TEMP/combined.XXXXXX")"
+          if git -C "$work" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$work" >> "$GITHUB_ENV"
+          git -c user.name=Validation -c user.email=validation@example.invalid merge --no-commit --no-ff "$CONSUMER" || test -n "$(git diff --name-only --diff-filter=U)"
+          python - <<'PY'
+          import os
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          def git(*args, **kwargs):
+              return subprocess.check_output(["git", *args], **kwargs)
+
+          base, patch, consumer = [os.environ[k] for k in ("BASE", "PATCH", "CONSUMER")]
+          conflicts = git("diff", "--name-only", "--diff-filter=U").decode().splitlines()
+          print("Conflicted paths:", conflicts, flush=True)
+          assert conflicts in ([], ["CHANGELOG.md"])
+          def contents(rev, path):
+              return git("show", rev + ":" + path)
+          path = "CHANGELOG.md"
+          original, patched, consumed = [contents(r, path) for r in (base, patch, consumer)]
+          marker = b"## [Unreleased]\n\n"
+          prefix, rest = original.split(marker, 1)
+          assert patched.startswith(prefix + marker) and patched.endswith(rest)
+          section = patched[len(prefix + marker):-len(rest)]
+          assert section.startswith(b"### Save a proven fix as a patch") and section not in consumed
+          assert consumed.count(marker) == 1
+          expected = consumed.replace(marker, marker + section, 1)
+          if conflicts:
+              Path(path).write_bytes(expected)
+              git("add", path)
+          else:
+              assert Path(path).read_bytes() == expected
+
+          def changed(a, b):
+              return set(git("diff", "--name-only", a, b).decode().splitlines())
+
+          a, b = changed(base, patch), changed(base, consumer)
+          common = a & b
+          assert common == {path, "DECISIONS.md", "docs/upgrading.md"}
+          tree = git("write-tree").decode().strip()
+          assert changed(base, tree) == a | b
+          for head, unique in [(patch, a - b), (consumer, b - a)]:
+              for filename in unique:
+                  assert git("ls-tree", head, "--", filename) == git("ls-tree", tree, "--", filename), filename
+          for filename in sorted(common - {path}):
+              for head, other in [(patch, consumer), (consumer, patch)]:
+                  delta = git("diff", "--binary", base, head, "--", filename)
+                  with tempfile.TemporaryDirectory(dir=os.environ["RUNNER_TEMP"]) as scratch:
+                      file = Path(scratch, filename)
+                      file.parent.mkdir(parents=True, exist_ok=True)
+                      file.write_bytes(contents(other, filename))
+                      git("apply", "--whitespace=nowarn", "-", cwd=scratch, input=delta)
+                      assert file.read_bytes() == contents(tree, filename), filename
+          print(f"Combined tree {tree}; verified {len(a | b)} paths", flush=True)
+          PY
+          git diff --cached --check "$BASE"
+      - name: Run patch and artifact consumer smoke tests
+        run: |
+          set -euo pipefail
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+          for file in test_fix_patch.py test_artifact_consumer_index.py test_egress_artifact_producers.py; do
+            test -f "tests/$file"
+            python -m unittest discover -s tests -p "$file"
+          done
