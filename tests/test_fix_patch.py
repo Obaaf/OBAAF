@@ -171,10 +171,72 @@ class FixPatchReviewTest(unittest.TestCase):
         with mock.patch("obaaf.fix_patch.os.write", side_effect=OSError(errno.ENOSPC, "No space left on device")):
             code, _, err = self.export()
         self.assertEqual(code, 2, err)
+        self.assertIn("No space left", err)
         self.assertFalse(self.patch.exists())
         code, _, err = self.export()
         self.assertEqual(code, 0, err)
         self.git("apply", "--check", str(self.patch))
+
+    def inner_root(self):
+        source = self.policy(b"\n", True)
+        inner = self.root / "svc"
+        (inner / ".github/workflows").mkdir(parents=True)
+        (inner / ".github/workflows/build.yml").write_bytes(self.workflow.read_bytes())
+        config = inner / ".github/policý review.yml"
+        config.write_bytes(source)
+        self.git("add", ".")
+        return inner, config
+
+    def test_below_the_top_git_must_answer(self):
+        # Second review: with no git program, or a repository Git refuses (another user's), the
+        # check took the folder to be outside a work tree and saved the patch.
+        from unittest import mock
+        from obaaf.fix_proof import ProofError
+
+        inner, config = self.inner_root()
+        for patched in (mock.patch("obaaf.checker.repo.find_git", return_value=None),
+                        mock.patch("obaaf.fix_apply._git", side_effect=ProofError("dubious ownership"))):
+            with self.subTest(patched=patched.attribute), patched:
+                code, _, err = run_cli("fix", inner, "--config", config, "--owner", "@team", "--patch", self.patch)
+                self.assertEqual(code, 2, err)
+                self.assertIn("top folder of the Git work tree", err)
+                self.assertFalse(self.patch.exists())
+
+    def test_git_location_variables_are_refused(self):
+        from unittest import mock
+
+        self.config.write_bytes(self.policy(b"\n", True))
+        self.git("add", ".")
+        moved = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "Core.WorkTree", "GIT_CONFIG_VALUE_0": "/elsewhere"}
+        for name, values in (("GIT_DIR", {"GIT_DIR": str(self.root / ".git")}),
+                             ("GIT_WORK_TREE", {"GIT_WORK_TREE": str(self.root)}),
+                             ("core.worktree", moved),
+                             ("core.worktree", {"GIT_CONFIG_PARAMETERS": "'core.worktree'='/elsewhere'"})):
+            with self.subTest(name=name, values=values), mock.patch.dict(os.environ, values):
+                code, _, err = self.export()
+                self.assertEqual(code, 2, err)
+                self.assertIn(name, err)
+                self.assertFalse(self.patch.exists())
+        # Other configuration in the environment, such as a URL rewrite, is not refused.
+        other = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "url.https://example.com/.insteadOf",
+                 "GIT_CONFIG_VALUE_0": "git@example.com:"}
+        with mock.patch.dict(os.environ, other):
+            code, _, err = self.export()
+        self.assertEqual(code, 0, err)
+
+    def test_an_ignored_untracked_target_is_refused(self):
+        self.config.write_bytes(self.policy(b"\n", True))
+        (self.root / ".git/info").mkdir(exist_ok=True)
+        for pattern in ("/.github/policý review.yml", ".github/"):
+            with self.subTest(pattern=pattern):
+                (self.root / ".git/info/exclude").write_text(pattern + "\n", encoding="utf-8")
+                code, _, err = self.export()
+                self.assertEqual(code, 2, err)
+                self.assertIn("ignores", err)
+                self.assertFalse(self.patch.exists())
+        (self.root / ".git/info/exclude").write_text("")
+        code, _, err = self.export()
+        self.assertEqual(code, 0, err)
 
     def test_git_ends_a_line_only_at_a_line_feed(self):
         from pathlib import Path
