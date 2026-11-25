@@ -583,13 +583,6 @@ def cmd_attest_approval(args) -> int:
     from obaaf.predicates import AGENT_APPROVAL
 
     try:
-        source_revision = args.source_revision
-        if args.revision_file is not None:
-            with Path(args.revision_file).open("rb") as fh:
-                raw = fh.read(67)
-            if not re.fullmatch(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})(?:\r?\n)?", raw):
-                raise ValueError(f"{args.revision_file}: expected one full lowercase Git commit ID")
-            source_revision = raw.rstrip(b"\r\n").decode("ascii")
         approvals = json.loads(Path(args.approvals).read_text(encoding="utf-8"))
         checks = json.loads(Path(args.checks).read_text(encoding="utf-8")) if args.checks else {}
         requesters = [r.strip() for value in (args.requester or []) for r in value.split(",") if r.strip()]
@@ -677,6 +670,13 @@ def cmd_verify_release(args) -> int:
 
     try:
         policy = Policy.load(args.policy)
+        source_revision = args.source_revision
+        if args.revision_file is not None:
+            with Path(args.revision_file).open("rb") as fh:
+                raw = fh.read(67)
+            if not re.fullmatch(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})(?:\r?\n)?", raw):
+                raise ValueError(f"{args.revision_file}: expected one full lowercase Git commit ID")
+            source_revision = raw.rstrip(b"\r\n").decode("ascii")
         approvals = json.loads(Path(args.approvals).read_text(encoding="utf-8")) if args.approvals else None
         release_run = json.loads(Path(args.release_run).read_text(encoding="utf-8")) if args.release_run else None
     except (PolicyError, OSError, ValueError) as exc:
