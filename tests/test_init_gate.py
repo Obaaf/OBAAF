@@ -415,7 +415,7 @@ class GateTests(unittest.TestCase):
         with patch("obaaf.fix_apply.XATTR_FUNCTIONS", ("no_such_function",)):
             status, preview = self.gate()
             self.assertEqual(status, 0, preview)
-            self.assertIn("Make the displayed changes by hand", preview)
+            self.assertIn("--patch FILE", preview)
             self.assertNotIn("Run again with --apply", preview)
             self.assertEqual(self.workflow.read_bytes(), before)
             status, refusal = self.gate("--apply")

@@ -73,7 +73,7 @@ obaaf fix . --baseline .github/obaaf-baseline.json --fail-on low \
   --owner @YOUR-TEAM --reason "Your reason for retaining these risks" --expires YYYY-MM-DD
 ```
 
-Read every finding under “You are accepting risk” and every listed removal. The preview leaves the original files untouched. For CODEOWNERS, decide who should approve each listed path and make that change by hand.
+Read every finding under “You are accepting risk” and every listed removal. The preview leaves the original files untouched. To make the change, add `--apply` on Linux, or `--patch FILE` on any system ([Save a proven edit as a patch](#save-a-proven-edit-as-a-patch)). For CODEOWNERS, decide who should approve each listed path and make that change by hand.
 
 ### Pin a directly installed agent tool
 
@@ -85,7 +85,7 @@ obaaf fix . --pin @openai/codex=1.2.3 --baseline .github/obaaf-baseline.json --f
 
 The edit appends the supplied version to the package in a literal `npm install -g PACKAGE` workflow step. A separate version query for the installed CLI may follow. OBAAF also recognizes the `sudo` form when followed by that query. It leaves scripts, indirect invocations, shared YAML and other install forms for manual review. Choose one package per invocation. The preview does not look up the version, download the package or execute the workflow.
 
-Use `--candidate NAME` from the preview to request one occurrence. On Linux with extended-attribute support, add `--apply` to write a proven diff to clean tracked targets. On other hosts, make the displayed change by hand. OBAAF reports affected acceptances and retains the original files when the named edit cannot be proven. A request in which the proof withholds every candidate exits 1. When some are proven, the withheld ones are listed and the command exits 0. For a UTF-8 workflow, an unknown candidate name exits 2. If the workflow cannot be decoded as UTF-8, the fixer can identify the reported job and package but cannot verify a step number. A request naming that job and package is withheld with exit 1. A repeat is a successful no-op when the checked files show the requested direct install at the exact selected version. Other packages can still need work. An unresolved manual install of the same package, an absent package or a conflicting directly installed version cannot establish that the request is satisfied. A malformed package or version exits 2.
+Use `--candidate NAME` from the preview to request one occurrence. On Linux with extended-attribute support, add `--apply` to write a proven diff to clean tracked targets. On macOS or Windows, add `--patch reviewed.patch` to the preview and apply it with Git ([Save a proven edit as a patch](#save-a-proven-edit-as-a-patch)). OBAAF reports affected acceptances and retains the original files when the named edit cannot be proven. A request in which the proof withholds every candidate exits 1. When some are proven, the withheld ones are listed and the command exits 0. For a UTF-8 workflow, an unknown candidate name exits 2. If the workflow cannot be decoded as UTF-8, the fixer can identify the reported job and package but cannot verify a step number. A request naming that job and package is withheld with exit 1. A repeat is a successful no-op when the checked files show the requested direct install at the exact selected version (with `--patch` it exits 1, as there is nothing to save). Other packages can still need work. An unresolved manual install of the same package, an absent package or a conflicting directly installed version cannot establish that the request is satisfied. A malformed package or version exits 2.
 
 ### Tighten credentials on a checkout
 
@@ -100,6 +100,18 @@ obaaf fix . --tighten checkout-credentials --candidate '.github/workflows/ci.yml
 
 If the change disturbs accepted findings, the report gives the count and identifies the affected rules and locations. If it leaves unmatched entries, it names them. Review the entries with their owner, make any separately approved changes, and rerun the named preview with the same gate options. Add `--apply` to write a proven diff to clean tracked targets. An unresolved named request exits 1 and leaves the files untouched.
 
+### Save a proven edit as a patch
+
+To save a proven paperwork, baseline, checkout, package-pin or gate edit, add `--patch FILE` to its preview. This is how to make the change on macOS and Windows, where `--apply` does not run. Choose a new file: an existing one is refused. The command writes only the patch, and exits 1 when there is no proven edit to save. Then, with the files as the preview saw them, read the patch and run `git apply -v --check FILE` before `git apply -v FILE` from the top folder of the Git work tree (for a folder outside any work tree, from the checked folder). Git skips, without an error, any path outside the folder it runs in; with `-v` it says so, printing `Skipped patch` for each file it leaves alone (and, when applying, `Applied patch` for each it changes). Git applies the patch without rerunning OBAAF's proof, so run the checker again before committing.
+
+`--patch` needs the checked folder to be the top folder of the Git work tree, or a folder outside any work tree, which OBAAF takes to be one where neither it nor a folder above it holds `.git`. Git reads a patch's paths from the top, so a patch made from a folder below it would change other files, or none. Where there is a `.git`, Git must run and confirm either that the folder is the top or that there is no repository: with no `git` on the `PATH`, or a repository Git will not read (one owned by another user, say), `--patch` is refused, as `--apply` is. It is also refused while `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_DISCOVERY_ACROSS_FILESYSTEM` or `GIT_ATTR_SOURCE` is set. These checks run Git with your Git configuration, including any given in the environment (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_COUNT` and the rest) and the files it includes, so they see the attributes and ignore rules your `git apply` will use. A target that Git's index marks assume-unchanged or skip-worktree, or that Git ignores, is refused, because Git would not show the change; so is one with a `filter`, `ident` or `working-tree-encoding` attribute, as with `--apply`. On Windows, a proof tree that holds a reparse point (a junction or a link) or a hard-linked file is refused.
+
+The patch holds the proven bytes, including CRLF line endings and a missing final newline. Git can still write a file that differs from them, where `--apply` would not:
+
+- with `core.autocrlf=true` (Git for Windows sets it by default), or a `text`, `eol` or `crlf` attribute, Git can convert the file's line endings as it writes it;
+- with `apply.whitespace` set to `fix` or `strip`, Git changes whitespace in the added lines; add `--whitespace=nowarn` to both commands to keep them as proven (with Git's default, `warn`, it reports whitespace errors in added lines and applies them as written);
+- Git replaces the file, so its extended attributes are not kept and its permissions can change (a `0600` file came back `0644` in a test).
+
 ### Preview confinement for one agent job
 
 Run `obaaf fix egress --job NAME` using the job ID under the workflow’s `jobs` key. If your installed catalogue lists no released egress-action commit, the command explains the hold and stops.
@@ -112,7 +124,7 @@ Generate a Markdown work order on a branch you trust with `obaaf fix egress --jo
 
 ### Enable the generated workflow’s gate
 
-After reviewing outstanding findings and any acceptances, commit the generated workflow. Run the preview from the repository root and review its diff and count. On Linux with extended-attribute support, the second command applies that edit. On other hosts, make the displayed change by hand.
+After reviewing outstanding findings and any acceptances, commit the generated workflow. Run the preview from the repository root and review its diff and count. On Linux with extended-attribute support, the second command applies that edit. On macOS or Windows, add `--patch reviewed.patch` to the preview and apply it with Git ([Save a proven edit as a patch](#save-a-proven-edit-as-a-patch)).
 
 ```sh
 obaaf fix --gate medium

@@ -147,32 +147,38 @@ def private_copy(root: Path) -> Iterator[Path]:
     same instruction entries to the checker despite its use of Git's index in the source.
     The proof caller also compares full checker results before it changes this copy.
     """
-    if os.open not in os.supports_dir_fd or os.listdir not in os.supports_fd or not hasattr(os, "O_NOFOLLOW"):
+    if os.name != "nt" and (os.open not in os.supports_dir_fd or os.listdir not in os.supports_fd
+                            or not hasattr(os, "O_NOFOLLOW")):
         raise PrivateCopyError("this system cannot isolate source reads with no-follow directory descriptors")
     try:
         root = Path(root).absolute()
         if root.is_symlink():
             raise PrivateCopyError("the source root must be a directory, not a symbolic link")
-        root = root.resolve(strict=True)
+        if os.name != "nt":
+            root = root.resolve(strict=True)
         tmp = _temporary_directory(root)
     except (OSError, RuntimeError) as exc:
         raise PrivateCopyError(f"could not prepare the private copy: {exc}") from exc
     with tmp:
         dest = Path(tmp.name)
         try:
-            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                source = os.fstat(fd)
-                links: dict[Path, str] = {}
-                _copy_tree(fd, dest, Path("."), links, source.st_dev)
-                _check_links(links)
-                _unchanged(source, root.lstat(), Path("."))
-                if (root / ".git").exists():
-                    patterns = load().detection["instruction_files"]
-                    if _instruction_entries(root, patterns, True) != _instruction_entries(dest, patterns, False):
-                        raise PrivateCopyError("Git's index and the private copy expose different instruction files")
-            finally:
-                os.close(fd)
+            if os.name == "nt":
+                from obaaf.fix_copy_windows import copy_tree
+                copy_tree(root, dest)
+            else:
+                fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    source = os.fstat(fd)
+                    links: dict[Path, str] = {}
+                    _copy_tree(fd, dest, Path("."), links, source.st_dev)
+                    _check_links(links)
+                    _unchanged(source, root.lstat(), Path("."))
+                finally:
+                    os.close(fd)
+            if (root / ".git").exists():
+                patterns = load().detection["instruction_files"]
+                if _instruction_entries(root, patterns, True) != _instruction_entries(dest, patterns, False):
+                    raise PrivateCopyError("Git's index and the private copy expose different instruction files")
         except (OSError, RuntimeError) as exc:
             raise PrivateCopyError(f"could not complete the private copy: {exc}") from exc
         yield dest

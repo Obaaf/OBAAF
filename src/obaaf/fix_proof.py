@@ -360,6 +360,16 @@ def _source_unchanged(root: Path, edits) -> None:
     runs, and a change that moves no finding would otherwise go unseen (review of #274)."""
     for edit in edits:
         rel = _relative(root, Path(edit.path))
+        if os.name == "nt":
+            from obaaf.fix_copy_windows import source_bytes
+            try:
+                now = source_bytes(root / rel, len(edit.before) + 1)
+            except (OSError, ValueError) as exc:
+                # As on POSIX: withhold this candidate rather than end the whole run (review-gpt #368).
+                raise ProofError(f"the source of {str(rel)!r} could not be read again after the proof: {exc}") from exc
+            if now != edit.before:
+                raise ProofError(f"the source of {str(rel)!r} changed while the proof ran")
+            continue
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
             fd = os.open(root / rel, flags)
