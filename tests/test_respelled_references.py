@@ -106,6 +106,19 @@ class RunnerLabelTest(unittest.TestCase):
             "    steps:\n", "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n    steps:\n", 1)
         self.assertEqual(len(provenance_findings(text)), 1)
 
+    def test_space_round_an_expression_for_a_self_hosted_runner_keeps_it_self_hosted(self):
+        """Found by the fourth review pass: the third pass's fix left such labels unresolved, so a matrix of
+        `self-hosted` behind `" ${{ matrix.r }}"` became an unknown runner, medium where it was high."""
+        for values in ("[self-hosted]", "[[self-hosted, linux]]"):
+            for runs_on in ('" ${{ matrix.r }}"', '"${{ matrix.r }}"'):
+                with self.subTest(values=values, runs_on=runs_on):
+                    text = ("on: pull_request\npermissions: {contents: read}\njobs:\n  build:\n"
+                            f"    runs-on: {runs_on}\n    strategy:\n      matrix:\n        r: {values}\n"
+                            "    steps:\n      - run: make\n")
+                    (found,) = [f for f in check_files({".github/workflows/b.yml": text}).findings
+                                if f.rule == "OBAAF-GHA-013"]
+                    self.assertEqual(found.severity, "high")
+
 
 def check_files(files):
     with TempDir() as tmp:

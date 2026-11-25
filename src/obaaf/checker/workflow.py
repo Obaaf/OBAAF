@@ -2351,10 +2351,19 @@ class Job:
         if len(labels) != 1:
             return None
         text = labels[0]
-        if text != text.strip():
-            # GitHub keeps text round an expression, so `" ${{ matrix.os }}"` is `" ubuntu-24.04"`, a label with
-            # space round it (flagship slice 2d.15, #148, from its third review pass).
-            return None
+        stripped = text.strip()
+        sets = self._expression_label_sets(stripped)
+        if sets is None or stripped == text:
+            return sets
+        # GitHub keeps text round an expression, so `" ${{ matrix.os }}"` gives `" ubuntu-24.04"`, a label with
+        # space round it, which is not the hosted runner, while `" self-hosted"` is still a self-hosted one
+        # (flagship slice 2d.15, #148, from its third and fourth review passes). A list value put into text
+        # this way is not established, so each of its labels keeps the space.
+        left, right = text[:len(text) - len(text.lstrip())], text[len(text.rstrip()):]
+        return [[left + label + right for label in labels_of_set] for labels_of_set in sets]
+
+    def _expression_label_sets(self, text: str) -> list[list[str]] | None:
+        """`runner_label_sets` for the one label `text`, an expression with no space round it."""
         if not (text.startswith(expr_mod.OPEN) and text.endswith("}}")):
             return None
         found = expr_mod.bodies(text)
