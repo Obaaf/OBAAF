@@ -202,7 +202,10 @@ class ActionReferenceTest(unittest.TestCase):
             f" openai/codex-action@{SHA}": "space or a line break at its start or end",
             f"openai/ codex-action@{SHA}": "a character in its owner or repository name",
             f"openai/codex-action/ sub@{SHA}": "space at the start or end of a part of its path",
-            f"openai/codex-action/s\u200bub@{SHA}": "a control or format character in its path",
+            f"openai/codex-action/s\u200bub@{SHA}": "control or format character in its path",
+            f"openai/codex-action/x\u2028y@{SHA}": "a line break, control or format character in its path",
+            f"OpenAI./codex-action@{SHA}": "a character in its owner or repository name",
+            f"openai/codex-action.@{SHA}": "a character in its owner or repository name",
             f"openai/codex-action.git@{SHA}": "'.git' at the end of its repository name",
         }
         for uses, why in cases.items():
@@ -210,7 +213,8 @@ class ActionReferenceTest(unittest.TestCase):
                 self.assertIn(why, wf_mod.respelled_reference(uses))
         for uses in (f"openai/codex-action@{SHA}", "./x", "$/x", "docker://a//b", ".\\x", None, 5,
                      f"octo/repo/my action@{SHA}", f"octo/repo.js/.github/workflows/my workflow.yml@{SHA}",
-                     f"Octo-Org/repo_name.v2@{SHA}", "openai/codex-action"):
+                     f"Octo-Org/repo_name.v2@{SHA}", "openai/codex-action", "", f"user_emu/repo@{SHA}",
+                     f"org/.github/.github/workflows/ci.yml@{SHA}", f"../repo/x@{SHA}", f"openai/./codex-action@{SHA}"):
             with self.subTest(uses=uses):
                 self.assertIsNone(wf_mod.respelled_reference(uses))
 
@@ -237,6 +241,31 @@ class RunnerSelectorTest(unittest.TestCase):
         for label in ("'ubuntu-latest '", "' ubuntu-latest'", "'ubuntu-latest\\t'", "'ubuntu- latest'"):
             with self.subTest(label=label):
                 self.assertNotEqual(self.severity(label), "info")
+
+    def test_the_selector_is_read_from_its_tokens(self):
+        """Found by the second review pass: `"` was read as `'` before quotes were paired, so a `"` inside a
+        string before the hosted label hid the label's space; and a quoted value with space in the other
+        branch (`fromJSON('["self-hosted", "linux"]')`) made a sound selector medium."""
+        self.assertNotEqual(self.severity("'ubuntu-latest\\u200b'"), "info")     # a format character, not space
+        tricky = ("on: pull_request\npermissions: {contents: read}\njobs:\n  build:\n"
+                  "    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'a\"'||'ubuntu-latest ' }}\n"
+                  "    steps:\n      - run: make\n")
+        (found,) = [f for f in check_files({".github/workflows/b.yml": tricky}).findings if f.rule == "OBAAF-GHA-013"]
+        self.assertEqual(found.severity, "medium")
+        text = self.SELECTOR.replace("'self-hosted' || %s", "fromJSON('[\\\"self-hosted\\\", \\\"linux\\\"]') || 'ubuntu-latest'")
+        (found,) = [f for f in check_files({".github/workflows/b.yml": text}).findings if f.rule == "OBAAF-GHA-013"]
+        self.assertEqual(found.severity, "info", text)
+        for odd in ('\\"ubuntu-latest\\"', "'ubuntu-latest"):     # a double-quoted or an unclosed string
+            with self.subTest(odd=odd):
+                self.assertNotEqual(self.severity(odd), "info")
+        for form in ("github.repository != github.event.pull_request.head.repo.full_name && 'Ubuntu-Latest' || 'self-hosted'",
+                     "github.event.pull_request.head.repo.full_name == github.repository && inputs.runner || 'ubuntu-24.04'",
+                     "GITHUB.EVENT.PULL_REQUEST.HEAD.REPO.FULL_NAME==GITHUB.REPOSITORY&&'it''s'||'ubuntu-latest'"):
+            with self.subTest(form=form):
+                text = self.SELECTOR.replace("github.event.pull_request.head.repo.full_name == github.repository && "
+                                             "'self-hosted' || %s", form)
+                (found,) = [f for f in check_files({".github/workflows/b.yml": text}).findings if f.rule == "OBAAF-GHA-013"]
+                self.assertEqual(found.severity, "info", form)
 
 
 class ReviewFindingsTest(unittest.TestCase):
@@ -274,6 +303,18 @@ class ReviewFindingsTest(unittest.TestCase):
         errors = self.errors({".github/workflows/r.yml": text})
         self.assertEqual(len(errors), 1, errors)
         self.assertIn("a 'parallel' group inside a 'parallel' group", errors[0])
+
+    def test_parallel_entries_are_reported_once_and_strings_are_errors(self):
+        text = ("on: pull_request\npermissions: {contents: read}\njobs:\n  review:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - parallel:\n          - parallel: [{run: echo}]\n          - parallel: [{run: echo}]\n"
+                f"          - openai/codex-action@{SHA}\n")
+        errors = self.errors({".github/workflows/r.yml": text})
+        self.assertEqual(len(errors), 2, errors)
+        self.assertEqual(len(set(errors)), 2, errors)
+        self.assertTrue(any("not a mapping" in e for e in errors), errors)
+
+    def test_an_empty_uses_is_not_this_error(self):
+        self.assertEqual(self.errors({".github/workflows/r.yml": step_workflow("''")}), [])
 
     def composite(self, action_file):
         text = ("on: pull_request\npermissions: {contents: read}\njobs:\n  review:\n    runs-on: ubuntu-latest\n"
