@@ -448,11 +448,16 @@ class GateTests(unittest.TestCase):
         work = self.root.parent
         temp = work / "temp"
         temp.mkdir(exist_ok=True)
-        path = os.pathsep.join((str(work), str(Path(sys.executable).parent), os.environ["PATH"]))
+        installed = os.environ.get("OBAAF_TEST_PINNED_CHECKER")
+        python_dir = Path(installed or sys.executable).parent
+        path = os.pathsep.join((str(work), str(python_dir), os.environ["PATH"]))
+        env = {**os.environ, "GITHUB_EVENT_NAME": event, "RUNNER_TEMP": str(temp),
+               "PATH": path, "USE_SETTINGS": "true" if settings else ""}
+        if installed:
+            env.pop("PYTHONPATH", None)
         script = yaml.safe_load(self.workflow.read_text())["jobs"]["check"]["steps"][3]["run"]
         return subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=work, text=True,
-                              capture_output=True, env={**os.environ, "GITHUB_EVENT_NAME": event,
-                              "RUNNER_TEMP": str(temp), "PATH": path, "USE_SETTINGS": "true" if settings else ""})
+                              capture_output=True, env=env)
 
     @unittest.skipUnless(shutil.which("bash") and shutil.which("git"), "needs bash and Git")
     def test_generated_ci_reads_opted_in_settings_from_the_event_commit(self):
