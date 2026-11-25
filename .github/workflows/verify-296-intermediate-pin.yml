@@ -1,0 +1,69 @@
+name: Verify the previous setup pin through a second rotation
+on:
+  push:
+    branches: [lead/verify-296-intermediate-pin-ae86067]
+permissions:
+  contents: read
+jobs:
+  migration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ae86067cae8fcd11be92457db2d8b21448b76beb
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Exercise the gate CLI on disposable repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TMPDIR="$(mktemp -d "$RUNNER_TEMP/obaaf-296.XXXXXX")"
+          if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+          PYTHONPATH=tests python - <<'PY'
+          from contextlib import nullcontext
+          from pathlib import Path
+          from unittest.mock import patch
+          from obaaf.fix_gate import FIRST_GATE, ORIGINAL_SETUP, REPORT, SETTINGS_GATE, SETTINGS_SETUP
+          from test_init_gate import GateTests, command, commit, previous_steps
+          
+          fixture = GateTests()
+          fixture.setUp()
+          try:
+              fixture.install()
+              baseline = fixture.root / "policy files" / "accepted.json"
+              baseline.parent.mkdir()
+              baseline.write_text('{"format":"obaaf-baseline/v0.2","findings":[]}')
+              simulated = fixture.root.parent / "future"
+              simulated.mkdir()
+              next_pin = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"f" * 40
+              (simulated / "init-workflow.yaml").write_bytes(SETTINGS_GATE.read_bytes().replace(SETTINGS_SETUP, next_pin))
+              tail = previous_steps(["zizmor"])
+              for phase, pin, future, applies in [
+                  ("before rotation", SETTINGS_SETUP, False, True),
+                  ("after rotation with interim pin", SETTINGS_SETUP, True, False),
+                  ("after documented pin update", next_pin, True, True),
+              ]:
+                  for enabled in (False, True):
+                      body = FIRST_GATE.read_bytes().replace(ORIGINAL_SETUP, pin)
+                      existing = b"gate_check 'policy files/accepted.json' --fail-on high\n"
+                      target = b"gate_check 'policy files/accepted.json' --fail-on medium\n"
+                      def gated(body, threshold):
+                          return body.replace(b"/.github/obaaf-baseline.json\n", b"/policy files/accepted.json\n").replace(REPORT, threshold)
+                      original = ((gated(body, existing) if enabled else body) + tail).replace(b"\n", b"\r\n")
+                      expected = (gated(body, target) + tail).replace(b"\n", b"\r\n") if applies else original
+                      fixture.workflow.write_bytes(original)
+                      commit(fixture.root)
+                      with (patch("obaaf.fix_gate.files", return_value=simulated) if future else nullcontext()):
+                          code, out = command("fix", fixture.root, "--gate", "medium", "--baseline", baseline, "--apply")
+                      assert code == 0, (phase, enabled, out)
+                      message = "Applied the displayed gate change" if applies else "Review your CI workflow by hand"
+                      assert message in out, (phase, enabled, out)
+                      assert fixture.workflow.read_bytes() == expected, (phase, enabled, "workflow bytes differ")
+                      print(f"{phase}, previously gated={enabled}: {message}; expected workflow bytes verified")
+          finally:
+              fixture.doCleanups()
+          PY
