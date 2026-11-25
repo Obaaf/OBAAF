@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Preview missing ignore owners
+
+The full report, summary and JSON to-do list show a scoped `obaaf fix --owner OWNER` preview for ignore entries missing their owner after a whole-repository check. Replace `OWNER` with the responsible person or team and review every proposed acceptance.
+
 ### Reviewed egress action pin
 
 The development checker can clear OBAAF-GHA-020 for jobs that pin `Obaaf/OBAAF/actions/egress@80db1e68769165c9ecf24e553254fa35d6e168d5` and meet the [egress control conditions](docs/checker-configuration.md#egress-controls). The [usage example](docs/egress-control.md#using-it) includes the full pin. The commit is on the `flagship` branch; it is not a tagged release.

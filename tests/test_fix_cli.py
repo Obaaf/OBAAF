@@ -1,7 +1,9 @@
 """The paperwork preview exposes only verified edits and never writes them."""
 
 from datetime import date, timedelta
+import json
 import os
+import shlex
 import unittest
 
 from helpers import TempDir, run_cli
@@ -23,7 +25,27 @@ class FixCliTest(unittest.TestCase):
         source = ("ignore:\n  - rule: OBAAF-GHA-008\n    path: .github/workflows/build.yml\n"
                   f"    reason: reviewed for adoption\n    until: {expiry}\n")
         self.config.write_text(source)
-        code, out, err = run_cli("fix", self.root, "--owner", "@team")
+        args = ("check", self.root, "--config", self.config, "--fail-on", "never")
+        code, data, err = run_cli(*args, "--format", "json")
+        self.assertEqual(code, 0, err)
+        owner = next(row for row in json.loads(data)["todo"] if row["id"] == "acceptance-owner-missing")
+        command = owner["command"]
+        for flags in ((), ("--summary",)):
+            code, report, err = run_cli(*args, *flags)
+            self.assertEqual(code, 0, err)
+            self.assertIn(command, report)
+        code, data, err = run_cli(*args, "--platform", "github", "--format", "json")
+        self.assertEqual(code, 0, err)
+        partial = next(row for row in json.loads(data)["todo"] if row["id"] == owner["id"])
+        self.assertIsNone(partial["command"])
+        self.assertIn("whole repository", partial["nextAction"])
+        words = shlex.split(command)
+        self.assertEqual(words.pop(0), "obaaf")
+        self.assertIn("--config=" + str(self.config), words)
+        self.assertIn("--fail-on=never", words)
+        self.assertEqual(words[words.index("--owner") + 1], "OWNER")
+        words[words.index("--owner") + 1] = "@team"
+        code, out, err = run_cli(*words)
         self.assertEqual(code, 0, err)
         self.assertIn("You are accepting risk (1 finding)", out)
         self.assertIn(f"@team until {expiry}: reviewed for adoption", out)

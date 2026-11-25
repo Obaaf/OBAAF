@@ -9,7 +9,7 @@ from pathlib import Path
 
 from obaaf.catalog import Catalog
 from obaaf.causes import Cause
-from obaaf.checker import CheckResult, baseline
+from obaaf.checker import CheckResult, acceptance, baseline
 from obaaf.checker.rules import ACCEPTED, FIXED
 from obaaf.checker.todo_acceptance import acceptance_cause, baseline_identity, migration_command, migration_hint
 from obaaf.checker.todo_upgrade import previous_acceptances
@@ -90,6 +90,7 @@ class _Group:
     kind: str
     severity: Counter = field(default_factory=Counter)
     previous: int = 0
+    ownerless_ignores: int = 0
     pin_packages: Counter = field(default_factory=Counter)
 
     def as_dict(self, result: CheckResult, prerequisites: str) -> dict:
@@ -103,6 +104,24 @@ class _Group:
             "nextAction": self.cause.next_action,
             "command": self.cause.next_action if self.cause.id == "acceptance-old-baseline" else None,
         }
+        if self.ownerless_ignores:
+            manual = (" Review missing owners in baseline entries by hand."
+                      if self.ownerless_ignores < item["count"] else "")
+            if result.errors:
+                action = "Resolve the scan errors before previewing an owner for ignore entries."
+            elif not result.whole_repository:
+                action = "Check the whole repository on every platform before previewing an owner for ignore entries."
+            else:
+                command = tightening_command(result, ["--owner", "OWNER"])
+                action = ("Review each risk. Replace OWNER with its responsible owner to preview the ignore changes. "
+                          "The preview lists every finding you would accept.")
+                if command == one_line(command):
+                    item["command"] = command
+                    action += " " + command
+                else:
+                    action += (" Run obaaf fix --owner OWNER with the original check paths and options, including "
+                               "any settings snapshot. The full command cannot be printed on one line.")
+            item["nextAction"] = action + manual
         if self.cause.id == "checkout-credentials":
             if result.errors:
                 item["nextAction"] = "Resolve the scan errors before previewing checkout tightening."
@@ -153,6 +172,8 @@ def todo(result: CheckResult, catalog: Catalog) -> list[dict]:
         group = groups[cause.id]
         group.severity[finding.severity] += 1
         group.previous += previous.get(id(finding), 0)
+        if cause.id == "acceptance-owner-missing" and finding.acceptance.source == acceptance.IGNORE:
+            group.ownerless_ignores += 1
         if cause.id == "agent-tool-version" and finding.pin_candidate:
             group.pin_packages[finding.pin_candidate] += 1
 
@@ -170,6 +191,7 @@ def todo(result: CheckResult, catalog: Catalog) -> list[dict]:
     def priority(group: _Group) -> tuple:
         has_preview = group.cause.id == "checkout-credentials" or bool(group.pin_packages)
         actionable = not result.errors and (group.cause.id == "acceptance-old-baseline"
+                                            or (group.ownerless_ignores and result.whole_repository)
                                             or (has_preview and not prerequisites))
         highest = next((i for i, level in enumerate(_LEVELS) if group.severity[level]), len(_LEVELS))
         return (not actionable, highest, -group.severity.total(), group.cause.id)

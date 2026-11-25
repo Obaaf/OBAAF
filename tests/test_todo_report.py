@@ -128,6 +128,23 @@ class TodoOrderAndFieldsTest(unittest.TestCase):
         groups = self.todo([odd, old], baseline_stale=stale, baseline_format=baseline.FORMAT_V1, options=None)
         self.assertEqual(sum(g["count"] for g in groups), 2)
 
+    def test_missing_owner_preview_distinguishes_ignore_and_baseline_entries(self):
+        findings = []
+        for source in (acceptance.BASELINE, acceptance.IGNORE):
+            finding = Finding("OBAAF-GHA-011", "high", "wf", 1, "Kept.")
+            finding.acceptance = acceptance.make(source, None, "reviewed", "2027-01-01", date(2026, 11, 19))
+            findings.append(finding)
+        baseline_only, = self.todo(findings[:1], whole_repository=True)
+        self.assertIsNone(baseline_only["command"])
+        mixed, = self.todo(findings, whole_repository=True)
+        self.assertIn("--owner OWNER", mixed["command"])
+        self.assertIn("baseline entries by hand", mixed["nextAction"])
+        for fields, hint in (({"errors": ["incomplete"]}, "scan errors"),
+                             ({"checked": "line\nbreak"}, "cannot be printed")):
+            row, = self.todo(findings, whole_repository=True, **fields)
+            self.assertIsNone(row["command"])
+            self.assertIn(hint, row["nextAction"])
+
     def test_an_inconsistent_catalogue_leaves_the_list_empty_and_says_why(self):
         from obaaf.catalog import load
         from obaaf.causes import CauseCatalog
