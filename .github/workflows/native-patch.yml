@@ -1,0 +1,55 @@
+name: Replay the refreshed portable patch on native runners
+
+on:
+  push:
+    branches: [lead/validate-patch-7dc914b]
+
+permissions:
+  contents: read
+
+jobs:
+  portable-patch:
+    name: Apply exported patch on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 7dc914bb457f5a042585c4c1ec8fafa5d1c89137
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Set up temporary storage outside Git
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import tempfile
+          from pathlib import Path
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert head == "7dc914bb457f5a042585c4c1ec8fafa5d1c89137"
+          work = tempfile.mkdtemp(prefix="portable-patch-", dir=os.environ["RUNNER_TEMP"])
+          assert subprocess.run(["git", "-C", work, "rev-parse", "--git-dir"], capture_output=True).returncode
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              for key in ["TMPDIR", "TEMP", "TMP"]:
+                  env.write(f"{key}={work}\n")
+      - name: Install the candidate
+        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+      - name: Export, check, apply, and compare resulting bytes
+        shell: python
+        run: |
+          import os
+          import sys
+          import unittest
+          from pathlib import Path
+          assert Path("tests/test_fix_patch.py").is_file()
+          suite = unittest.defaultTestLoader.discover("tests", pattern="test_fix_patch.py")
+          assert suite.countTestCases() > 0
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not result.wasSuccessful() or result.testsRun <= len(result.skipped):
+              sys.exit(1)
