@@ -243,6 +243,9 @@ CASES = [
      + pipeline(PLAIN, build="script { setup(this) }"), U),
     ("a parameter's env given to a variable, then written", "def setup(s) { def e = s.env; e.PATH = '/t' }\n"
      + pipeline(PLAIN, build="script { setup(this) }"), U),
+    ("it in this.with, passed on", "def helper(e) { e.PATH = '/t' }\n"
+     + pipeline(PLAIN, build="script { this.with { helper(it.env) } }"), U),
+    ("it in this.with, returned", pipeline(PLAIN, build="script { def r = this.with { it.env }; r.PATH = '/t' }"), U),
     # A list of maps with an env key, read through it or a closure's parameter, stays a pass
     ("it.env read", pipeline(PLAIN, build="script { def targets = [[name: 'a', env: 'prod']]; "
                                           "targets.each { echo(it.env) }; targets.each { x -> echo(\"${x.env}\") } }"), P),

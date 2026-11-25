@@ -219,7 +219,9 @@ file.
   them, `getOwner()`, a variable given an expression that names one of these, such as `c ? this : null`). Through
   a method's or closure's parameter, `it`, or a variable given one's `env`, which may be the script or a map with
   an `env` key, only a write or a method that may set a variable counts (`s.env.putAll(...)`, not
-  `echo(it.env)`); a property named `env` of anything else (`buildInfo.env`) counts only where it is written to. Every node of the parsed file is read for this, and every `${...}` of its
+  `echo(it.env)`); but once the file calls `with`, `identity` or `tap` on the script (`this.with { it.env }`), `it`
+  and that closure's parameter count as the script everywhere in the file. A property named `env` of anything else
+  (`buildInfo.env`) counts only where it is written to. Every node of the parsed file is read for this, and every `${...}` of its
   strings as statements, whether the walker reaches it or not (a `when { expression { } }`, a method a directive
   calls), and so is the text the parser keeps no node for (a loop's header, a method's parameter defaults, a switch's
   case labels, a postfix `++`).

@@ -3641,6 +3641,20 @@ class JenkinsRules:
                 return level if level and (key is None or key == "env") else None
             return None
 
+        # `this.with { it.env ... }`, `identity { s -> s.env ... }`: the closure's `it` or parameter is the script. The
+        # names are not scoped to that closure, so `it` then counts as the script everywhere in the file.
+        for n, _line, _own in entries:
+            if not isinstance(n, Call):
+                continue
+            callee = n.callee
+            name = callee.name if isinstance(callee, Prop) else (path_of(callee) or "")
+            if name in ("with", "identity", "tap") and (not isinstance(callee, Prop) or scriptish(callee.target)
+                                                        == "strong"):
+                bodies = [n.closure] + [a for a in n.args if isinstance(a, Closure)]
+                for body in bodies:
+                    params = getattr(body, "params", None) or getattr(getattr(body, "body", None), "params", None)
+                    script_names.update(p for p in (params or ["it"]) if isinstance(p, str))
+                    script_names.add("it")
         for _round in range(4):
             before = len(script_names) + len(param_names) + len(weak_env)
             for n, _line, _own in entries:
