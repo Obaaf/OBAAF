@@ -62,6 +62,7 @@ class ArtifactProducerTest(unittest.TestCase):
                 self.assertEqual([(f.job, f.step) for f in found], [("read", "inspect")] if reported else [])
                 self.assertEqual(verdict(egress(result)), VERIFIED)
                 self.assertIn("other repositories", egress(result).controls[0].detail)
+                self.assertIn("can miss execution through wrappers", egress(result).controls[0].detail)
                 unrelated = run_check(producer + consumer.replace("name: report", "name: another"))
                 self.assertFalse(any(f.rule == "OBAAF-GHA-027" for f in unrelated.findings))
 
@@ -231,4 +232,3 @@ class ArtifactProducerTest(unittest.TestCase):
                     else:
                         self.assertEqual(verdict(egress(result)), CANNOT_TELL)
                         self.assertIn("artifact", egress(result).controls[0].detail)
-

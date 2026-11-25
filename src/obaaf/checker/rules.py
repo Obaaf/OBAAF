@@ -2663,7 +2663,9 @@ class WorkflowRules:
                 detail += (" This verdict covers the producing job. A later job can run uploaded files with its own "
                            "network and credentials. The checker follows actions/upload-artifact and actions/download-artifact "
                            "in this workflow and named workflow_run subscriptions, when it can match the artifact "
-                           "and execution path. Other actions, downloads in scripts, computed values, other repositories, "
+                           "and execution path. It recognizes literal workspace action manifests and selected script and build "
+                           "commands. It can miss execution through wrappers, other tools or dynamically selected commands. "
+                           "Other actions, downloads in scripts, computed values, other repositories, "
                            "caches and job outputs can carry files or code beyond that check.")
             return Control(self.EGRESS_NAME, best.verdict, detail, self.EGRESS_ID, conditions), best.kind, best.values
         declared = job.env.get("OBAAF_EGRESS") or self.wf.env.get("OBAAF_EGRESS")
