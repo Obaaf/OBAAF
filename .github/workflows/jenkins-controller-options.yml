@@ -1,0 +1,92 @@
+name: Check OBAAF publish options on a disposable Jenkins controller
+on:
+  push:
+    branches: [lead/check-jenkins-stage-restart-23653d3]
+permissions:
+  contents: read
+jobs:
+  controller:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 23653d374326821de9b9572d78fb14f014299074
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run the controller test on Java 21
+        shell: bash
+        run: |
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          set -euo pipefail
+          worktemp="$(mktemp -d "$RUNNER_TEMP/jenkins-test.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          export TMPDIR="$worktemp"
+          export JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=$worktemp -Djava.awt.headless=true"
+          plugin="$RUNNER_TEMP/declarative-plugin"
+          git init -q "$plugin"
+          git -C "$plugin" fetch -q --depth=1 https://github.com/jenkinsci/pipeline-model-definition-plugin.git 6e7193cec599b402ee79ee9afc5b8a417eb43967
+          git -C "$plugin" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$plugin" rev-parse HEAD)" = 6e7193cec599b402ee79ee9afc5b8a417eb43967
+          test "$(git rev-parse HEAD)" = 23653d374326821de9b9572d78fb14f014299074
+          export OBAAF_SMOKE_FIXTURES="$worktemp/pipelines"
+          mkdir "$OBAAF_SMOKE_FIXTURES"
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+          import subprocess
+          
+          template = "templates/jenkins/obaaf-release-publish.Jenkinsfile"
+          for fixture, revision in [("prior", "7de1abdaf8dc6247f986e33d481a497001afe92b"), ("candidate", "23653d374326821de9b9572d78fb14f014299074")]:
+              source = subprocess.check_output(["git", "show", revision + ":" + template], text=True)
+              candidates = re.findall(r"^  options \{\n(?:    [^\n]*\n)+?  \}", source, re.M)
+              assert len(candidates) == 1, fixture
+              pipeline = "pipeline {\n  agent any\n" + candidates[0] + "\n  stages { stage('Verify') { steps { echo 'options loaded' } } }\n}\n"
+              (Path(os.environ["OBAAF_SMOKE_FIXTURES"]) / fixture).write_text(pipeline)
+          PY
+          cd "$plugin"
+          spec=pipeline-model-definition/src/test/java/org/jenkinsci/plugins/pipeline/modeldefinition/actions/ObaafTemplateOptionsTest.java
+          cat > "$spec" <<'JAVA'
+          package org.jenkinsci.plugins.pipeline.modeldefinition.actions;
+          
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition;
+          import org.jenkinsci.plugins.workflow.job.WorkflowJob;
+          import org.jenkinsci.plugins.workflow.job.WorkflowRun;
+          import org.junit.Rule;
+          import org.junit.Test;
+          import org.jvnet.hudson.test.JenkinsRule;
+          import static org.junit.Assert.*;
+          
+          public class ObaafTemplateOptionsTest {
+              @Rule public JenkinsRule j = new JenkinsRule();
+          
+              @Test public void completedBuildReflectsTemplateOption() throws Exception {
+                  Path fixtures = Path.of(System.getenv("OBAAF_SMOKE_FIXTURES"));
+                  for (String fixture : new String[] {"prior", "candidate"}) {
+                      WorkflowJob job = j.jenkins.createProject(WorkflowJob.class, fixture);
+                      job.setDefinition(new CpsFlowDefinition(Files.readString(fixtures.resolve(fixture)), true));
+                      WorkflowRun run = j.buildAndAssertSuccess(job);
+                      j.assertLogContains("options loaded", run);
+                      RestartDeclarativePipelineAction restart = run.getAction(RestartDeclarativePipelineAction.class);
+                      assertNotNull(restart);
+                      assertEquals(fixture, fixture.equals("prior"), restart.isRestartEnabled());
+                      System.out.println("OBAAF template " + fixture + " stage restart enabled = " + restart.isRestartEnabled());
+                  }
+              }
+          }
+          JAVA
+          mvn -B -ntp -pl pipeline-model-definition -am -Dtest=ObaafTemplateOptionsTest -Dsurefire.failIfNoSpecifiedTests=false -Dspotless.skip=true -Dspotbugs.skip=true -Dcheckstyle.skip=true -DskipITs package >"$worktemp/maven.log" 2>&1 || { tail -100 "$worktemp/maven.log"; exit 1; }
+          grep -E 'OBAAF template (prior|candidate)|Tests run:|BUILD SUCCESS' "$worktemp/maven.log" | tail -15
+          test -f pipeline-model-definition/target/surefire-reports/TEST-org.jenkinsci.plugins.pipeline.modeldefinition.actions.ObaafTemplateOptionsTest.xml
+          python - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          p = next(Path("pipeline-model-definition/target/surefire-reports").glob("TEST-*ObaafTemplateOptionsTest.xml"))
+          suite = ET.parse(p).getroot()
+          assert suite.get("tests") == "1" and all(suite.get(key) == "0" for key in ("errors", "failures", "skipped"))
+          print("A disposable Jenkins controller completed both echo pipelines. Stage restart was enabled for the prior template options and disabled for the candidate.")
+          PY
