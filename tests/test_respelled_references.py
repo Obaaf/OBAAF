@@ -156,8 +156,6 @@ RESPELLED = {
     "a backslash": f"openai\\codex-action@{SHA}",
     "a slash at the end of the name": f"openai/codex-action/@{SHA}",
     "space at the start": f'" openai/codex-action@{SHA}"',
-    "space at the end": f'"openai/codex-action@{SHA} "',
-    "a line break at the end": f'"openai/codex-action@{SHA}\\n"',
     "a space in the name": f'"openai/ codex-action@{SHA}"',
     "a tab before the @": f'"openai/codex-action\\t@{SHA}"',
 }
@@ -180,6 +178,20 @@ class ActionReferenceTest(unittest.TestCase):
                 self.assertIn(".github/workflows/r.yml: job 'review', step 1 has uses written as", error)
                 self.assertIn("cannot tell which action it runs", error)
                 self.assertIn("openai/codex-action", error)
+
+    def test_a_line_break_after_the_reference_is_read_past(self):
+        """Found by the parity test in CI on the first head: zizmor's own test data has a step written as a
+        block scalar, `actions/checkout@...` with a line break after it (`unpinned-uses/issue-1543-repro.yml`).
+        Space after another repository's reference leaves the name the checker matches unchanged, so it is
+        read as before and is not an error; after a local path it is."""
+        for uses in (f'"openai/codex-action@{SHA}\\n"', f'"openai/codex-action@{SHA} "', f"|\n          openai/codex-action@{SHA}"):
+            with self.subTest(uses=uses):
+                result = check_files({".github/workflows/r.yml": step_workflow(uses)})
+                self.assertEqual(result.errors, [])
+                self.assertIn("OBAAF-GHA-020", {f.rule for f in result.findings})
+        files = {".github/workflows/r.yml": step_workflow('"./local-action "'),
+                 "local-action/action.yml": "runs:\n  using: composite\n  steps:\n    - run: echo hi\n      shell: bash\n"}
+        self.assertEqual(len([e for e in check_files(files).errors if "uses written as" in e]), 1)
 
     def test_a_respelled_checkout_is_an_error_too(self):
         """The issue asks for the same on an action that is not an agent's: the check of what a job
@@ -245,7 +257,9 @@ class ActionReferenceTest(unittest.TestCase):
             f"/openai/codex-action@{SHA}": "a / at its start",
             f"openai\\codex-action@{SHA}": "a backslash",
             f"openai/codex-action/@{SHA}": "a / at its end",
-            f" openai/codex-action@{SHA}": "space or a line break at its start or end",
+            f" openai/codex-action@{SHA}": "space or a line break at its start",
+            "./local-action ": "space or a line break at its end, which a folder's name may hold",
+            "$/x\n": "space or a line break at its end",
             f"openai/ codex-action@{SHA}": "a character in its owner or repository name",
             f"openai/codex-action/ sub@{SHA}": "space at the start or end of a part of its path",
             f"openai/codex-action/s\u200bub@{SHA}": "control or format character in its path",
@@ -258,6 +272,7 @@ class ActionReferenceTest(unittest.TestCase):
             with self.subTest(uses=uses):
                 self.assertIn(why, wf_mod.respelled_reference(uses))
         for uses in (f"openai/codex-action@{SHA}", "./x", "$/x", "docker://a//b", ".\\x", None, 5,
+                     f"openai/codex-action@{SHA} ", f"openai/codex-action@{SHA}\n", "docker://alpine:3 ",
                      f"octo/repo/my action@{SHA}", f"octo/repo.js/.github/workflows/my workflow.yml@{SHA}",
                      f"Octo-Org/repo_name.v2@{SHA}", "openai/codex-action", "", f"user_emu/repo@{SHA}",
                      f"org/.github/.github/workflows/ci.yml@{SHA}", f"../repo/x@{SHA}", f"openai/./codex-action@{SHA}"):
@@ -393,7 +408,7 @@ class ReviewFindingsTest(unittest.TestCase):
         self.assertEqual([e for e in errors if "uses written as" in e], [])
 
     def test_an_image_is_shown_as_written(self):
-        problem = wf_mod.respelled_problem("docker://alpine@sha256:" + "a" * 64 + " ", "action it runs")
+        problem = wf_mod.respelled_problem(" docker://alpine@sha256:" + "a" * 64, "action it runs")
         self.assertIn("read it as 'docker://alpine@sha256:", problem)
 
 

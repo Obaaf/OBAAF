@@ -114,7 +114,9 @@ def respelled_reference(uses) -> str | None:
     rule. Whether GitHub refuses such a value or runs the action without the extra characters (the runner
     may split on `/` and `\\` and drop empty parts) is not established, and neither is whether it trims
     space round the value or a part, decodes `%2F` or drops `.git`. So these are values the checker
-    cannot place: space or a line break at either end of the value; and in another repository's reference,
+    cannot place: space or a line break at the start of the value, or at the end of a local path (a folder's
+    name may end in space; after another repository's reference or an image it is read past, since the name
+    the checker matches is the same whether GitHub trims it or not); and in another repository's reference,
     before the first `@`, a backslash, a `/` at its start or end, two `/` together, an owner or repository
     name with a character GitHub's names do not have (anything but ASCII letters, digits, `-`, `_` and `.`)
     or ending `.git`, and a part of the path with space at its start or end or a control or format
@@ -122,9 +124,17 @@ def respelled_reference(uses) -> str | None:
     `./`, `$/` or `.\\` path and a `docker://` image are not read here beyond space at either end."""
     if not isinstance(uses, str) or not uses:
         return None         # an empty `uses:` names nothing, and GitHub refuses it
-    if uses != uses.strip():
-        return "space or a line break at its start or end"
-    if is_local_reference(uses) or uses.startswith(".\\") or uses.lower().startswith("docker://"):
+    if uses != uses.lstrip():
+        return "space or a line break at its start"
+    local = is_local_reference(uses) or uses.startswith(".\\")
+    if uses != uses.rstrip():
+        if local:
+            return "space or a line break at its end, which a folder's name may hold"
+        # Space after another repository's reference or an image leaves the name the checker matches as it
+        # is, and GitHub either trims it or refuses the value. A block scalar's last line break is one
+        # (zizmor's test data, `unpinned-uses/issue-1543-repro.yml`, which the parity test reads).
+        uses = uses.rstrip()
+    if local or uses.lower().startswith("docker://"):
         return None
     name = uses.split("@", 1)[0]
     if "\\" in name:
