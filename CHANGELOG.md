@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Save a proven fix as a patch
+
+`obaaf fix --patch FILE` saves a proven paperwork, checkout, pin or gate diff for review with `git apply --check FILE` and application with `git apply FILE`. The output preserves the proved bytes, including CRLF and a missing final newline. The destination must be new. Windows proofs refuse reparse points and hard-linked files.
+
 ### Preview missing ignore owners
 
 The full report, summary and JSON to-do list show a scoped `obaaf fix --owner OWNER` preview for ignore entries missing their owner after a whole-repository check. Replace `OWNER` with the responsible person or team and review every proposed acceptance.

@@ -360,6 +360,11 @@ def _source_unchanged(root: Path, edits) -> None:
     runs, and a change that moves no finding would otherwise go unseen (review of #274)."""
     for edit in edits:
         rel = _relative(root, Path(edit.path))
+        if os.name == "nt":
+            from obaaf.fix_copy_windows import source_bytes
+            if source_bytes(root / rel, len(edit.before) + 1) != edit.before:
+                raise ProofError(f"the source of {str(rel)!r} changed while the proof ran")
+            continue
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
             fd = os.open(root / rel, flags)

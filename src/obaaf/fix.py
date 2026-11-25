@@ -173,7 +173,7 @@ def apply_preview_guidance():
 
     if all(hasattr(os, name) for name in XATTR_FUNCTIONS):
         return "Run again with --apply to write these changes."
-    return "Make the displayed changes by hand on this host."
+    return "Run again with --patch FILE to save the proven changes for git apply."
 
 
 def run(args):
@@ -242,14 +242,20 @@ def run(args):
             if pin and not proposal.edits:
                 if proposal.already_satisfied:
                     print(one_line(proposal.already_satisfied))
-                    return 0
+                    return 1 if args.patch is not None else 0
                 print(prerequisite or "No proven pin to apply. Review the reported install and its original workflow by hand.")
                 return 1
             if args.candidate is not None and not proposal.edits:
                 print(prerequisite or "Named checkout withheld. Review its original workflow and resolve the reported "
                       "condition before running this named request again.")
                 return 1
-            if args.apply:
+            if args.patch is not None:
+                if not proposal.edits or after is None:
+                    print("No proven changes to export.")
+                    return 1
+                from obaaf.fix_patch import save_patch
+                save_patch(args.patch, proposal.edits)
+            elif args.apply:
                 sys.stdout.flush()
                 if proposal.edits:
                     final = prove(root, options, proposal.edits, proposal.promises)

@@ -996,6 +996,8 @@ The operation needs POSIX directory locks and a filesystem supporting hard links
 
 **Status.** Accepted, 2026-11-21. With it, the maintainer asked for an option that saves the proven diff as a patch file on any system, so that where apply does not run (macOS, Windows) the same change can be made with `git apply`. Proposed 2026-11-19 (slice A2c, #279).
 
+**Proposed clarification, 2026-11-25 (#355 item 3).** `--patch FILE` saves the already-proven edits as a binary-written Git unified diff in a new file. Export uses the same acceptance, scope and gate proof as preview. It preserves file line endings and incomplete final lines. The caller reviews the displayed acceptances and uses Git to check and apply the patch in the same working tree. Applying with Git does not rerun the proof. On Windows the private-copy reader opens files and directories without following reparse points and denies writes and renames while reading each one. A reparse point or hard-linked source file prevents export. Direct apply retains its existing platform and metadata checks.
+
 ### D-104 What a saved settings snapshot establishes
 
 **Decision.** The approved adoption design sets a 30-day lifetime. Measure elapsed UTC time from the audit producer’s `taken_at`. Exactly 30 days is eligible. A future timestamp or an older observation supplies no proof. Read a snapshot only from an explicit `--settings FILE`, with the audit command’s existing strict format reader. Match the observed GitHub API host and repository to the checked clone’s github.com origin. An unestablished or different identity leaves the result uncertain.
