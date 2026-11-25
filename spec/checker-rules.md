@@ -538,6 +538,7 @@ Each workflow or Jenkins pipeline below models a documented attack pattern. The 
 | Test file | Models | Expected rules |
 | --- | --- | --- |
 | `tests/fixtures/workflows/risky/agent-action-unsafe.yml` | An agent action is given two settings its own documentation warns about: no privilege reduction, so the agent can read the model key from memory, and anyone may start it from an issue comment. | OBAAF-GHA-005, OBAAF-GHA-026 |
+| `tests/fixtures/workflows/risky/agent-artifact-consumer.yml` | A second job downloads an agent job's artifact and invokes its file with a shell. | OBAAF-GHA-027 |
 | `tests/fixtures/workflows/risky/agent-cli-skip-permissions.yml` | An agent's command-line tool is run with an option its own documentation warns about: Claude Code with its permission checks turned off, so any command the agent chooses runs without approval. | OBAAF-GHA-026 |
 | `tests/fixtures/workflows/risky/agent-cli-unpinned.yml` | An agent job installs its CLI by piping a downloaded script into a shell, and another CLI from npm with no version, while it holds a model key. | OBAAF-GHA-005, OBAAF-GHA-020, OBAAF-GHA-025 |
 | `tests/fixtures/workflows/risky/agent-lane-misspelled.yml` | Not an attack by itself: a job that runs an agent the checker does not recognise is declared an agent job with OBAAF_LANE, and the lane is misspelt. The declaration changes nothing, so none of the agent rules run on the job, and until 0.3.0 the report said so only in a note while the check passed. | OBAAF-CFG-001 |

@@ -1,0 +1,25 @@
+# obaaf-expect: OBAAF-GHA-027
+# obaaf-models: A second job downloads an agent job's artifact and invokes its file with a shell.
+name: Artifact handoff fixture
+on: workflow_dispatch
+permissions: {}
+jobs:
+  producer:
+    runs-on: ubuntu-24.04
+    env:
+      OBAAF_LANE: agent
+    steps:
+      - run: echo ':' > report.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: report.txt
+  consumer:
+    needs: producer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: report
+          path: downloaded
+      - run: sh downloaded/report.txt
