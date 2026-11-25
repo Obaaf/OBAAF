@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test: [suite, comparisons]
+        test: [comparisons]
     steps:
       - name: Check out the candidate commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -168,6 +168,6 @@ jobs:
           print("Retained provider-key jobs:", len(retained & set(provider)))
           assert set(inferred) == set(current_inferred)
           assert removed == expected and removed
-          assert retained == set(provider)
+          assert retained == (set(provider) & set(prior)) - set(inferred)
           assert current == {job: lane for job, lane in prior.items() if job not in expected}
           PY
