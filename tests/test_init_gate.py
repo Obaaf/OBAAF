@@ -22,8 +22,9 @@ from obaaf.init import WORKFLOW
 from obaaf.init_scanners import steps
 
 
-# The SHA-256 of each gate-capable template as it landed. They are kept here, not beside the packaged
-# copies in obaaf.fix_gate, so that editing a copy and its digest together still fails a test.
+# The SHA-256 of each gate-capable template as it landed, and (in tests/fixtures/init) its bytes. They are
+# kept here, not beside the packaged copies in obaaf.fix_gate, so that a packaged copy edited on its own, or
+# with its digest, fails a test. A copy, its fixture and its digest edited together cannot be told apart.
 FIRST_GATE_DIGEST = "ad3c9f980acc1003b31695d3f7fdbee488ec4ecf10fbe12ac7a8621ddbaa67cb"  # 27b15c9, #293
 SETTINGS_GATE_DIGEST = "46cfc1864e30b4b386f0799e98e698809f6727aaac8de6404e5311c014d2b70a"  # review-gpt #367
 
@@ -277,11 +278,17 @@ class GateTests(unittest.TestCase):
 
         self.assertEqual([sha256(landed.read_bytes()).hexdigest() for landed, _ in LANDED],
                          [FIRST_GATE_DIGEST, SETTINGS_GATE_DIGEST])
+        fixtures = Path(__file__).parent / "fixtures/init"
+        self.assertEqual([landed.read_bytes() for landed, _ in LANDED],
+                         [(fixtures / name).read_bytes() for name in
+                          ("gate-template-27b15c9.yaml", "gate-template-settings-8caddd6.yaml")])
         for landed, pin in LANDED:
             self.assertEqual(landed.read_bytes().count(pin), 1)
         # Until the template changes again, the settings template is the one init writes.
         self.assertEqual(SETTINGS_GATE.read_bytes(),
-                         files("obaaf.data").joinpath("init-workflow.yaml").read_bytes())
+                         files("obaaf.data").joinpath("init-workflow.yaml").read_bytes(),
+                         "init-workflow.yaml changed: keep init-gate-settings-8caddd6.yaml, its fixture and its "
+                         "digest as they landed, and add the changed template to obaaf.fix_gate.LANDED as a new file")
 
     def test_landed_templates_are_recognised_after_the_template_changes(self):
         # review-gpt #367: a later edit of the template must not leave workflows installed from an earlier
@@ -351,6 +358,14 @@ class GateTests(unittest.TestCase):
         status, preview = self.gate()
         self.assertEqual(status, 0, preview)
         self.assertIn(note, preview)
+        # The first template does not read the variable, so the note would mislead there.
+        first = (Path(__file__).parent / "fixtures/init/gate-template-27b15c9.yaml").read_bytes()
+        self.workflow.write_bytes(first)
+        commit(self.root)
+        status, preview = self.gate()
+        self.assertEqual(status, 0, preview)
+        self.assertIn("Gate preview at --fail-on medium", preview)
+        self.assertNotIn(note, preview)
 
     def test_crlf_threshold_change_after_a_pin_rotation_keeps_pin_and_endings(self):
         # review-gpt #306, as the queue asks: #306's historical-template search and #293's CRLF

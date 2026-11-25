@@ -119,8 +119,9 @@ def run(args, root, options, lock, show_diff):
           f"Baseline: {one_line(str(options.baseline)) if options.baseline else 'absent; zero baseline acceptances'}.")
     if b"OBAAF_USE_SETTINGS" in updated and (root / SETTINGS).exists():
         # The preview cannot take --settings (D-112), and the workflow's runs may read the snapshot.
-        print(f"This count does not use {SETTINGS.as_posix()}. With the repository variable OBAAF_USE_SETTINGS "
-              "set to true, the workflow's runs read it too, so their count can differ.")
+        print(f"This count does not use {SETTINGS.as_posix()}. If the repository variable OBAAF_USE_SETTINGS "
+              "is true, the workflow's runs give the checker a snapshot (on a pull request, the target "
+              "commit's), so their count can differ.")
     show_diff(edit)
     if args.apply:
         sys.stdout.flush()
