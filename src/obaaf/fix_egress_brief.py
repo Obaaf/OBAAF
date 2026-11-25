@@ -104,10 +104,11 @@ def work_order(job, index, step, blocked, broken, options, result):
         "after a run. Under confinement, command writes stay in the action’s scratch directory. The command can still read its copy of the workspace and the runner’s /tmp.",
         "4. Use GitHub-hosted ubuntu-24.04 without a container. Keep credentials out of other steps and "
         "workflow or job environments. Remove OIDC and models permissions. Review steps that could run "
-        "beside the agent. Keep the confined step last. A possible artifact upload makes otherwise verified "
-        "egress and key isolation 'cannot tell': an upload step, an action other than actions/checkout, "
-        "download-artifact and cache (an actions/setup- action counts), or a script such as npm ci or make, anywhere "
-        "in the job. Plan a separate job for builds, uploads and later commit, "
+        "beside the agent. Keep the confined step last; only artifact uploads may follow it. An action other than "
+        "actions/checkout, download-artifact and cache (an actions/setup- action counts), or a script such as npm ci "
+        "or make, anywhere in the job, makes otherwise verified egress 'cannot tell', and so does an upload step for "
+        "key isolation. A job that downloads the agent's artifact and runs anything in its folder is reported as "
+        "OBAAF-GHA-027. Plan a separate job for builds, uploads and later commit, "
         "comment or pull request steps.",
         "5. For each protected secret, verify the configured environment, its protected-branch rule and "
         "that the secret exists only there. Review untrusted triggers, checkout sources and event inputs. "

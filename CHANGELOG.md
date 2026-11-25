@@ -37,7 +37,15 @@ Two conditions the checker did not read are now read the narrow way, because the
 
 ### Report execution of uploaded files in the consuming job
 
-OBAAF-GHA-027 reports a job that downloads an agent job's artifact and can execute files from the download. A recognised upload alone no longer changes OBAAF-GHA-020 in the producer. A cleared control names the cross-job detection limits. The key-out-of-reach control under OBAAF's action keeps its separate assessment of possible uploads.
+A new rule, **OBAAF-GHA-027 (medium, so it fails a `--fail-on medium` gate)**, reports a job that downloads an agent job's artifact and has a later step that may run files from it. It fails closed: every later step that names the download's folder is reported unless it is plainly read-only (an upload or download action, or a bash or sh script of commands such as `cat`, `jq`, `grep` and `sha256sum` writing at most to the step summary), and every later step is when the files land in the workspace or in a computed folder. A step that hands a downloaded file to the repository's own script is reported too. It follows `actions/download-artifact` in the same run (workflows of this repository that call one another included) and in `workflow_run` runs; not downloads by other actions or in scripts, a computed run ID or repository, re-uploads by another job, caches or job outputs.
+
+What changes for the producing agent job (F-359's second step):
+
+- **On GitHub's native firewall**, OBAAF-GHA-020 no longer reads uploads at all. A job with `actions/checkout`, a script such as `npm ci`, an `actions/setup-` action, a container, a variable such as `NODE_OPTIONS`, or an upload step, which D-133 made "cannot tell", now clears when the runner and policy hold.
+- **On OBAAF's egress action**, only upload steps change: they may follow the confined step, and an upload alone no longer withholds egress credit. Any other step that may upload or run unread code still does, and `key-out-of-reach` (OBAAF-GHA-005) still reads every possible upload, upload steps included.
+- **Steps outside the sandbox with a name beginning `OPENSSL_` in their `env`** (the step's, the job's or the workflow's) now make egress and `key-out-of-reach` "cannot tell": Node.js, which runs every JavaScript action, loads the configuration `OPENSSL_CONF` names, and the libraries it names, when it starts (found by the review of #366; it was also true of `actions/checkout` before the agent).
+
+A cleared control now says what OBAAF-GHA-027 follows and what it does not.
 
 ### Companion scanner diagnostics in GitHub Actions
 

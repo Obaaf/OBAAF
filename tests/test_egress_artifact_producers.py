@@ -40,8 +40,10 @@ class ArtifactProducerTest(unittest.TestCase):
     def test_only_the_job_that_could_run_downloaded_code_gets_the_finding(self):
         _, steps, _ = ROUTES["action"]
         producer = workflow(steps + "\n" + upload())
+        # The review of #366 (run `rosefinch`): `sh result/unrelated.sh` is reported too. The agent writes what
+        # it uploads, so `report.txt` may be a folder holding `unrelated.sh`; the upload's layout rules nothing out.
         for command, reported in (("cat result/report.txt", False), ("echo ./result/report.txt", False),
-                                  ("sh result/report.txt", True), ("sh result/unrelated.sh", False),
+                                  ("sh result/report.txt", True), ("sh result/unrelated.sh", True),
                                   ("./elsewhere/report.txt", False)):
             with self.subTest(command=command):
                 consumer = ("  read:\n    needs: agent\n    runs-on: ubuntu-24.04\n    steps:\n"
@@ -52,7 +54,7 @@ class ArtifactProducerTest(unittest.TestCase):
                 found = [f for f in result.findings if f.rule == "OBAAF-GHA-027"]
                 self.assertEqual([(f.job, f.step) for f in found], [("read", "inspect")] if reported else [])
                 self.assertEqual(verdict(egress(result)), VERIFIED)
-                self.assertIn("other repositories", egress(result).controls[0].detail)
+                self.assertIn("Not followed: downloads by other actions or in scripts", egress(result).controls[0].detail)
                 unrelated = run_check(producer + consumer.replace("name: report", "name: another"))
                 self.assertFalse(any(f.rule == "OBAAF-GHA-027" for f in unrelated.findings))
 

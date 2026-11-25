@@ -1873,13 +1873,18 @@ class WorkflowRules:
         self.add("OBAAF-GHA-020", job.line, templates[kind], job, kind=kind, controls=[egress], **values, **agents)
 
     def artifact_consumer(self, job: Job) -> None:
-        for source, download, step, path in artifact_consumers.consumers(self.wf, job, self.artifact_sources):
+        # At most one finding per step (review of #366: one per upload, download and step grew as their product).
+        for matched, download, step, path in artifact_consumers.consumers(self.wf, job, self.artifact_sources):
+            source = matched[0]
+            others = len({(u.workflow, u.job, u.name) for u in matched}) - 1
             self.add("OBAAF-GHA-027", step.line,
                      "Job '{job}' downloads artifact '{artifact}' in '{download}' from agent job '{producer}' "
-                     "({workflow}). Step '{step}' can run '{path}' from the download with the consuming job's "
-                     "network and permissions. Review the artifact as data before running its contents.",
-                     job, step, artifact=source.name, producer=source.job,
-                     workflow=source.workflow, download=download.name, path=path)
+                     "({workflow}){more}. Step '{step}' is not read-only and can run files from the download "
+                     "('{path}') with the consuming job's network and permissions. Review the artifact as data "
+                     "before running its contents.",
+                     job, step, artifact=source.name if source.name is not None else "(a computed name)",
+                     producer=source.job, workflow=source.workflow, download=download.name, path=path,
+                     more=f", and {others} other upload{'s' if others > 1 else ''} it may fetch" if others else "")
 
     # -------------------------------------------------------------- GHA-025
     _INSTALL_SCRIPT_LIMIT = 400_000     # characters of one step's scripts, after variables are put in
@@ -2565,8 +2570,12 @@ class WorkflowRules:
     # programs, run with the token that uploads artifacts; git's (identity names excepted) and
     # `XDG_CONFIG_HOME`, where git finds its global configuration, since actions/checkout runs git; and
     # `TAR_OPTIONS`, since actions/cache runs tar. What other programs read for their settings is not read.
+    # Review of #366 (run `rosefinch`): OpenSSL's names too, since Node.js initialises OpenSSL when it starts and
+    # loads the configuration `OPENSSL_CONF` names, and the modules or engines it names, into the action's
+    # process (reproduced with Node.js 22: a library the configuration named ran its constructor). Slice 2c.11a
+    # found the same of the egress action's own Python, which now drops them; JavaScript actions do not.
     _UPLOAD_STEERING_NAMES = frozenset({"NODE_OPTIONS", "NODE_PATH", "XDG_CONFIG_HOME", "TAR_OPTIONS"})
-    _UPLOAD_STEERING_PREFIXES = ("GIT_",)
+    _UPLOAD_STEERING_PREFIXES = ("GIT_", "OPENSSL_")
     _UPLOAD_PLAIN_PREFIXES = ("GIT_AUTHOR_", "GIT_COMMITTER_")
 
     def _upload_env_steers(self, job: Job, step: Step) -> bool:
@@ -2655,11 +2664,16 @@ class WorkflowRules:
             conditions = tuple(c for reading in readings for c in reading.conditions)
             detail = best.detail
             if best.verdict == VERIFIED:
-                detail += (" This verdict covers the producing job. A later job can run uploaded files with its own "
-                           "network and credentials. The checker follows actions/upload-artifact and actions/download-artifact "
-                           "in this workflow and named workflow_run subscriptions, when it can match the artifact "
-                           "and execution path. Other actions, downloads in scripts, computed values, other repositories, "
-                           "caches and job outputs can carry files or code beyond that check.")
+                detail = detail.rstrip()
+                detail += ("" if detail.endswith(".") else ".") + (
+                    " This verdict covers the producing job. A later job can run uploaded files with its own "
+                    "network and credentials: OBAAF-GHA-027 reports a job that downloads the artifact with "
+                    "actions/download-artifact in the same run (workflows of this repository that call one another "
+                    "included) or in a run started by workflow_run, and has a later step that is not plainly "
+                    "read-only and names the download's folder (any such step, when the folder is the workspace or "
+                    "cannot be read). Not followed: downloads by other actions or in scripts, a computed artifact "
+                    "name, run ID or repository, an artifact uploaded again by another job, caches, job outputs, and "
+                    "code from the repository that reads the download without naming its folder.")
             return Control(self.EGRESS_NAME, best.verdict, detail, self.EGRESS_ID, conditions), best.kind, best.values
         declared = job.env.get("OBAAF_EGRESS") or self.wf.env.get("OBAAF_EGRESS")
         kind, values = ("declared", {"declared": str(declared)}) if declared else ("none", {})
@@ -3494,8 +3508,9 @@ class WorkflowRules:
         if unread_token and not outside:
             unsure.append("the job does not declare its token's permissions, so the repository's default applies, "
                           "which the checker does not read, and every action is given that token")
-        # What runs after (or beside) the confined command. `actions/upload-artifact` is read by
-        # `_artifact_upload` as an upload (decision D-133). A script, or any other action, could run or
+        # What runs after (or beside) the confined command. Upload steps may: since #366 an upload alone leaves
+        # egress as it is (the consuming job is OBAAF-GHA-027's), though `_artifact_upload(job, egress=True)` reads
+        # their `env`, and `key-out-of-reach` still reads them as uploads (D-133). A script, or any other action, could run or
         # load what the command wrote, and the checker cannot tell reading from running. Steps before it are read for what their post
         # steps or the processes they leave running could reach: the outputs, the scratch directory by
         # its name, or /tmp.

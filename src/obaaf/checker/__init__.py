@@ -2513,7 +2513,8 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     prepared = _prepare_workflows(read, root, None if on_its_own else root, config, declared, script_cmds,
                                   agent_actions, unread_actions, action_cache, steps_state)
     rules_mod.give_call_effects(groups, catalog.detection, config.agents)
-    artifact_sources = artifact_consumers.uploads(readable)
+    artifact_sources = artifact_consumers.uploads(
+        readable, lambda wf, job: rules_mod.through_job(job, wf, catalog.detection, config.agents))
     for path, rel, workflow, reported in prepared:
         rels.append(rel)
         owned_paths.extend(_as_found(path, root))
