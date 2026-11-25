@@ -30,7 +30,31 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = 6c940d1add8d1a27a4c379d40cc27e13d297c9cf
-          git -c user.name='Verification Runner' -c user.email='verification@localhost' merge --no-ff --no-edit ae86067cae8fcd11be92457db2d8b21448b76beb
+          git -c user.name='Verification Runner' -c user.email='verification@localhost' merge --no-ff --no-commit ae86067cae8fcd11be92457db2d8b21448b76beb || test "$(git diff --name-only --diff-filter=U)" = docs/upgrading.md
+          python - <<'PY'
+          from difflib import SequenceMatcher
+          from pathlib import Path
+          from subprocess import check_output
+          path = 'docs/upgrading.md'
+          def stage(number):
+              return check_output(['git','show',f':{number}:{path}']).splitlines(keepends=True)
+          base = stage(1)
+          edits = set()
+          for side in (stage(2), stage(3)):
+              for op,i,j,k,m in SequenceMatcher(None,base,side,autojunk=False).get_opcodes():
+                  if op != 'equal':
+                      edits.add((i,j,tuple(side[k:m])))
+          merged = []
+          cursor = 0
+          for i,j,replacement in sorted(edits):
+              assert cursor <= i, (cursor,i,j)
+              merged.extend(base[cursor:i])
+              merged.extend(replacement)
+              cursor = j
+          Path(path).write_bytes(b''.join(merged + base[cursor:]))
+          PY
+          git add -- docs/upgrading.md
+          git -c user.name='Verification Runner' -c user.email='verification@localhost' commit --no-edit
           git show --no-patch --format='Native merge %H parents %P tree %T'
           git merge-base --is-ancestor ae86067cae8fcd11be92457db2d8b21448b76beb HEAD
           echo "Integrated review tree $(git rev-parse HEAD^{tree})"
@@ -48,7 +72,7 @@ jobs:
           obaaf docs build --check
           python -m unittest discover -s tests > "$RUNNER_TEMP/tests.log" 2>&1 || { tail -100 "$RUNNER_TEMP/tests.log"; exit 1; }
           grep -E '^(Ran [0-9]+ tests|OK)' "$RUNNER_TEMP/tests.log"
-          PYTHONPATH=tests python -m unittest test_artifact_consumer_index test_egress_artifact_producers
+          PYTHONPATH=tests python -m unittest -v test_artifact_consumer_index test_egress_artifact_producers
           PYTHONPATH=tests python - <<'PY'
           from time import perf_counter
           from types import SimpleNamespace
