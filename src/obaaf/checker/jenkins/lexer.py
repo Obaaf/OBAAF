@@ -445,6 +445,16 @@ class Lexer:
                     # \u0020 (and \uu0020) is the character it names (flagship slice 2d.2l: it was read as u0020).
                     buf.append(chr(int(m.group(1), 16)))
                     self._advance(m.end() - self.pos)
+                elif nxt and nxt in "01234567":
+                    # \120 is P: Groovy 2.4 reads \0 to \377 as an octal escape, as Java does (the review of #365:
+                    # it was read as 120, so withEnv(['\120ATH+X=...']) set no PATH the checker could see).
+                    digits = nxt
+                    for _ in range(2 if nxt in "0123" else 1):
+                        if self._peek(0) and self._peek(0) in "01234567":
+                            digits += self._advance()
+                        else:
+                            break
+                    buf.append(chr(int(digits, 8)))
                 elif nxt != "\n":
                     buf.append({"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}.get(nxt, nxt))
                 continue

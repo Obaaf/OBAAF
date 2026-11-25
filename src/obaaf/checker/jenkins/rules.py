@@ -33,11 +33,12 @@ from obaaf.checker.jenkins.model import (
     untrusted_source,
 )
 from obaaf.checker.jenkins.parser import (
-    Assign, Binary, Call, ClassDef, Closure, Decl, Import, Index, ListLit, Loop, MapLit, MethodDef, Name, Num, Prop,
-    Str,
+    Assign, Binary, Block, Call, ClassDef, Closure, Decl, Import, Index, ListLit, Loop, MapLit, MethodDef, Name, Num,
+    Opaque,
+    Prop, Str, Switch, Unary,
     callee_name, path_of,
 )
-from obaaf.checker.rules import Finding
+from obaaf.checker.rules import Finding, steers
 from obaaf.checker.workflow import _script_tokens, _strip_comment, binding_commands, declared_lane
 
 RULES = ("OBAAF-JEN-001", "OBAAF-JEN-002", "OBAAF-JEN-003", "OBAAF-JEN-004", "OBAAF-JEN-005", "OBAAF-JEN-006",
@@ -3335,7 +3336,9 @@ class JenkinsRules:
                          "by which reference, is not known")
         fetches = [f for f in fetches if f[1] != "fixed"]
         checks = [(i, self._fetch_check(i)) for i in self.infos]
-        checks = sorted(((i, kind) for i, kind in checks if kind and not i.ctx.deferred), key=lambda c: c[0].index)
+        # A check whose shell may run another program than the one it names counts as neither (the review of #365)
+        checks = sorted(((i, "steered" if self._steered(i) else kind) for i, kind in checks
+                         if kind and not i.ctx.deferred), key=lambda c: c[0].index)
         keys: dict[int, frozenset] = {}
 
         def guards(info: Info) -> frozenset:
@@ -3362,13 +3365,13 @@ class JenkinsRules:
         # stop it, worked out once: comparing every copy with every step of its stage took 11.7 seconds on 744
         # bytes of nested helpers. A check counts as `gates` says, except that a condition the copy runs under
         # may also skip the check: when it does not hold, nothing was copied.
-        memo: dict[tuple, tuple[int, int]] = {}
+        memo: dict[tuple, tuple[int, int, int]] = {}
 
-        def latest(publish: Info, copy_guards: frozenset) -> tuple[int, int]:
+        def latest(publish: Info, copy_guards: frozenset) -> tuple[int, int, int]:
             key = (publish.index, copy_guards)
             found = memo.get(key)
             if found is None:
-                full = digest = -1
+                full = digest = steered = -1
                 allowed = guards(publish) | copy_guards
                 for check, kind in checks:
                     if check.index >= publish.index:
@@ -3379,9 +3382,11 @@ class JenkinsRules:
                         continue
                     if kind == "full":
                         full = check.index
+                    elif kind == "steered":
+                        steered = check.index
                     else:
                         digest = check.index
-                found = memo[key] = (full, digest)
+                found = memo[key] = (full, digest, steered)
             return found
 
         for info, kind, what in fetches:
@@ -3397,28 +3402,41 @@ class JenkinsRules:
             def repeated(p: Info) -> bool:
                 return bool(again) and bool(again & (set(p.ctx.repeats) | guards(p)))
             later = [p for p in publishes if p.index > info.index or concurrent(info.ctx, p.ctx) or repeated(p)]
-            unchecked, digest_only = [], []
+            unchecked, digest_only, steered_only = [], [], []
             for publish in later:
                 if publish.ctx.post in FAILURE_PATHS or publish.index < info.index or concurrent(info.ctx, publish.ctx):
                     # a publish in a failure path runs when the check failed; one before the copy in the same retry
                     # block runs after the copy of the try before; one beside the copy is checked by nothing after it
                     unchecked.append(publish)
                     continue
-                full, digest = latest(publish, fixed_guards(info))
+                full, digest, steered = latest(publish, fixed_guards(info))
                 if full > info.index and not self._beside(info, full):
                     continue
-                if digest > info.index and not self._beside(info, digest):
+                if steered > info.index and not self._beside(info, steered):
+                    steered_only.append((publish, steered))
+                elif digest > info.index and not self._beside(info, digest):
                     digest_only.append(publish)
                 else:
                     unchecked.append(publish)
             if kind == "unknown":
-                if unchecked or digest_only:
+                if steered_only and not unchecked and not digest_only:
+                    check = self.infos[steered_only[0][1]]
+                    self.unknown("OBAAF-JEN-010", info.line,
+                                 f"the copy at line {info.line} copies artifacts from {what}, which the file does not "
+                                 f"fix; the check at line {check.line} runs before the publish, but "
+                                 f"{self._steered(check)}")
+                elif unchecked or digest_only or steered_only:
                     self.unknown("OBAAF-JEN-010", info.line,
                                  f"the copy at line {info.line} copies artifacts from {what}, which the file does not "
                                  "fix, and the pipeline publishes after it")
                 continue
             if not unchecked:
-                if digest_only:
+                if steered_only:
+                    check = self.infos[steered_only[0][1]]
+                    self.unknown("OBAAF-JEN-010", info.line,
+                                 f"the copy at line {info.line} copies artifacts from {what}; the check at line "
+                                 f"{check.line} runs before the publish, but {self._steered(check)}")
+                elif digest_only:
                     self.unknown("OBAAF-JEN-010", info.line,
                                  f"the copy at line {info.line} copies artifacts from {what}; a digest check runs before "
                                  "the publish, but whether its digests come from somewhere other than the build it "
@@ -3466,6 +3484,317 @@ class JenkinsRules:
                         kind = "digest"
         self._script_cache[("fetch-check", id(info.use.call))] = (info.use.call, kind)
         return kind
+
+    def _steered(self, info: Info) -> str | None:
+        """Why a check step's shell may run another program than the one it names, or None (the review of pull request
+        #365, for #344): a variable that `steers` counts (`PATH`, bash's, the loader's, Python's and the others the
+        GitHub rules read since slice 2d.13), or one whose name the checker cannot read, set by a `withEnv` entry, an
+        `environment { }` block or a matrix axis around the step (`PATH+NAME` is `PATH`: Jenkins puts the value in front
+        of it), or named as a credential binding's variable around it; or set by a script anywhere in the file
+        (`env.PATH = ...` holds for every later step, wherever it is), or a place the file names withEnv that the checker
+        did not read (`_file_steering`). Before the review only an `export` inside the step's own script stopped the
+        reader, so `withEnv(["PATH+X=${env.WORKSPACE}/x"])` around `obaaf verify release` counted the check, whatever
+        `x` held. What an agent's or a tool's own setup puts in the environment (the controller's node properties,
+        `tools { }`, a container's image or its `-e` options, a pod template's `envVars`) is not read."""
+        for name, line in info.ctx.env_names:
+            if name == "?":
+                return (f"a withEnv entry, environment block or matrix axis at line {line}, around the step, sets a "
+                        "variable whose name the checker cannot read, which may change the program the step's shell "
+                        "runs")
+            if steers(name.split("+", 1)[0]):
+                return (f"{name} is set around the step (line {line}), which can change the program the step's shell "
+                        "runs")
+        for binding in info.ctx.creds:
+            for name in (*binding.variables, *binding.paths):
+                if isinstance(name, str) and name == "?":
+                    return (f"{binding.how} at line {binding.line} puts a credential around the step in a variable "
+                            "whose name the checker cannot read, which may change the program the step's shell runs")
+                if isinstance(name, str) and steers(name):
+                    return (f"{binding.how} at line {binding.line} puts a credential in {name} around the step, which "
+                            "can change the program the step's shell runs")
+        return self._file_steering()
+
+    # Methods of `env` that only read it; any other method called on it, or named without a call (a method pointer,
+    # `env.&setProperty`), may set a variable (`setProperty`, `put`, `with { }`, `identity { }`, `invokeMethod`).
+    _ENV_READS = frozenset({"getEnvironment", "getOverriddenEnvironment", "getProperty", "getProperties", "get",
+                            "getAt", "containsKey", "keySet", "entrySet", "values", "toString", "hashCode", "isEmpty",
+                            "size", "equals"})
+    _ENV_SETTERS = frozenset({"setProperty", "put", "putAt"})
+    _ENV_MUTATORS = _ENV_SETTERS | {"with", "identity", "tap", "putAll", "invokeMethod", "metaClass", "setMetaClass",
+                                    "overrideAll", "override"}
+    _IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+    # In text the parser keeps no node for (a loop's header, a method's parameters and their defaults, a switch's case
+    # labels): `env` used as a value (not followed by `.`, `?.` or `[`), written to, incremented, or with a method
+    # that may set a variable named. Bounded, and run only on those short texts.
+    _ENV_TEXT_RISK = re.compile(
+        r"""\b(?:getProperty|getAt|invokeMethod|setProperty)\b|\.\s*&|\.\s*["']\$|[\[.]\s*(?:'{1,3}env'{1,3}|"{1,3}env"{1,3})|"""
+        r"""(?<!['"])\benv\b(?!['"])(?!\s*(?:\?\.|\.|\[))"""
+        r"""|\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\*\*|<<|>>>|>>|\?:|[-+*/%&|^])?=(?![=~])"""
+        r"""|\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\+\+|--)|(?:\+\+|--)\s*\benv\b"""
+        r"""|\benv\b\s*\??\.\s*&?\s*(?:setProperty|put|putAt|putAll|with|identity|tap|invokeMethod|metaClass|"""
+        r"""setMetaClass|overrideAll|override)\b""")
+
+    _ENV_POSTFIX = re.compile(r"""\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\+\+|--)""")
+
+    def _tree_env_writes(self) -> list:
+        """(name, line) for every write to the build's `env` anywhere in the parsed file, and in every `${...}` of its
+        strings (parsed as statements), whether or not the walker reads that place (a `when { expression { } }`, a
+        method a directive calls, a GString). `env` is the name `env`, any `x.env`, `getProperty('env')`,
+        `getAt('env')` or `this['env']`; a computed one (`getProperty(n)`, `this."${n}"`, `this[n]`) may be. Each use
+        of it is one of: a property or index read, which is safe; a property or index assigned or incremented, a
+        setter with a literal name, which gives that name; or anything else, which gives "?": another method called
+        on it or named (a pointer), a computed name written to, and `env` used as a value (given to a variable, a
+        closure's delegate, a method, a list, a ternary, returned), which the checker does not follow. So are a call
+        or pointer whose name is computed, `invokeMethod`, a statement the parser could not read that names `env`
+        near it, and the same uses in the text the parser keeps no node for (`_ENV_TEXT_RISK`)."""
+        import time as _time
+        from obaaf.checker.jenkins.parser import parse as parse_groovy
+        tree = self.p.tree
+        if tree is None:
+            return []
+        from obaaf.checker.jenkins.lexer import translate_unicode_escapes
+        lines = translate_unicode_escapes(self.p.source or "").split("\n")
+        writes = []
+        # Receivers that can be the script itself: `this` and the names Groovy gives a closure's owners, variables the
+        # file gives one of them anywhere, and every parameter of a method or closure (a caller may pass `this`).
+        script_names = {"this", "script", "steps", "binding", "owner", "delegate", "thisObject"} | self.p.script_vars
+        parents: dict = {}
+        entries = []               # (node, the line to report, the interpolation's text or None)
+        roots = [(tree, None, None)]
+        seen_exprs: set = set()
+        while roots and len(entries) < 2_000_000:
+            root, outer, own = roots.pop()
+            stack = [root]
+            while stack and len(entries) < 2_000_000:
+                n = stack.pop()
+                if n is None:
+                    continue
+                entries.append((n, outer or getattr(n, "line", 0), own))
+                for c in children(n):
+                    if c is not None:
+                        parents[id(c)] = n
+                        stack.append(c)
+                if isinstance(n, Str) and n.interpolated:
+                    here = outer or getattr(n, "line", 0)
+                    for text in n.exprs:
+                        if text in seen_exprs or not re.search(r"\benv\b|[(&\"'?]|this|script|steps|binding", text):
+                            continue
+                        seen_exprs.add(text)
+                        try:
+                            sub = parse_groovy(text.strip().removeprefix("->"), deadline=_time.monotonic() + 1.0)
+                        except Exception:              # noqa: BLE001 - a text the parser refuses is not read
+                            sub = None
+                        if sub is None or sub.error or sub.tree is None:
+                            if re.search(r"\benv\b", text):
+                                writes.append(("?", here))
+                        else:
+                            roots.append((sub.tree, here, text))
+
+        # A method's or closure's parameter, and `it`, may be the script, or anything else (a map with an `env` key):
+        # their `env` counts only where it is written to or given a method that may set a variable.
+        param_names = {"it"}
+        for n, _line, _own in entries:
+            if isinstance(n, MethodDef):
+                param_names.update(p for p in n.params if isinstance(p, str))
+            elif isinstance(n, (Closure, Block)) and getattr(n, "params", None):
+                param_names.update(p for p in n.params if isinstance(p, str))
+        def scriptish(n) -> str | None:
+            """"strong" when `n` can be the script by its name (a name in `script_names`, a chain of `owner`,
+            `delegate` or `thisObject` after one, `getOwner()` and its kin on anything), "weak" when it is a
+            parameter or `it` (or such a chain after one), None otherwise."""
+            if n is None:
+                return "strong"
+            if isinstance(n, Call):
+                callee = n.callee
+                name = callee.name if isinstance(callee, Prop) else (path_of(callee) or "")
+                return "strong" if name in ("getOwner", "getDelegate", "getThisObject") else None
+            path = path_of(n)
+            if path is None:
+                if isinstance(n, Prop) and n.name in ("owner", "delegate", "thisObject"):
+                    return scriptish(n.target)
+                return None
+            first, *rest = path.split(".")
+            if not all(part in ("owner", "delegate", "thisObject") for part in rest):
+                return None
+            return "strong" if first in script_names else "weak" if first in param_names else None
+
+        weak_env: set = set()
+
+        def env_ref(n, writing: bool = False) -> str | None:
+            """"strong" when `n` is, or may be, the build's `env`; "weak" when it may be, through a parameter or `it`
+            (`it.env`), so that only a write or a method that may set a variable counts; None otherwise. A property
+            named `env` of a receiver that cannot be the script (`buildInfo.env`, `config.env`) counts only where it is
+            written to."""
+            if isinstance(n, Name):
+                return "strong" if n.name == "env" else "weak" if n.name in weak_env else None
+            if isinstance(n, Prop):
+                if n.name == "env":
+                    return "strong" if writing else scriptish(n.target)
+                return scriptish(n.target) if "${" in n.name else None
+            if isinstance(n, Call) and (n.callee.name if isinstance(n.callee, Prop) else (path_of(n.callee) or "")) in (
+                    "getProperty", "getAt"):
+                key = literal(n.args[0]) if n.args else None
+                return "strong" if key is None or key == "env" else None
+            if isinstance(n, Index):
+                level = scriptish(n.target)
+                key = literal(n.index)
+                return level if level and (key is None or key == "env") else None
+            return None
+
+        # `this.with { it.env ... }`, `identity { s -> s.env ... }`: the closure's `it` or parameter is the script. The
+        # names are not scoped to that closure, so `it` then counts as the script everywhere in the file.
+        for n, _line, _own in entries:
+            if not isinstance(n, Call):
+                continue
+            callee = n.callee
+            name = callee.name if isinstance(callee, Prop) else (path_of(callee) or "")
+            if name in ("with", "identity", "tap") and (not isinstance(callee, Prop) or scriptish(callee.target)
+                                                        == "strong"):
+                bodies = [n.closure] + [a for a in n.args if isinstance(a, Closure)]
+                for body in bodies:
+                    params = getattr(body, "params", None) or getattr(getattr(body, "body", None), "params", None)
+                    script_names.update(p for p in (params or ["it"]) if isinstance(p, str))
+                    script_names.add("it")
+        for _round in range(4):
+            before = len(script_names) + len(param_names) + len(weak_env)
+            for n, _line, _own in entries:
+                value = n.value if isinstance(n, (Decl, Assign)) else None
+                name = n.name if isinstance(n, Decl) else (n.target.name if isinstance(n, Assign) and isinstance(
+                    n.target, Name) else None)
+                if not name or value is None or name in script_names:
+                    continue
+                level = scriptish(value)
+                if level == "strong" or any(isinstance(m, Name) and m.name in ("this", "owner", "delegate", "thisObject")
+                                            for m in find_nodes(value, lambda _m: True, limit=2_000)):
+                    script_names.add(name)            # def s = this, def s = c ? this : null
+                elif level == "weak":
+                    param_names.add(name)             # def t = s, with s a parameter
+                elif env_ref(value) == "weak":
+                    weak_env.add(name)                # def e = s.env, with s a parameter: a write through e counts
+            if len(script_names) + len(param_names) + len(weak_env) == before:
+                break
+
+        postfix_lines: dict = {}
+
+        def postfix(line: int, own) -> bool:
+            key = own if own is not None else line
+            if key not in postfix_lines:
+                text = own if own is not None else (lines[line - 1] if 0 < line <= len(lines) else "")
+                postfix_lines[key] = bool(self._ENV_POSTFIX.search(text))
+            return postfix_lines[key]
+
+        opaque_seen: dict = {}
+
+        def opaque_near_env(line: int, own) -> bool:
+            key = own if own is not None else line
+            if key not in opaque_seen:
+                text = own if own is not None else text_of(line, line + 10, None)
+                opaque_seen[key] = bool(re.search(r"\benv\b|getProperty|getAt", text))
+            return opaque_seen[key]
+
+        def label_end(cases: list, k: int, line: int) -> int:
+            """The last line a case label can be on: the line of the case's first statement, or of the next case, or
+            ten lines on."""
+            case = cases[k]
+            start = getattr(case, "line", line)
+            stmts = getattr(case, "stmts", None)
+            if stmts:
+                return max(getattr(stmts[0], "line", start), start)
+            if k + 1 < len(cases):
+                return max(getattr(cases[k + 1], "line", start), start)
+            return start + 10
+
+        def risky_text(text: str) -> bool:
+            return bool(self._ENV_TEXT_RISK.search(text))
+
+        def text_of(first: int, last: int, own) -> str:
+            return own if own is not None else "\n".join(lines[max(first - 1, 0):max(last, first)])
+
+        for n, line, own in entries:
+            parent = parents.get(id(n))
+            above_parent = parents.get(id(parent)) if parent is not None else None
+            written = isinstance(parent, (Prop, Index)) and parent.target is n and (
+                (isinstance(above_parent, Assign) and above_parent.target is parent) or (
+                    isinstance(above_parent, Call) and above_parent.callee is parent and isinstance(parent, Prop)
+                    and parent.name in self._ENV_SETTERS))
+            level = env_ref(n, writing=written)
+            if level:
+                if isinstance(parent, (Prop, Index)) and parent.target is n:
+                    use = parent
+                    above = parents.get(id(use))
+                    name = (use.name if isinstance(use, Prop) else literal(use.index)) or "?"
+                    plain = isinstance(name, str) and bool(self._IDENTIFIER.fullmatch(name))
+                    if isinstance(above, Assign) and above.target is use:
+                        writes.append((name if plain else "?", line))
+                    elif isinstance(above, Unary) and above.op in ("++", "--"):
+                        writes.append(("?", line))
+                    elif isinstance(above, Call) and above.callee is use and isinstance(use, Prop):
+                        if use.name in self._ENV_SETTERS:
+                            key = literal(above.args[0]) if len(above.args) >= 2 else None
+                            writes.append((key if key and self._IDENTIFIER.fullmatch(key) else "?", line))
+                        elif use.name not in self._ENV_READS and (level == "strong" or use.name in self._ENV_MUTATORS):
+                            writes.append(("?", line))
+                    elif isinstance(use, Prop) and use.name in self._ENV_MUTATORS:
+                        writes.append(("?", line))     # env.&setProperty, env.metaClass
+                    elif postfix(line, own):
+                        writes.append(("?", line))     # env.PATH++: the parser keeps no node for a postfix operator
+                elif level == "strong":
+                    writes.append(("?", line))         # env as a value: an alias, a delegate, an argument, a result
+            elif isinstance(n, Call):
+                callee = n.callee
+                if (isinstance(callee, Str) and callee.interpolated) or (isinstance(callee, Prop) and "${" in callee.name
+                                                                          and not env_ref(callee)):
+                    writes.append(("?", line))         # "$m"(...), x."$m"(...): a method whose name is computed
+                elif (path_of(callee) or "").rsplit(".", 1)[-1] == "invokeMethod":
+                    writes.append(("?", line))
+            elif isinstance(n, Prop) and n.name in ("getProperty", "getAt", "setProperty", "invokeMethod") and not (
+                    isinstance(parent, Call) and parent.callee is n):
+                writes.append(("?", line))             # this.&getProperty: a pointer to a method that reaches env
+            elif isinstance(n, Opaque) and line and opaque_near_env(line, own):
+                # (env.PATH, env.X) = [...], foo(env.PATH = 'x'): a statement the parser could not read, from its first
+                # line and the ten after it, which may hold the rest of it
+                writes.append(("?", line))
+            elif isinstance(n, (Loop, MethodDef)) and line and risky_text(
+                    text_of(line, getattr(n.body, "line", line), own)):
+                writes.append(("?", line))             # a loop's header, a method's parameter defaults
+            elif isinstance(n, Switch) and line and any(
+                    risky_text(text_of(getattr(case, "line", line), label_end(n.cases, k, line), own))
+                    for k, case in enumerate(n.cases)):
+                writes.append(("?", line))             # case { env.PATH = '/x'; true }: a case label
+        return writes
+
+    def _file_steering(self) -> str | None:
+        """The part of `_steered` that is the same for every step of the file, worked out once."""
+        cached = self._script_cache.get(("file-steering",))
+        if cached is not None:
+            return cached[0]
+        reason = None
+        writes = list(self.p.env_scripted) + self._tree_env_writes()
+        for name, line in sorted(writes, key=lambda w: w[1]):
+            if name == "?":
+                reason = (f"line {line} may set a variable in the build's environment whose name the checker cannot "
+                          "read, or call a method it cannot name, which may change the program the step's shell runs")
+                break
+            if steers(name.split("+", 1)[0]):
+                reason = (f"line {line} sets {name} in the build's environment, which can change the program the step's "
+                          "shell runs")
+                break
+        if reason is None and self.p.tree is not None:
+            def names_with_env(n) -> bool:
+                if isinstance(n, (Name, Prop)):
+                    return n.name == "withEnv"
+                if isinstance(n, Call) and isinstance(n.callee, Str):
+                    return n.callee.text() == "withEnv"
+                return False
+            read = self.p.with_env_read
+            found = [n for n in find_nodes(self.p.tree, names_with_env)
+                     if id(n) not in read and not (isinstance(n, Call) and id(n.callee) in read) and n.line]
+            if found:
+                reason = (f"line {min(n.line for n in found)} names withEnv in a form or place the checker does not read "
+                          "(a method pointer, a quoted name, options { withEnv(...) }, a when expression), so what it "
+                          "sets around which steps is not known")
+        self._script_cache[("file-steering",)] = (reason,)
+        return reason
 
     @staticmethod
     def _status_stops(info: Info) -> bool:
@@ -4258,6 +4587,10 @@ class JenkinsRules:
         self.applicable.add("OBAAF-JEN-011")
         called = {id(i.use.call) for i in self.infos if not i.ctx.deferred}
         checks = [(i, *r) for i in self.infos if (r := self._failure_check(i))]
+        # A check whose shell may run another program than the one it names may not stop anything (the review of #365);
+        # one whose failure the step already ignores stays a finding.
+        checks = [(i, "unread", steered) if kind == "stops" and (steered := self._steered(i)) else (i, kind, why)
+                  for i, kind, why in checks]
         for info in publishes:
             if info.ctx.post not in FAILURE_PATHS:
                 continue
@@ -4362,7 +4695,10 @@ class JenkinsRules:
         if not publishes:
             return
         self.applicable.add("OBAAF-JEN-012")
-        checks = [(i, kind) for i in self.infos if (kind := self._provenance_kind(i))]
+        # A full check whose shell may run another program than the one it names does not count (the review of #365).
+        # A provenance check only is left as it is: whatever it runs, the approvals are not checked.
+        checks = [(i, "steered" if kind == "full" and self._steered(i) else kind)
+                  for i in self.infos if (kind := self._provenance_kind(i))]
         called = {id(i.use.call) for i, _k in checks if not i.ctx.deferred}
         # A check read only where a closure or an uncalled method is written may run through a call the checker does
         # not follow (`parallel(verify: verify)`, a method pointer) or never: cannot tell for every publish. One that
@@ -4408,10 +4744,13 @@ class JenkinsRules:
             kinds = {k for k, _c in found}
             if "full" in kinds:
                 continue
-            if "unread" in kinds or loose is not None:
-                check = max((c for k, c in found if k == "unread"), key=lambda c: c.index, default=loose)
+            if "unread" in kinds or "steered" in kinds or loose is not None:
+                check, kind = max(((c, k) for k, c in found if k in ("unread", "steered")), key=lambda ck: ck[0].index,
+                                  default=(loose, "unread"))
                 where = (f"is in {check.ctx.deferred} and is not seen called"
                          if check.ctx.deferred else
+                         f"may not run the program it names: {self._steered(check)}"
+                         if kind == "steered" else
                          "is written in a form the checker does not read: Groovy puts text into the script, "
                          "returnStatus is computed, the command is named by a path or is not on a line of its own, "
                          "its arguments hold a shell expansion, a line before it is one the shell reader cannot vouch "
