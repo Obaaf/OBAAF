@@ -6,7 +6,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ### Preview missing ignore owners
 
-The full report, summary and JSON to-do list give a scoped `obaaf fix --owner OWNER` preview command for ignore entries missing their owner, after a check of the whole repository on every platform with no scan errors, a baseline in the current format and inputs inside the repository; otherwise they say which of these to settle first. Replace `OWNER` with the person or team responsible for these entries: the preview writes that owner into every ignore entry missing one, proposes removing the baseline and ignore entries that match no finding, and lists every finding you would accept. A baseline entry missing its owner still needs review by hand.
+The full report, summary and JSON to-do list give a scoped `obaaf fix --owner OWNER` preview command for ignore entries missing their owner, after a check of the whole repository on every platform with no scan errors, a baseline in the current format, and a configuration, baseline and settings snapshot inside the repository (a link from inside to a file outside is not yet caught, #369); otherwise they say which of these to settle first. Replace `OWNER` with the person or team responsible for these entries: the preview writes that owner into every ignore entry missing one, proposes removing the baseline and ignore entries that match no finding, and lists every finding you would accept. A baseline entry missing its owner still needs review by hand.
 
 ### Reviewed egress action pin
 
