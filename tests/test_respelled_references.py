@@ -119,6 +119,21 @@ class RunnerLabelTest(unittest.TestCase):
                                 if f.rule == "OBAAF-GHA-013"]
                     self.assertEqual(found.severity, "high")
 
+    def test_the_settings_audit_reads_a_padded_self_hosted_label_as_self_hosted(self):
+        """Found by the fifth review pass: the audit's own reading of a job's runner compared `self-hosted`
+        exactly, so a label resolved from `" ${{ matrix.r }}"`, or written `" self-hosted"`, was an unknown
+        runner there, and its fork-pull-request finding "cannot tell" where it was high."""
+        from obaaf.audit import workflows as audit_workflows
+        for runs_on, values in (('" ${{ matrix.r }}"', "[self-hosted]"), ('" ${{ matrix.r }}"', "[[self-hosted, linux]]"),
+                                ('" self-hosted"', None), ("self-hosted", None), ("{group: pool}", None)):
+            with self.subTest(runs_on=runs_on, values=values):
+                matrix = f"\n    strategy:\n      matrix:\n        r: {values}" if values else ""
+                text = (f"on: pull_request\njobs:\n  build:\n    runs-on: {runs_on}{matrix}\n"
+                        "    steps:\n      - run: make\n")
+                job = wf_mod.parse("b.yml", text).jobs["build"]
+                expected = "unknown" if "group" in runs_on else "self-hosted"
+                self.assertEqual(audit_workflows._runner(job), expected)
+
 
 def check_files(files):
     with TempDir() as tmp:
