@@ -1,0 +1,129 @@
+name: Validate flagship PR 364
+
+on:
+  push:
+    branches: [lead/validate-364-24b4070]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        test: [suite, comparisons]
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 24b4070738eb7216d4898ecf6a116a2b8683c32c
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Prepare the checker and Git-free temporary storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 24b4070738eb7216d4898ecf6a116a2b8683c32c
+          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Run the full acceptance suite and repository checks
+        if: matrix.test == 'suite'
+        run: |
+          set -euo pipefail
+
+          obaaf docs build --check
+          python -m unittest discover -s tests > "$RUNNER_TEMP/tests.log" 2>&1 || { tail -100 "$RUNNER_TEMP/tests.log"; exit 1; }
+          grep -E '^(Ran [0-9]+ tests|OK)' "$RUNNER_TEMP/tests.log"
+          obaaf catalog > /dev/null
+          obaaf docs build --check
+          python site/build.py --output "$RUNNER_TEMP/resource-site"
+          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
+      - name: Compare text, JSON, SARIF and summary on both repositories
+        if: matrix.test == 'comparisons'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/base-src"
+          git archive 4b963f57e96785c452150f02bca6a01db57f4638 src | tar -x -C "$RUNNER_TEMP/base-src"
+          git init -q "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout init --no-cone
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout set --no-cone '/*' '!/bugs/' '!/fresh-*/'
+          git -C "$RUNNER_TEMP/expectrail" fetch -q --filter=blob:none --depth=1 https://github.com/Expectrail/Expectrail.git de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          git -C "$RUNNER_TEMP/expectrail" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/expectrail" rev-parse HEAD)" = de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          cd "$RUNNER_TEMP"
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          candidate = Path(os.environ["GITHUB_WORKSPACE"])
+          sources = [temp / "base-src/src", candidate / "src"]
+          for path, level, expected in [(candidate, "medium", 0), (temp / "expectrail", "low", 1)]:
+              extra = ["--no-fixes"] if level == "low" else []
+              for mode in [["--format", "json"], ["--format", "text"], ["--format", "sarif"], ["--summary"]]:
+                  observations = []
+                  for src in sources:
+                      env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
+                      module = subprocess.check_output(
+                          [sys.executable, "-c", "import obaaf.cli; print(obaaf.cli.__file__)"],
+                          env=env, text=True,
+                      ).strip()
+                      assert Path(module).resolve().is_relative_to(src.resolve())
+                      argv = ["obaaf", "check", str(path), "--baseline", str(path / ".github/obaaf-baseline.json"),
+                              "--fail-on", level, *extra, *mode]
+                      run = subprocess.run(argv, env=env, capture_output=True)
+                      observations.append((run.returncode, run.stdout, run.stderr))
+                  before, after = observations
+                  assert (before[0], before[2]) == (after[0], after[2])
+                  if mode == ["--format", "json"]:
+                      left, right = map(json.loads, (before[1], after[1]))
+                      old_groups, new_groups = left.pop("todo"), right.pop("todo")
+                      assert left == right, "non-todo report data changed"
+                      old_owner = [g for g in old_groups if g["id"] == "acceptance-owner-missing"]
+                      new_owner = [g for g in new_groups if g["id"] == "acceptance-owner-missing"]
+                      assert [g for g in old_groups if g not in old_owner] == [g for g in new_groups if g not in new_owner]
+                      assert len(old_owner) == len(new_owner)
+                      assert len(new_owner) == 1 if level == "low" else True
+                      owner_actions = None
+                      if new_owner:
+                          old, new = dict(old_owner[0]), dict(new_owner[0])
+                          owner_actions = (old.pop("nextAction"), new.pop("nextAction"))
+                          old.pop("command")
+                          command = new.pop("command")
+                          assert old == new
+                          if level == "low":
+                              assert command and "--owner OWNER" in command and command in owner_actions[1]
+                              print("Expectrail missing-owner preview:", command)
+                  elif before[1] != after[1]:
+                      assert mode in (["--format", "text"], ["--summary"]) and owner_actions
+                      import re
+                      def normalize(data, action):
+                          lines = data.decode().splitlines(keepends=True)
+                          heading = next(i for i, line in enumerate(lines) if line.startswith("What to do next:"))
+                          pos = heading + 1
+                          groups = []
+                          while pos < len(lines) and re.match(r"^\d+\. ", lines[pos]):
+                              group = [re.sub(r"^\d+\. ", "", lines[pos])]
+                              pos += 1
+                              while pos < len(lines) and lines[pos].startswith("   "):
+                                  line = lines[pos]
+                                  group.append("   <owner command>\n" if line.rstrip("\n") == "   " + action else line)
+                                  pos += 1
+                              groups.append(tuple(group))
+                          return lines[:heading+1], sorted(groups), lines[pos:]
+                      assert normalize(before[1], owner_actions[0]) == normalize(after[1], owner_actions[1])
+                  assert observations[0][0] == expected, (level, mode, observations[0][0])
+                  print(f"Matched {path.name} {' '.join(mode)} exit={expected}", flush=True)
+          PY
