@@ -228,5 +228,16 @@ class EgressDraftTests(unittest.TestCase):
                 self.assertEqual((code, out), (2, ""))
                 self.assertIn("exactly one step", err)
 
+    def test_flow_job_keeps_trailing_comment_and_excludes_the_next_job(self):
+        with TempDir() as root:
+            path = self.workflow(root)
+            path.write_text("on: workflow_dispatch\njobs:\n"
+                            "  review: {runs-on: ubuntu-24.04, steps: [{run: 'claude -p review'}]} # keep me\n"
+                            "  other: {runs-on: ubuntu-24.04, steps: [{run: echo other}]}\n")
+            code, out, err = self.draft(root)
+            self.assertEqual((code, err), (0, ""))
+            self.assertTrue(out.endswith("run: 'claude -p review'}}]} # keep me\n"))
+            self.assertNotIn("echo other", out)
+
     def test_no_apply(self):
         self.assertEqual(run_cli("fix", "egress", "--job", "review", "--apply")[0], 2)

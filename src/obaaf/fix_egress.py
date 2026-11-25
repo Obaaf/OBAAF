@@ -63,6 +63,12 @@ def _job_text(text, name):
     if jobs.flow_style:
         return text[start:end]
     start -= key.start_mark.column
+    if value.flow_style:
+        # A closing brace ends the YAML node before its inline comment and newline.
+        tail = re.match(r"[ \t]*(?:#[^\r\n]*)?(?:\r?\n|\Z)", text[end:])
+        if tail:
+            end += tail.end()
+        return text[start:end]
     # Block mappings can end at the next job's key, past its leading spaces.
     if text[end - value.end_mark.column:end].isspace():
         end -= value.end_mark.column
