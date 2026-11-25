@@ -98,7 +98,7 @@ def run(args, root, options, lock, show_diff):
               f"On pull requests, read the target configuration and compare {one_line(shlex.quote(str(path)))} "
               "in both commits. Use only identical baseline entries, up to the count present in both. "
               "If either file is missing, omit --baseline. On pushes, use the pushed policy.")
-        return 0
+        return 1 if args.patch is not None else 0
     if options.baseline is not None:
         if not (root / path).is_file():
             raise ProofError("the explicitly selected baseline must exist in the repository")
@@ -107,7 +107,7 @@ def run(args, root, options, lock, show_diff):
             baseline.load(root / path)
     if original == updated:
         print(f"The generated workflow already gates at --fail-on {args.gate}.")
-        return 0
+        return 1 if args.patch is not None else 0
     options = replace(options, fail_on=args.gate, baseline=path if (root / path).exists() else None)
     edit = Edit(Path(WORKFLOW), original, updated, (
         ("jobs", "check", "steps", 2, "with", "sparse-checkout"),
@@ -123,7 +123,10 @@ def run(args, root, options, lock, show_diff):
               "is true, the workflow's runs give the checker a snapshot (on a pull request, the target "
               "commit's), so their count can differ.")
     show_diff(edit)
-    if args.apply:
+    if args.patch is not None:
+        from obaaf.fix_patch import save_patch
+        save_patch(root, args.patch, (edit,))
+    elif args.apply:
         sys.stdout.flush()
         if (root / path).is_file() != (options.baseline is not None):
             raise ProofError("the baseline appeared or disappeared since the preview; rerun to review it")
