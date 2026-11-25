@@ -149,6 +149,42 @@ jobs:
         for job in ("review", "direct"):
             self.assertTrue(lanes[f".github/workflows/script.yml#{job}"].startswith("agent ("), lanes)
 
+    def test_the_committed_copy_writes_nothing_through_a_link(self):
+        """Review of #362: the copy of the last commit wrote a link and then a file through it, so a
+        commit that lists a link `lnk` to any folder and a file `lnk/x` made a preview write there."""
+        import subprocess
+        from helpers import git, init_repo
+        init_repo(self.root)
+        self.workflow.parent.mkdir(parents=True)
+        self.workflow.with_name("a.yml").write_text("on: push\njobs:\n  review:\n    steps:\n      - run: claude -p review\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-qm", "workflow")
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        def stored(kind, data):
+            path = Path(outside.name).with_suffix(".object")
+            path.write_bytes(data)
+            try:
+                return git(self.root, "hash-object", "-w", "--literally", "-t", kind, str(path))
+            finally:
+                path.unlink()
+        def blob(data):
+            return stored("blob", data)
+        def tree(entries):
+            return stored("tree", b"".join(mode + b" " + name + b"\0" + bytes.fromhex(sha)
+                                           for mode, name, sha in entries))
+        github = git(self.root, "rev-parse", "HEAD:.github")
+        top = tree([(b"40000", b".github", github), (b"120000", b"lnk", blob(outside.name.encode())),
+                    (b"100644", b"lnk/x", blob(b"written by obaaf init\n"))])
+        commit = git(self.root, "commit-tree", top, "-p", "HEAD", "-m", "crafted")
+        git(self.root, "update-ref", "HEAD", commit)
+        self.assertIn("lnk/x", git(self.root, "ls-tree", "-r", "HEAD"))
+        status, text = self.invoke()
+        self.assertEqual(status, 0, text)
+        self.assertEqual(os.listdir(outside.name), [])
+        self.assertIn(".github/workflows/a.yml#review: claude-code", text)
+        self.assertNotIn("+  .github/workflows/a.yml#review: agent", text)
+
     def test_every_job_init_names_is_an_agent_job_when_checked(self):
         """Review of #362: the property the change rests on. Each job init lists as an agent job is
         in the agent lane when the checker runs with what init wrote, declared or not."""

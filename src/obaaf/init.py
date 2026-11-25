@@ -95,61 +95,88 @@ def _agent_jobs(prepared: list, catalog, config) -> dict:
 _COMMITTED_LIMIT = 8 * 1024 * 1024
 
 
+def _git_env() -> dict:
+    # As `repo._run_git`: no GIT_* variable from the caller. A partial clone does not fetch the blobs
+    # it lacks (git 2.44 and later read this); a missing blob is left out of the copy.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    return env
+
+
+_GIT_OPTIONS = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.hooksPath=/dev/null"]
+
+
 def _git(git: Path, root: Path, args: list, data: bytes = b"") -> bytes | None:
     """git's output for `args` at `root`, run as `repo._run_git` runs it, with `data` on its input."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     try:
-        done = subprocess.run([str(git), "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
-                               "-c", "core.hooksPath=/dev/null", *args],
-                              cwd=str(root), env=env, input=data, capture_output=True, timeout=120, check=False)
+        done = subprocess.run([str(git), *_GIT_OPTIONS, *args], cwd=str(root), env=_git_env(), input=data,
+                              capture_output=True, timeout=120, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
     return done.stdout if done.returncode == 0 else None
 
 
 def _committed_copy(git: Path, root: Path, dest: Path) -> bool:
-    """Write into `dest` the files of `root` as its last commit holds them, outside submodules: what a
-    checkout of that commit writes, before any LFS or other filter. False when git cannot say."""
+    """Write into `dest` the regular files of `root` as its last commit holds them, outside
+    submodules: what a checkout of that commit writes, before any LFS or other filter. False when git
+    cannot say.
+
+    Review of #362: no link is written, so nothing written later can pass through one out of `dest`
+    (a commit can list a link `l` and then a file `l/x`, and a case-insensitive file system reads `A`
+    and `a/x` as one folder). A job the checker finds only through a link is then declared. Each file
+    is created new, never followed or overwritten, and must stay inside `dest`."""
     listing = _git(git, root, ["ls-tree", "-r", "-z", "HEAD"])
     if listing is None:
         return False
-    entries = []
+    files = {}
     for record in listing.split(b"\0"):
         if not record:
             continue
         meta, _, name = record.partition(b"\t")
         mode, kind, sha = meta.split(b" ")
         rel = Path(os.fsdecode(name))
-        if rel.is_absolute() or ".." in rel.parts:
+        if rel.is_absolute() or ".." in rel.parts or not rel.parts:
             return False
-        if kind == b"blob":
-            entries.append((mode, sha, rel))
-    sizes = _git(git, root, ["cat-file", "--batch-check"], b"".join(sha + b"\n" for _, sha, _ in entries))
+        if kind == b"blob" and mode in (b"100644", b"100755"):
+            files.setdefault(sha, []).append(rel)
+    sizes = _git(git, root, ["cat-file", "--batch-check"], b"".join(sha + b"\n" for sha in files))
     if sizes is None:
         return False
-    small = {line.split(b" ")[0] for line in sizes.splitlines()
-             if len(line.split(b" ")) == 3 and int(line.split(b" ")[2]) <= _COMMITTED_LIMIT}
-    wanted = sorted(small)
-    batch = _git(git, root, ["cat-file", "--batch"], b"".join(sha + b"\n" for sha in wanted))
-    if batch is None:
-        return False
-    blobs, at = {}, 0
-    while at < len(batch):
-        header_end = batch.index(b"\n", at)
-        sha, _, size = batch[at:header_end].split(b" ")
-        start = header_end + 1
-        blobs[sha] = batch[start:start + int(size)]
-        at = start + int(size) + 1
-    for mode, sha, rel in entries:
-        if sha not in blobs:
-            continue
-        target = dest / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if mode == b"120000":
-            os.symlink(os.fsdecode(blobs[sha]), target)
-        else:
-            target.write_bytes(blobs[sha])
-    return True
+    wanted = [fields[0] for fields in (line.split(b" ") for line in sizes.splitlines())
+              if len(fields) == 3 and fields[1] == b"blob" and int(fields[2]) <= _COMMITTED_LIMIT]
+    base = os.path.realpath(dest)
+    with tempfile.TemporaryFile() as request:
+        request.write(b"".join(sha + b"\n" for sha in wanted))
+        request.seek(0)
+        try:
+            process = subprocess.Popen([str(git), *_GIT_OPTIONS, "cat-file", "--batch"], cwd=str(root),
+                                       env=_git_env(), stdin=request, stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL)
+        except OSError:
+            return False
+        try:
+            for _ in wanted:
+                header = process.stdout.readline().split(b" ")
+                if len(header) != 3 or header[1] != b"blob":
+                    return False
+                content = process.stdout.read(int(header[2]))
+                process.stdout.read(1)
+                for rel in files.get(header[0], ()):
+                    target = dest / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if os.path.commonpath([base, os.path.realpath(target.parent)]) != base:
+                        return False
+                    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                    with os.fdopen(fd, "wb") as out:
+                        out.write(content)
+        finally:
+            process.stdout.close()
+            try:
+                process.wait(timeout=120)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                return False
+        return process.returncode == 0
 
 
 def _committed_agent_jobs(root: Path, catalog, config) -> tuple[set, str] | None:
