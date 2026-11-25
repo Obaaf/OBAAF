@@ -526,7 +526,8 @@ in the tag project. The tag is the name of that build's job, resolved to a commi
 The publish job writes that commit to `release-sha.txt` before copying the build's `dist/` artifacts.
 Both verification steps use `--revision-file release-sha.txt`. Set `OBAAF_REVISION` to a reviewed
 OBAAF commit that supports this option. Each step checks that the shell resolves `obaaf` to the
-executable installed from that commit in the job’s virtual environment.
+executable installed from that commit in the job’s virtual environment. The publish pipeline disables
+Declarative stage restarts. A fresh publish run must start from the tag build and collect a new approval.
 
 At the end, the verifier checks the same facts again from the controller's JSON for both builds,
 which the publish job fetches with a read-only API token:

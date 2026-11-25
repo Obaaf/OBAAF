@@ -23,6 +23,7 @@ pipeline {
   agent { label 'obaaf-release' }
   options {
     disableConcurrentBuilds()
+    disableRestartFromStage()   // Every publish run must complete both verification stages.
     skipDefaultCheckout()
     timeout(time: 3, unit: 'DAYS')
   }

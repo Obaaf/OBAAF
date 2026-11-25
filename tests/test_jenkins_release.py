@@ -356,6 +356,7 @@ class JenkinsReleaseTemplatesTest(unittest.TestCase):
 
     def test_publish_template_verifies_and_approves_before_it_uploads(self):
         text = (TEMPLATES / "obaaf-release-publish.Jenkinsfile").read_text()
+        self.assertRegex(text, r"(?m)^  options \{\n(?:    [^\n]*\n)*?    disableRestartFromStage\(\)")
         verify = text.index("--approvals publish-run.json")
         self.assertLess(text.index("submitter: 'release-managers'"), verify)
         self.assertLess(verify, text.index("./scripts/publish.sh"))
