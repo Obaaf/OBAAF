@@ -70,7 +70,11 @@ jobs:
                   if version == "v0.1":
                       assert entry["command"] is None and "Migrate the old-format baseline" in entry["nextAction"]
                       ids = [g["id"] for g in groups]
-                      assert ids.index("acceptance-old-baseline") < ids.index(entry["id"])
+                      assert "acceptance-old-baseline" not in ids
+                      check = subprocess.run(["obaaf", "fix", ".", "--config", str(config), "--baseline", str(baseline), "--owner", "@sample-team", "--fail-on", "never"], cwd=root, capture_output=True, text=True)
+                      print("Empty v0.1 baseline: migration guidance, no migration to-do; explicit owner preview exit", check.returncode)
+                      print("Explicit owner preview lists a proven acceptance:", "You are accepting risk (1 finding)" in check.stdout)
+                      assert (root / config).read_bytes() == before
               assert entry["nextAction"].endswith(entry["command"])
               args = shlex.split(entry["command"])
               assert args[:2] == ["obaaf", "fix"] and args.count("OWNER") == 1
