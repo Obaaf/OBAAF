@@ -210,7 +210,9 @@ def _runner(job: wf_mod.Job) -> str:
     kind = job.runner_kind
     if kind == "self-hosted":
         sets = job.runner_label_sets() or [job.runs_on]
-        if not any(label.lower() == "self-hosted" for labels in sets for label in labels):
+        # Space round a label is trimmed here (flagship slice 2d.15, its fifth review pass): a label resolved from
+        # `" ${{ matrix.r }}"` keeps the space, and `" self-hosted"` is a self-hosted runner, which fails closed.
+        if not any(label.strip().lower() == "self-hosted" for labels in sets for label in labels):
             return "unknown"
     return kind
 

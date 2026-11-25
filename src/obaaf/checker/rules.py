@@ -3404,7 +3404,8 @@ class WorkflowRules:
         sets = job.runner_label_sets()
         if job.raw.get("container") is not None:
             unsure.append("the job runs in a container, where the action has not been tried")
-        if not sets or any(len(s) != 1 or s[0].strip().lower() != "ubuntu-24.04" for s in sets):
+        # Compared as OBAAF-GHA-013's hosted list compares it: any letter case, no space trimmed (slice 2d.15, #148).
+        if not sets or any(len(s) != 1 or s[0].lower() != "ubuntu-24.04" for s in sets):
             unsure.append(f"the job runs on {one_line(', '.join(job.runs_on) or 'labels the checker cannot read', 80)}; "
                           "the action was tested only on GitHub-hosted ubuntu-24.04 runners")
         # Where the agent is.
@@ -3999,7 +4000,8 @@ class WorkflowRules:
         sets = job.runner_label_sets()
         if job.raw.get("container") is not None:
             unsure.append("the job runs in a container, where the action and its API proxy have not been tried")
-        if not sets or any(len(s) != 1 or s[0].strip().lower() != "ubuntu-24.04" for s in sets):
+        # Compared as OBAAF-GHA-013's hosted list compares it: any letter case, no space trimmed (slice 2d.15, #148).
+        if not sets or any(len(s) != 1 or s[0].lower() != "ubuntu-24.04" for s in sets):
             unsure.append(f"the job runs on {one_line(', '.join(job.runs_on) or 'labels the checker cannot read', 80)}; "
                           "the action and its API proxy were tested only on GitHub-hosted ubuntu-24.04 runners")
         # The step that uses the action holds the key in its own process, outside the sandbox, and the
@@ -4614,7 +4616,9 @@ class WorkflowRules:
             if not sets:
                 return None
             for labels in sets:
-                names = [str(label).strip().lower() for label in labels]
+                # No space trimmed: a label written with space round it is one GitHub-hosted runner the
+                # checker cannot name, as OBAAF-GHA-013 reads it (flagship slice 2d.15, #148).
+                names = [str(label).lower() for label in labels]
                 if any("windows" in name for name in names):
                     return None
                 if not (all(is_hosted_label(name) for name in names)
@@ -5736,7 +5740,7 @@ class WorkflowRules:
         if perms is None or perms.level("id-token") != "write":
             return False
         sets = job.runner_label_sets()
-        if not sets or not all(labels and all(is_hosted_label(str(label).strip()) for label in labels)
+        if not sets or not all(labels and all(is_hosted_label(str(label)) for label in labels)   # untrimmed (#148)
                                for labels in sets) or job.raw.get("container") is not None \
                 or job.raw.get("services") is not None:
             return False        # a container or a service is another image, which can change npm (third review)

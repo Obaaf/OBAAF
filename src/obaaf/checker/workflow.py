@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import shlex
+import unicodedata
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -96,6 +97,93 @@ def action_name(uses: str) -> str:
                 parts.append(part)
         action = "/".join(parts)
     return action
+
+
+# An owner's name on GitHub (ASCII letters, digits, `-`, and `_` for managed users) and a repository's (and
+# `.`), as the checker reads them (flagship slice 2d.15). `.` and `..` are read by `action_name` and
+# `leaves_repository`, as before.
+_OWNER_RE = re.compile(r"(?:[A-Za-z0-9_-]+|\.\.?)\Z")
+_REPO_RE = re.compile(r"(?:[A-Za-z0-9._-]*[A-Za-z0-9_-]|\.\.?)\Z")
+
+
+def respelled_reference(uses) -> str | None:
+    """Why GitHub may take a `uses:` for another action or workflow than the checker reads it as, or None
+    (flagship slice 2d.15, issue #245). The checker reads another repository's `owner/repo[/path]` as
+    written, split on `/`, in any letter case (`action_name`), so `openai//codex-action`,
+    `/openai/codex-action` and `openai\\codex-action` named no agent action and the job got no agent
+    rule. Whether GitHub refuses such a value or runs the action without the extra characters (the runner
+    may split on `/` and `\\` and drop empty parts) is not established, and neither is whether it trims
+    space round the value or a part, decodes `%2F` or drops `.git`. So these are values the checker
+    cannot place: space or a line break at the start of the value, or at the end of a local path (a folder's
+    name may end in space; after another repository's reference or an image it is read past, since the name
+    the checker matches is the same whether GitHub trims it or not); and in another repository's reference,
+    before the first `@`, a backslash, a `/` at its start or end, two `/` together, an owner or repository
+    name with a character GitHub's names do not have (anything but ASCII letters, digits, `-`, `_` and `.`)
+    or ending `.git`, and a part of the path with space at its start or end or a control or format
+    character in it. Space inside a part of the path (`owner/repo/my action`) is read as written. A local
+    `./`, `$/` or `.\\` path and a `docker://` image are not read here beyond space at either end."""
+    if not isinstance(uses, str) or not uses:
+        return None         # an empty `uses:` names nothing, and GitHub refuses it
+    if uses != uses.lstrip():
+        return "space or a line break at its start"
+    local = is_local_reference(uses) or uses.startswith(".\\")
+    if uses != uses.rstrip():
+        if local:
+            return "space or a line break at its end, which a folder's name may hold"
+        if "@" not in uses and not uses.lower().startswith("docker://"):
+            # With no `@ref`, the space is in the name the checker matches (found by the review's seventh pass).
+            return "space or a line break at its end, in the name the checker matches"
+        # Space after another repository's reference or an image leaves the name the checker matches as it
+        # is, and GitHub either trims it or refuses the value. A block scalar's last line break is one
+        # (zizmor's test data, `unpinned-uses/issue-1543-repro.yml`, which the parity test reads).
+        uses = uses.rstrip()
+    if local or uses.lower().startswith("docker://"):
+        return None
+    name = uses.split("@", 1)[0]
+    if "\\" in name:
+        return "a backslash in the name before its @"
+    if name.startswith("/"):
+        return "a / at its start"
+    if "//" in name:
+        return "two / together in the name before its @"
+    if name.endswith("/"):
+        return "a / at its end, before its @"
+    parts = name.split("/")
+    if not _OWNER_RE.match(parts[0]) or (len(parts) > 1 and not _REPO_RE.match(parts[1])):
+        return ("a character in its owner or repository name that GitHub's names do not have (an owner's "
+                "holds only ASCII letters, digits, '-' and '_', a repository's also '.', not at its end)")
+    if len(parts) > 1 and parts[1].lower().endswith(".git"):
+        return "'.git' at the end of its repository name"
+    for part in parts[2:]:
+        if part != part.strip():
+            return "space at the start or end of a part of its path"
+        if any(unicodedata.category(char)[0] == "C" or unicodedata.category(char) in ("Zl", "Zp") for char in part):
+            return "a line break, control or format character in its path"
+    return None
+
+
+def respelled_problem(uses, what: str | None) -> str | None:
+    """The problem a respelled `uses:` (`respelled_reference`) is, after the place that names its step or
+    job: what was written, why, and what GitHub may run instead (flagship slice 2d.15). With `what`, it
+    ends by saying the checker cannot tell which `what`; without, the caller says what follows."""
+    why = respelled_reference(uses)
+    if why is None:
+        return None
+    text = (f"has uses written as '{one_line(uses, 120)}', with {why}. GitHub may refuse it or read it as "
+            f"'{one_line(reference_as_runner_may_read(uses), 120)}'")
+    return f"{text}, so the checker cannot tell which {what}" if what else text
+
+
+def reference_as_runner_may_read(uses: str) -> str:
+    """What a respelled `uses:` would name if GitHub split it on `/` and `\\`, dropped the empty parts and
+    the space round each, as the checker shows it beside the error (flagship slice 2d.15). A local path or
+    an image is shown without the space round it. Shown only; nothing is matched against it."""
+    text = uses.strip()
+    if is_local_reference(text) or text.startswith(".\\") or text.lower().startswith("docker://"):
+        return text
+    name, at, ref = text.partition("@")
+    parts = [part.strip() for part in re.split(r"[/\\]", name)]
+    return "/".join(part for part in parts if part) + (at + ref.strip() if at else "")
 
 
 def names_action(action: str, prefix: str) -> bool:
@@ -2275,7 +2363,20 @@ class Job:
             return [labels] if labels else None
         if len(labels) != 1:
             return None
-        text = labels[0].strip()
+        text = labels[0]
+        stripped = text.strip()
+        sets = self._expression_label_sets(stripped)
+        if sets is None or stripped == text:
+            return sets
+        # GitHub keeps text round an expression, so `" ${{ matrix.os }}"` gives `" ubuntu-24.04"`, a label with
+        # space round it, which is not the hosted runner, while `" self-hosted"` is still a self-hosted one
+        # (flagship slice 2d.15, #148, from its third and fourth review passes). A list value put into text
+        # this way is not established, so each of its labels keeps the space.
+        left, right = text[:len(text) - len(text.lstrip())], text[len(text.rstrip()):]
+        return [[left + label + right for label in labels_of_set] for labels_of_set in sets]
+
+    def _expression_label_sets(self, text: str) -> list[list[str]] | None:
+        """`runner_label_sets` for the one label `text`, an expression with no space round it."""
         if not (text.startswith(expr_mod.OPEN) and text.endswith("}}")):
             return None
         found = expr_mod.bodies(text)
@@ -2376,24 +2477,37 @@ class Job:
         `pull_request.head.repo`; on any other event the form picks the second value."""
         if self.runner_label_sets() is not None or self.self_hosted or len(self.runs_on) != 1:
             return False
-        text = self.runs_on[0].strip()
+        text = self.runs_on[0]          # not trimmed: space round the expression is part of the label (#148)
         found = expr_mod.bodies(text)
         if len(found) != 1 or text != expr_mod.OPEN + found[0] + "}}":
             return False
-        body = re.sub(r"\s+", "", found[0].replace('"', "'"))
-        head = r"github\.event\.pull_request\.head\.repo"
-        hosted = r"'([a-z0-9.-]+)'"
-        value = r"(?:'[^']*'|[a-z0-9_.()\[\]',-]+)"
-        forms = [
-            rf"(?:{head}\.full_name==github\.repository|github\.repository=={head}\.full_name)&&{value}\|\|{hosted}",
-            rf"(?:{head}\.full_name!=github\.repository|github\.repository!={head}\.full_name)&&{hosted}\|\|{value}",
-        ]
-        lowered = body.lower()
-        for form in forms:
-            match = re.fullmatch(form, lowered)
-            if match and is_hosted_label(match.group(1)) and "'" not in body.split("&&")[0]:
-                return True
-        return False
+        # Read from the expression's tokens (flagship slice 2d.15, #148, from its review): the hosted label is
+        # one string, compared exactly, in any letter case, with no space taken out of it. Before, space was
+        # taken out of the whole expression and `"` read as `'`, so `'ubuntu-latest '`, or a `"` inside a
+        # string before it, made the selector informational.
+        if found[0].count("'") % 2:
+            return False        # a string with no closing quote, which GitHub does not read
+        toks = [(kind, value.lower() if kind == "id" else value) for kind, value in expr_mod.tokens(found[0])]
+        ands = [i for i in range(len(toks) - 1) if toks[i] == toks[i + 1] == ("op", "&")]
+        ors = [i for i in range(len(toks) - 1) if toks[i] == toks[i + 1] == ("op", "|")]
+        if len(ands) != 1 or len(ors) != 1 or not ands[0] < ors[0]:
+            return False
+        test, first, second = toks[:ands[0]], toks[ands[0] + 2:ors[0]], toks[ors[0] + 2:]
+        head = [("id", "github"), ("op", "."), ("id", "event"), ("op", "."), ("id", "pull_request"), ("op", "."),
+                ("id", "head"), ("op", "."), ("id", "repo"), ("op", "."), ("id", "full_name")]
+        repository = [("id", "github"), ("op", "."), ("id", "repository")]
+        equal, unequal = [("op", "="), ("op", "=")], [("op", "!"), ("op", "=")]
+        if test in (head + equal + repository, repository + equal + head):
+            hosted, other = second, first
+        elif test in (head + unequal + repository, repository + unequal + head):
+            hosted, other = first, second
+        else:
+            return False
+        # The other value is a string or a plain expression (`inputs.runner`, `fromJSON('[...]')`).
+        plain_ops = {".", "(", ")", "[", "]", ","}
+        if not other or any(kind == "op" and value not in plain_ops for kind, value in other):
+            return False
+        return len(hosted) == 1 and hosted[0][0] == "str" and is_hosted_label(hosted[0][1])
 
     @property
     def selector(self) -> str:
@@ -3242,6 +3356,9 @@ def parse(path: str, text: str) -> Workflow:
         if uses is not None and not isinstance(uses, str):
             workflow.problems.append(f"job '{one_line(shown_id, 60)}' has uses written as {shown_value(uses)}, which is "
                                      "not text, so the checker cannot tell which workflow it calls")
+        problem = respelled_problem(uses, "workflow it calls")
+        if problem:
+            workflow.problems.append(f"job '{one_line(shown_id, 60)}' {problem}")
         job = Job(id=shown_id, raw=job_raw, line=getattr(job_raw, "line", 0) or jobs.line_of(job_id), workflow=workflow)
         steps = job_raw.get("steps")
         if isinstance(steps, list):
@@ -3291,6 +3408,9 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
             # a number of thousands of digits ended the run with a traceback before).
             workflow.problems.append(f"job '{job.id}', step {number} has uses written as {shown_value(uses)}, which "
                                      "is not text, so the checker cannot tell which action it runs")
+        problem = respelled_problem(uses, "action it runs")
+        if problem:
+            workflow.problems.append(f"job '{job.id}', step {number} {problem}")
     for number, step_raw in enumerate(steps, start=1):
         if not isinstance(step_raw, dict):
             workflow.problems.append(f"job '{job.id}', step {number} is not a mapping, so the checker cannot "
@@ -3303,6 +3423,17 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
             if not isinstance(inner, list):
                 workflow.problems.append(f"job '{job.id}', step {number}: 'parallel' is not a list of steps")
                 continue
+            if {"run", "uses"} & set(step_raw):
+                # Which of the two GitHub runs is not established, and the outer one was never read (found by
+                # the review of flagship slice 2d.15).
+                workflow.problems.append(f"job '{job.id}', step {number} has 'parallel' and also 'run' or 'uses', "
+                                         "so the checker cannot tell what the step runs")
+            if any(isinstance(sub, dict) and "parallel" in sub for sub in inner):
+                workflow.problems.append(f"job '{job.id}', step {number} has a 'parallel' group inside a "
+                                         "'parallel' group, whose steps the checker does not read")
+            if any(not isinstance(sub, dict) for sub in inner):
+                workflow.problems.append(f"job '{job.id}', step {number} has an entry under 'parallel' that is not "
+                                         "a mapping, so the checker cannot check what it does")
             for sub in inner:
                 if isinstance(sub, dict):
                     inputs_checked(sub, number)
