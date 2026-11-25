@@ -1,0 +1,45 @@
+name: Validate pending flagship merge trees
+on:
+  push:
+    branches: [lead/verify-merge-order-1a5715d-23653d3]
+permissions:
+  contents: read
+jobs:
+  trees:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 1a5715d413215a2d0e983daef6def8f9aea76303
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check each pending merge on its real base and in dispatch order
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 1a5715d413215a2d0e983daef6def8f9aea76303
+          git config user.name 'OBAAF validation'
+          git config user.email 'validation@users.noreply.github.com'
+          merge_pending() {
+            while read -r pr sha; do
+              tree=$(git merge-tree --write-tree "$1" "$sha")
+              echo "PR $pr directly on $1: $tree"
+              git merge --no-edit --no-ff "$sha"
+              echo "Through PR $pr in dispatch order: $(git rev-parse HEAD^{tree})"
+            done <<'HEADS'
+          365 23653d374326821de9b9572d78fb14f014299074
+          367 60ba958709925ccd24c5bd23fa62b9fce34bc43c
+          366 7d8478ec2d1ef22a49ec52457d091a4a4d0473ae
+          368 d9e643f7e4cf7c284fd6c1e568c696de82d5ed92
+          HEADS
+          }
+          git checkout --detach 80afb41182a61cfa83432ec16ffb2b6f892c8c5d
+          merge_pending 80afb41182a61cfa83432ec16ffb2b6f892c8c5d
+          reviewed=$(git rev-parse HEAD^{tree})
+          git checkout --detach 1a5715d413215a2d0e983daef6def8f9aea76303
+          merge_pending 1a5715d413215a2d0e983daef6def8f9aea76303
+          handover=$(git rev-parse HEAD^{tree})
+          test "$(git diff --name-only "$reviewed" "$handover")" = docs/flagship.md
+          test "$(git rev-parse "$handover:docs/flagship.md")" = "$(git rev-parse 1a5715d413215a2d0e983daef6def8f9aea76303:docs/flagship.md)"
+          echo "reviewed tree $reviewed; with the plan handover $handover; only docs/flagship.md differs"
