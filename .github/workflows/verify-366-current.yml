@@ -8,89 +8,71 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  packaged-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        test: [suite, comparisons]
+    timeout-minutes: 12
     steps:
-      - name: Check out the candidate commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 73ce746b4728a6b5f5404883397e0f801f06b2f3
-          fetch-depth: 0
+          ref: e186458064a30c5413d79bb314fc4c13ea101c84
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
-          python-version: '3.10'
-      - name: Prepare the checker and Git-free temporary storage
-        shell: bash
+          python-version: '3.13'
+      - name: Install the candidate wheel built from its source distribution
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 73ce746b4728a6b5f5404883397e0f801f06b2f3
-          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit e186458064a30c5413d79bb314fc4c13ea101c84
-          echo "Integrated review tree $(git rev-parse HEAD^{tree})"
-          git diff --check 73ce746b4728a6b5f5404883397e0f801f06b2f3 HEAD
-          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
-          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
-          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
-          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
-      - name: Run the full acceptance suite and repository checks
-        if: matrix.test == 'suite'
+          work="$(mktemp -d "$RUNNER_TEMP/packaged-reports.XXXXXX")"
+          test "$(git rev-parse HEAD)" = e186458064a30c5413d79bb314fc4c13ea101c84
+          if git -C "$work" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          export TMPDIR="$work"
+          echo "TMPDIR=$work" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt setuptools
+          python -c 'from setuptools.build_meta import build_sdist; import sys; build_sdist(sys.argv[1])' "$work"
+          python -m pip wheel --no-deps --no-build-isolation --wheel-dir "$work" "$work"/obaaf-*.tar.gz
+          python -m venv "$work/venv"
+          "$work/venv/bin/python" -m pip install --constraint actions/setup-obaaf/constraints.txt "$work"/obaaf-*.whl
+      - name: Read the two producer verdicts with the shipped catalogue
         run: |
           set -euo pipefail
-
-          obaaf docs build --check
-          python -m unittest discover -s tests > "$RUNNER_TEMP/tests.log" 2>&1 || { tail -100 "$RUNNER_TEMP/tests.log"; exit 1; }
-          grep -E '^(Ran [0-9]+ tests|OK)' "$RUNNER_TEMP/tests.log"
-          obaaf catalog > /dev/null
-          obaaf docs build --check
-          python site/build.py --output "$RUNNER_TEMP/resource-site"
-          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
-      - name: Compare text, JSON, SARIF and summary on both repositories
-        if: matrix.test == 'comparisons'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir "$RUNNER_TEMP/base-src"
-          git archive e186458064a30c5413d79bb314fc4c13ea101c84 src | tar -x -C "$RUNNER_TEMP/base-src"
-          git init -q "$RUNNER_TEMP/expectrail"
-          git -C "$RUNNER_TEMP/expectrail" sparse-checkout init --no-cone
-          git -C "$RUNNER_TEMP/expectrail" sparse-checkout set --no-cone '/*' '!/bugs/' '!/fresh-*/'
-          git -C "$RUNNER_TEMP/expectrail" fetch -q --filter=blob:none --depth=1 https://github.com/Expectrail/Expectrail.git de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
-          git -C "$RUNNER_TEMP/expectrail" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
-          test "$(git -C "$RUNNER_TEMP/expectrail" rev-parse HEAD)" = de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
-          cd "$RUNNER_TEMP"
-          python - <<'PY'
+          cd "$TMPDIR"
+          "$TMPDIR/venv/bin/python" -I - <<'PY'
+          import json
           import os
           import subprocess
           import sys
           from pathlib import Path
 
-          temp = Path(os.environ["RUNNER_TEMP"])
-          candidate = Path(os.environ["GITHUB_WORKSPACE"])
-          sources = [temp / "base-src/src", candidate / "src"]
-          for path, level, expected in [(candidate, "medium", 0), (temp / "expectrail", "low", 1)]:
-              extra = ["--no-fixes"] if level == "low" else []
-              for mode in [["--format", "text"], ["--format", "json"], ["--format", "sarif"], ["--summary"]]:
-                  observations = []
-                  for src in sources:
-                      env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
-                      module = subprocess.check_output(
-                          [sys.executable, "-c", "import obaaf.cli; print(obaaf.cli.__file__)"],
-                          env=env, text=True,
-                      ).strip()
-                      assert Path(module).resolve().is_relative_to(src.resolve())
-                      argv = ["obaaf", "check", str(path), "--baseline", str(path / ".github/obaaf-baseline.json"),
-                              "--fail-on", level, *extra, *mode]
-                      run = subprocess.run(argv, env=env, capture_output=True)
-                      observations.append((run.returncode, run.stdout, run.stderr))
-                  before, after = observations
-                  assert (before[0], before[2]) == (after[0], after[2])
-                  assert before == after, (path.name, mode)
-                  assert observations[0][0] == expected, (level, mode, observations[0][0])
-                  print(f"Compared {path.name} {' '.join(mode)} exit={expected}", flush=True)
-          PY
+          import obaaf
+          from obaaf import checker
+          assert Path(obaaf.__file__).resolve().is_relative_to(Path(sys.prefix))
+          sys.path.insert(0, str(Path(os.environ["GITHUB_WORKSPACE"]) / "tests"))
+          from test_egress_recognised import CHECKOUT, FIREWALL, REVIEWED_PIN, keyed, workflow
+          from test_egress_artifact_producers import ROUTES, upload
 
+          cli = str(Path(sys.executable).with_name("obaaf"))
+          assert REVIEWED_PIN in checker.load().detection["egress_action_releases"]
+          for route, (runner, steps, _) in ROUTES.items():
+              if route == "action":
+                  steps = CHECKOUT + "\n" + keyed(ref=REVIEWED_PIN)
+              root = Path(os.environ["TMPDIR"]) / route
+              workflows = root / ".github/workflows"
+              workflows.mkdir(parents=True)
+              (workflows / "report.yml").write_text(workflow(steps + "\n" + upload(), runs_on=runner))
+              (root / ".github/egress-firewall.yaml").write_text(FIREWALL)
+              (root / ".github/CODEOWNERS").write_text("* @example/maintainers\n")
+              (root / "obaaf.yml").write_text("lanes:\n  .github/workflows/report.yml#agent: agent\n")
+              def check(fmt):
+                  result = subprocess.run([cli, "check", ".", "--format", fmt, "--fail-on", "never"],
+                                          cwd=root, text=True, capture_output=True, check=True)
+                  return result.stdout
+              output = json.loads(check("json"))
+              fixed = [f for f in output["fixed"] if f["rule"] == "OBAAF-GHA-020"]
+              assert len(fixed) == 1 and fixed[0]["job"] == "agent", fixed
+              control, = fixed[0]["controls"]
+              assert control["verdict"] == "verified" and "other repositories" in control["detail"], control
+              line, = [l for l in check("text").splitlines() if "fixed: OBAAF-GHA-020" in l]
+              assert control["detail"] in line, line
+              assert not any(f["rule"] == "OBAAF-GHA-027" for f in output["findings"])
+              print(route, "producer fixed; scope on the same text line and JSON control; upload alone has no consumer finding")
+          PY
