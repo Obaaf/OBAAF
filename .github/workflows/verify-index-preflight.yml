@@ -1,0 +1,59 @@
+name: Verify the egress review candidate on current flagship
+
+on:
+  push:
+    branches: [lead/validate-366-index-9b925d6]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 9b925d68e20c8faafbe9a9e55d973a9049f6d900
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Prepare the checker and Git-free temporary storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 9b925d68e20c8faafbe9a9e55d973a9049f6d900
+          echo "Integrated review tree $(git rev-parse HEAD^{tree})"
+          git diff --check 9ef9269332c66ffb38b73582e0b7f7f06810adbc HEAD
+          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          export TMPDIR="$worktemp"
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Focused tests and static matcher measurements
+        run: |
+          set -euo pipefail
+          PYTHONPATH=tests python -m unittest test_artifact_consumer_index test_egress_artifact_producers
+          PYTHONPATH=tests python - <<'PY'
+          from time import perf_counter
+          from types import SimpleNamespace
+          from unittest.mock import patch
+          from test_artifact_consumer_index import artifacts, step, workflow
+
+          wf = workflow([step("actions/upload-artifact", name="sample", path="sample.txt") for _ in range(90)])
+          sources = artifacts.uploads([wf])
+          for command, expected in [("sh result/sample.txt", 90), ("cat result/sample.txt", 0)]:
+              downloads = [step("actions/download-artifact", name="sample", path="result") for _ in range(90)]
+              records = [step(run=command) for _ in range(90)]
+              job = SimpleNamespace(id="reader", raw={}, steps=[*downloads, *records])
+              start = perf_counter()
+              with patch.object(artifacts, "_executed_paths", wraps=artifacts._executed_paths) as parse:
+                  hits = list(artifacts.consumers(wf, job, sources))
+              elapsed = perf_counter() - start
+              print(f"{command}: 90 uploads, 90 downloads, 90 candidate steps, {len(hits)} hits, {parse.call_count} parses, {elapsed:.6f}s")
+              assert len(hits) == expected and parse.call_count <= len(job.steps)
+              assert [id(hit[2]) for hit in hits] == [id(record) for record in records[:expected]]
+          PY
