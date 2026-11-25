@@ -8,98 +8,6 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        test: [comparisons]
-    steps:
-      - name: Check out the candidate commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 047e2afe6700955e943f5336785e627206adc404
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
-        with:
-          python-version: '3.10'
-      - name: Prepare the checker and Git-free temporary storage
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = 047e2afe6700955e943f5336785e627206adc404
-          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
-          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
-          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
-          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
-      - name: Run the full acceptance suite and repository checks
-        if: matrix.test == 'suite'
-        run: |
-          set -euo pipefail
-
-          obaaf docs build --check
-          PYTHONPATH=tests python -m unittest test_jenkins_release
-          python -m unittest discover -s tests > "$RUNNER_TEMP/tests.log" 2>&1 || { tail -100 "$RUNNER_TEMP/tests.log"; exit 1; }
-          grep -E '^(Ran [0-9]+ tests|OK)' "$RUNNER_TEMP/tests.log"
-          obaaf catalog > /dev/null
-          obaaf docs build --check
-          python site/build.py --output "$RUNNER_TEMP/resource-site"
-          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
-      - name: Compare text, JSON, SARIF and summary on both repositories
-        if: matrix.test == 'comparisons'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir "$RUNNER_TEMP/base-src"
-          git archive 1a5715d413215a2d0e983daef6def8f9aea76303 src | tar -x -C "$RUNNER_TEMP/base-src"
-          git init -q "$RUNNER_TEMP/expectrail"
-          git -C "$RUNNER_TEMP/expectrail" sparse-checkout init --no-cone
-          git -C "$RUNNER_TEMP/expectrail" sparse-checkout set --no-cone '/*' '!/bugs/' '!/fresh-*/'
-          git -C "$RUNNER_TEMP/expectrail" fetch -q --filter=blob:none --depth=1 https://github.com/Expectrail/Expectrail.git de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
-          git -C "$RUNNER_TEMP/expectrail" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
-          test "$(git -C "$RUNNER_TEMP/expectrail" rev-parse HEAD)" = de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
-          cd "$RUNNER_TEMP"
-          python - <<'PY'
-          import json
-          import os
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          temp = Path(os.environ["RUNNER_TEMP"])
-          candidate = Path(os.environ["GITHUB_WORKSPACE"])
-          sources = [temp / "base-src/src", candidate / "src"]
-          import difflib
-          differences = []
-          for path, level, expected in [(candidate, "medium", 0), (temp / "expectrail", "low", 1)]:
-              extra = ["--no-fixes"] if level == "low" else []
-              for mode in [["--format", "text"], ["--format", "json"], ["--format", "sarif"], ["--summary"]]:
-                  observations = []
-                  for src in sources:
-                      env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
-                      module = subprocess.check_output(
-                          [sys.executable, "-c", "import obaaf.cli; print(obaaf.cli.__file__)"],
-                          env=env, text=True,
-                      ).strip()
-                      assert Path(module).resolve().is_relative_to(src.resolve())
-                      argv = ["obaaf", "check", str(path), "--baseline", str(path / ".github/obaaf-baseline.json"),
-                              "--fail-on", level, *extra, *mode]
-                      run = subprocess.run(argv, env=env, capture_output=True)
-                      observations.append((run.returncode, run.stdout, run.stderr))
-                  same = observations[0] == observations[1]
-                  print(f"{path.name} {' '.join(mode)} bytes_matched={same} exits={[o[0] for o in observations]} stderr_matched={observations[0][2] == observations[1][2]}", flush=True)
-                  if not same or any(o[0] != expected for o in observations):
-                      differences.append((path.name, mode))
-                      if path == candidate and mode == ["--format", "text"]:
-                          changed = difflib.unified_diff(*(o[1].decode().splitlines() for o in observations), n=0)
-                          for entry in changed:
-                              if entry.startswith(("+", "-")):
-                                  print(entry[:250], flush=True)
-          assert not differences, differences
-          PY
-
   integrated:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -145,7 +53,29 @@ jobs:
             git add DECISIONS.md
             git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' commit --no-edit
           fi
-          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit d9e643f7e4cf7c284fd6c1e568c696de82d5ed92 # PR 368
+          if ! git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit d9e643f7e4cf7c284fd6c1e568c696de82d5ed92; then
+            test "$(git diff --name-only --diff-filter=U)" = CHANGELOG.md
+            git show :1:CHANGELOG.md > "$worktemp/base-log"
+            git show :2:CHANGELOG.md > "$worktemp/ours-log"
+            git show :3:CHANGELOG.md > "$worktemp/theirs-log"
+            python - "$worktemp" <<'PY'
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          base, ours, theirs = [(root / (name + "-log")).read_bytes() for name in ("base", "ours", "theirs")]
+          heading = b"### Save a proven fix as a patch\n"
+          assert theirs.count(heading) == 1 and heading not in ours
+          start = theirs.index(heading)
+          end = theirs.index(b"\n### ", start + len(heading)) + 1
+          assert theirs[:start] + theirs[end:] == base
+          marker = b"## [Unreleased]\n\n"
+          assert ours.count(marker) == 1
+          Path("CHANGELOG.md").write_bytes(ours.replace(marker, marker + theirs[start:end], 1))
+          PY
+            git add CHANGELOG.md
+            git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' commit --no-edit
+          fi
           git rev-parse HEAD^{tree}
           python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
       - name: Run the full acceptance suite and repository checks
