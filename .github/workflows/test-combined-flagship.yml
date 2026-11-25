@@ -1,0 +1,50 @@
+name: Test combined flagship candidates
+
+on:
+  push:
+    branches: [lead/check-integration-8fea80-24b407-7de1ab-60ba95-7d8478-d9e643]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 08d9c78851b896bcad129cd1522919d68e944e4f
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Prepare the checker and Git-free temporary storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 08d9c78851b896bcad129cd1522919d68e944e4f
+          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit 8fea80aa7ad457cb4a4741f64acf1a02b9d5bf46 # PR 362
+          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit 24b4070738eb7216d4898ecf6a116a2b8683c32c # PR 364
+          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit 7de1abdaf8dc6247f986e33d481a497001afe92b # PR 365
+          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit 60ba958709925ccd24c5bd23fa62b9fce34bc43c # PR 367
+          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit 7d8478ec2d1ef22a49ec52457d091a4a4d0473ae # PR 366
+          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit d9e643f7e4cf7c284fd6c1e568c696de82d5ed92 # PR 368
+          git rev-parse HEAD^{tree}
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Run the full acceptance suite and repository checks
+        run: |
+          set -euo pipefail
+
+          obaaf docs build --check
+          python -m unittest discover -s tests > "$RUNNER_TEMP/tests.log" 2>&1 || { tail -100 "$RUNNER_TEMP/tests.log"; exit 1; }
+          grep -E '^(Ran [0-9]+ tests|OK)' "$RUNNER_TEMP/tests.log"
+          obaaf catalog > /dev/null
+          obaaf docs build --check
+          python site/build.py --output "$RUNNER_TEMP/resource-site"
+          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
