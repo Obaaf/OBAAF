@@ -8,7 +8,7 @@ from obaaf.checker import artifact_consumers as artifacts
 
 
 def step(action="", run="", **inputs):
-    return SimpleNamespace(clean_action=action, with_=inputs, raw={}, run=run)
+    return SimpleNamespace(uses=action, clean_action=action, with_=inputs, raw={}, run=run)
 
 
 def workflow(steps):

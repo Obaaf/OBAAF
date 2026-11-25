@@ -49,6 +49,14 @@ def _local_path(value):
 
 def _executed_paths(step: Step, job: Job, workflow: Workflow):
     """Read direct command and interpreter file operands. A printed or copied path is data."""
+    # A workspace-local action loads one of these manifests from the literal workspace path.
+    # The self-repository ($/) syntax resolves at the commit, independently of the download.
+    if step.uses and step.uses.startswith("./"):
+        action_dir = _local_path(step.uses)
+        if action_dir is not None:
+            for manifest in ("action.yml", "action.yaml"):
+                yield posixpath.normpath(posixpath.join(action_dir, manifest))
+        return
     if not step.run:
         return
     directory = "."
@@ -81,8 +89,16 @@ def _executed_paths(step: Step, job: Job, workflow: Workflow):
         if command.startswith("./"):
             operand = command
         elif command in ("bash", "sh", "python", "python3", "node", "ruby", "pwsh") and len(words) > 1:
-            operand = words[1]
-            if operand.startswith("-"):
+            operands = iter(words[1:])
+            operand = next(operands)
+            if command in ("bash", "sh", "python", "python3"):
+                # These switches neither take a value nor change which file is run.
+                switches = r"-[eux]+" if command in ("bash", "sh") else r"-[BuE]+"
+                while re.fullmatch(switches, operand):
+                    operand = next(operands, "")
+                if operand == "--":
+                    operand = next(operands, "")
+            if not operand or operand.startswith("-"):
                 continue
         elif command in ("npm", "pnpm", "yarn") and words[1:2] in (["test"], ["run"], ["start"]):
             operand = "package.json"
