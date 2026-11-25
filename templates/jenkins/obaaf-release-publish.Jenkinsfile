@@ -11,7 +11,8 @@
 //             key service, so no step can read the private key (FR11)
 //   verify    checks the release before anyone is asked to approve it
 //   approve   waits for a named release manager
-//   publish   checks everything again, now including who approved, then uploads
+//   verify approval  checks everything again, now including who approved
+//   publish   uploads after the full verification succeeds
 //
 // Jenkins enforces the boundary, and the checks below only hold while this file is the one that
 // runs: keep this job's credentials in its folder, run it on agents that run nothing else (labels
@@ -146,9 +147,8 @@ pipeline {
               id: 'release', submitter: 'release-managers'
       }
     }
-    stage('Publish') {
+    stage('Verify approval') {
       when { not { changeRequest() } }
-      environment { OBAAF_LANE = 'release' }
       steps {
         withCredentials([usernamePassword(credentialsId: 'obaaf-jenkins-reader', usernameVariable: 'READER',
                                           passwordVariable: 'READER_TOKEN')]) {
@@ -172,6 +172,12 @@ pipeline {
               --repo-dir . --revision-file release-sha.txt
           '''
         }
+      }
+    }
+    stage('Publish') {
+      when { not { changeRequest() } }
+      environment { OBAAF_LANE = 'release' }
+      steps {
         // EDIT: your upload, with a dedicated identity that can only publish (G6.1), to a beta or
         // staging channel; a person sets the build live in the store (G6.2).
         withCredentials([usernamePassword(credentialsId: 'store-upload', usernameVariable: 'STORE_UPLOAD_USER',
