@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -582,6 +583,13 @@ def cmd_attest_approval(args) -> int:
     from obaaf.predicates import AGENT_APPROVAL
 
     try:
+        source_revision = args.source_revision
+        if args.revision_file is not None:
+            with Path(args.revision_file).open("rb") as fh:
+                raw = fh.read(67)
+            if not re.fullmatch(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})(?:\r?\n)?", raw):
+                raise ValueError(f"{args.revision_file}: expected one full lowercase Git commit ID")
+            source_revision = raw.rstrip(b"\r\n").decode("ascii")
         approvals = json.loads(Path(args.approvals).read_text(encoding="utf-8"))
         checks = json.loads(Path(args.checks).read_text(encoding="utf-8")) if args.checks else {}
         requesters = [r.strip() for value in (args.requester or []) for r in value.split(",") if r.strip()]
@@ -679,7 +687,7 @@ def cmd_verify_release(args) -> int:
         decision = release.verify_release(
             policy, [Path(a) for a in args.artifacts], gh=gh, dsse_files=[Path(p) for p in args.dsse or []],
             approvals=approvals, actors=args.actor or [], repo_dir=Path(args.repo_dir) if args.repo_dir else None,
-            git_range=args.range, source_revision=args.source_revision, pre_approval=args.pre_approval,
+            git_range=args.range, source_revision=source_revision, pre_approval=args.pre_approval,
             release_run=release_run)
     except (RecordError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1124,7 +1132,9 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--repo-dir", help="git checkout with history, to read agent records from")
     x.add_argument("--range", help="git range to check for agent commits (default: from the policy's "
                                    "agents.since to --source-revision)")
-    x.add_argument("--source-revision", help="the commit being released")
+    revision = x.add_mutually_exclusive_group()
+    revision.add_argument("--source-revision", help="the commit being released")
+    revision.add_argument("--revision-file", help="read the release commit ID from this file (for example, git rev-parse output)")
     x.add_argument("--format", choices=("text", "json"), default="text")
     x.add_argument("--output", "-o")
     x.set_defaults(func=cmd_verify_release)

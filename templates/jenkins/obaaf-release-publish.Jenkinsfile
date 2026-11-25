@@ -126,13 +126,15 @@ pipeline {
       when { not { changeRequest() } }
       steps {
         // Everything except the approvals, which do not exist yet. The approver reads this log.
-        sh '''
-          set -eu
-          export PATH="$WORKSPACE/.obaaf-venv/bin:$PATH"
-          obaaf verify release --policy .obaaf/policy.yaml --artifacts dist \
-            --dsse attestations/slsa.dsse.json --dsse attestations/build-record.dsse.json \
-            --release-run release-run.json --repo-dir . --source-revision "$(cat release-sha.txt)" --pre-approval
-        '''
+        withEnv(["PATH+OBAAF=${env.WORKSPACE}/.obaaf-venv/bin"]) {
+          sh 'test "$(command -v obaaf)" = "$WORKSPACE/.obaaf-venv/bin/obaaf"'
+          sh '''
+            set -eu
+            obaaf verify release --policy .obaaf/policy.yaml --artifacts dist \
+              --dsse attestations/slsa.dsse.json --dsse attestations/build-record.dsse.json \
+              --release-run release-run.json --repo-dir . --revision-file release-sha.txt --pre-approval
+          '''
+        }
       }
     }
     stage('Approve') {
@@ -160,14 +162,16 @@ pipeline {
         // FR6: stop here unless provenance, the build record, the approvals and every agent record verify
         // against the policy, and the artifacts came from the tag build that started this one. An
         // approval by whoever started either build does not count.
-        sh '''
-          set -eu
-          export PATH="$WORKSPACE/.obaaf-venv/bin:$PATH"
-          obaaf verify release --policy .obaaf/policy.yaml --artifacts dist \
-            --dsse attestations/slsa.dsse.json --dsse attestations/build-record.dsse.json \
-            --approvals publish-run.json --release-run release-run.json \
-            --repo-dir . --source-revision "$(cat release-sha.txt)"
-        '''
+        withEnv(["PATH+OBAAF=${env.WORKSPACE}/.obaaf-venv/bin"]) {
+          sh 'test "$(command -v obaaf)" = "$WORKSPACE/.obaaf-venv/bin/obaaf"'
+          sh '''
+            set -eu
+            obaaf verify release --policy .obaaf/policy.yaml --artifacts dist \
+              --dsse attestations/slsa.dsse.json --dsse attestations/build-record.dsse.json \
+              --approvals publish-run.json --release-run release-run.json \
+              --repo-dir . --revision-file release-sha.txt
+          '''
+        }
         // EDIT: your upload, with a dedicated identity that can only publish (G6.1), to a beta or
         // staging channel; a person sets the build live in the store (G6.2).
         withCredentials([usernamePassword(credentialsId: 'store-upload', usernameVariable: 'STORE_UPLOAD_USER',

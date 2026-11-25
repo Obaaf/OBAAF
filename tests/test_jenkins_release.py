@@ -178,12 +178,25 @@ class JenkinsReleaseLaneTest(unittest.TestCase):
         (self.tmp / "release-run.json").write_text(json.dumps(tag_build(self.rev)))
         args = ["verify", "release", "--policy", self.policy, "--artifacts", self.dist,
                 "--approvals", self.tmp / "publish-run.json", "--release-run", self.tmp / "release-run.json",
-                "--repo-dir", self.repo, "--source-revision", self.rev]
+                "--repo-dir", self.repo]
         for env in envelopes:
             args += ["--dsse", env]
-        code, out, _ = run_cli(*args)
-        self.assertEqual(code, 0, out)
-        self.assertIn("release approved by: carol", out)
+        revision_file = self.tmp / "release-sha.txt"
+        revision_file.write_text(self.rev + "\n", encoding="ascii")
+        for revision in (["--source-revision", self.rev], ["--revision-file", revision_file]):
+            code, out, err = run_cli(*args, *revision)
+            self.assertEqual(code, 0, err or out)
+            self.assertIn("release approved by: carol", out)
+        revision_file.write_text("b" * 40, encoding="ascii")
+        self.assertEqual(run_cli(*args, "--revision-file", revision_file)[0], 1)
+        for invalid in (b"", b"main\n", self.rev.encode() + b"\nextra", b"f" * 1024):
+            revision_file.write_bytes(invalid)
+            code, _, err = run_cli(*args, "--revision-file", revision_file)
+            self.assertEqual(code, 2)
+            self.assertIn("expected one full lowercase Git commit ID", err)
+        revision_file.unlink()
+        self.assertEqual(run_cli(*args, "--revision-file", revision_file)[0], 2)
+        self.assertEqual(run_cli(*args, "--revision-file", revision_file, "--source-revision", self.rev)[0], 2)
 
     def test_records_name_the_jenkins_build_and_say_it_is_self_reported(self):
         self.write_records()
@@ -335,6 +348,12 @@ class JenkinsReleaseTemplatesTest(unittest.TestCase):
             self.assertEqual([(f.rule, f.line, f.message) for f in result.active()], [], name)
             self.assertNotIn("fail", {row["status"] for row in result.coverage}, name)
 
+    def test_publish_template_has_verified_release_coverage(self):
+        result = check(TEMPLATES / "obaaf-release-publish.Jenkinsfile")
+        statuses = {row["rule"]: row["status"] for row in result.coverage}
+        for rule in ("OBAAF-JEN-010", "OBAAF-JEN-011", "OBAAF-JEN-012"):
+            self.assertEqual(statuses[rule], "pass", rule)
+
     def test_publish_template_verifies_and_approves_before_it_uploads(self):
         text = (TEMPLATES / "obaaf-release-publish.Jenkinsfile").read_text()
         verify = text.index("--approvals publish-run.json")
@@ -342,7 +361,7 @@ class JenkinsReleaseTemplatesTest(unittest.TestCase):
         self.assertLess(verify, text.index("./scripts/publish.sh"))
         self.assertIn("aws kms sign", text)
         # Pre-approval checks already tie the artifacts to the tag build.
-        self.assertIn("--release-run release-run.json --repo-dir . --source-revision", text)
+        self.assertIn("--release-run release-run.json --repo-dir . --revision-file release-sha.txt", text)
 
     def test_publish_template_ships_only_the_build_that_started_it(self):
         text = (TEMPLATES / "obaaf-release-publish.Jenkinsfile").read_text()
