@@ -48,7 +48,9 @@ class ArtifactProducerTest(unittest.TestCase):
         _, steps, _ = ROUTES["action"]
         producer = workflow(steps + "\n" + upload())
         for command, reported in (("cat result/report.txt", False), ("echo ./result/report.txt", False),
-                                  ("sh result/report.txt", True), ("sh result/unrelated.sh", False),
+                                  ("sh result/report.txt", True), ("sh -eu result/report.txt", True),
+                                  ("python -u -- result/report.txt", True), ("bash -n result/report.txt", False),
+                                  ("sh result/unrelated.sh", False),
                                   ("./elsewhere/report.txt", False)):
             with self.subTest(command=command):
                 consumer = ("  read:\n    needs: agent\n    runs-on: ubuntu-24.04\n    steps:\n"
@@ -62,6 +64,31 @@ class ArtifactProducerTest(unittest.TestCase):
                 self.assertIn("other repositories", egress(result).controls[0].detail)
                 unrelated = run_check(producer + consumer.replace("name: report", "name: another"))
                 self.assertFalse(any(f.rule == "OBAAF-GHA-027" for f in unrelated.findings))
+
+    def test_workspace_local_action_reads_the_downloaded_manifest(self):
+        _, steps, _ = ROUTES["action"]
+        for manifest in ("action.yml", "action.yaml"):
+            producer = workflow(steps + "\n" + upload().replace("report.txt", manifest))
+            for reference, reported in (("./result", True), ("./tools", False), ("$/result", False)):
+                with self.subTest(manifest=manifest, reference=reference):
+                    consumer = ("  read:\n    needs: agent\n    runs-on: ubuntu-24.04\n    steps:\n"
+                                f"      - uses: actions/download-artifact@{SHA}\n"
+                                "        with: {name: report, path: result}\n"
+                                f"      - name: Use action\n        uses: {reference}\n")
+                    checked = run_check(producer + consumer)
+                    findings = [f for f in checked.findings if f.rule == "OBAAF-GHA-027"]
+                    expected = [("read", "Use action", f"result/{manifest}")] if reported else []
+                    self.assertEqual([(f.job, f.step, f.facts["path"]) for f in findings], expected)
+
+    def test_repository_scorer_receives_downloaded_json_as_data(self):
+        _, steps, _ = ROUTES["action"]
+        producer = workflow(steps + "\n" + upload().replace("report.txt", "report.json"))
+        reader = ("  score:\n    needs: agent\n    runs-on: ubuntu-24.04\n    steps:\n"
+                  f"      - uses: actions/download-artifact@{SHA}\n"
+                  "        with: {name: report, path: result}\n"
+                  "      - run: python tools/score.py result/report.json\n")
+        checked = run_check(producer + reader)
+        self.assertFalse(any(f.rule == "OBAAF-GHA-027" for f in checked.findings))
 
     def test_build_target_in_downloaded_workspace_is_reported_on_build(self):
         for route, (runner, steps, _) in ROUTES.items():
