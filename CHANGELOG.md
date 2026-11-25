@@ -6,7 +6,7 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ### Save a proven fix as a patch
 
-`obaaf fix --patch FILE` saves a proven paperwork, checkout, pin or gate diff for review with `git apply --check FILE` and application with `git apply FILE`. The output preserves the proved bytes, including CRLF and a missing final newline. The destination must be new. Windows proofs refuse reparse points and hard-linked files.
+`obaaf fix --patch FILE` saves a proven paperwork, baseline, checkout, pin or gate edit as a Git patch, to be checked with `git apply --check FILE` and applied with `git apply FILE`. It is how to make the change on macOS and Windows, where `--apply` does not run. The patch holds the proven bytes, including CRLF and a missing final newline; Git's own line-ending and whitespace settings can still change the file it writes, and `docs/upgrading.md` says how. The destination must be new. As with `--apply`, the checked folder must be the top of the Git work tree (or outside one), and a target Git's index hides or a checkout attribute transforms is refused; a patch from a folder below the top was applied by Git to other files, or skipped, with exit 0 (review-gpt #368). `obaaf fix` previews now run on Windows, where they were refused before: the private copy is read with handles that follow no reparse point, and a reparse point or hard-linked file in the tree is refused. This repository's CI runs its tests on Linux only; the Windows reader has run only in a separate validation workflow on GitHub's hosted Windows runner (export, check and apply).
 
 ### OpenSSL's variables can make an action run unread code
 

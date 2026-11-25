@@ -125,7 +125,7 @@ def run(args, root, options, lock, show_diff):
     show_diff(edit)
     if args.patch is not None:
         from obaaf.fix_patch import save_patch
-        save_patch(args.patch, (edit,))
+        save_patch(root, args.patch, (edit,))
     elif args.apply:
         sys.stdout.flush()
         if (root / path).is_file() != (options.baseline is not None):

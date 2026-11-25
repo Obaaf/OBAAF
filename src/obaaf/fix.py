@@ -254,7 +254,7 @@ def run(args):
                     print("No proven changes to export.")
                     return 1
                 from obaaf.fix_patch import save_patch
-                save_patch(args.patch, proposal.edits)
+                save_patch(root, args.patch, proposal.edits)
             elif args.apply:
                 sys.stdout.flush()
                 if proposal.edits:
