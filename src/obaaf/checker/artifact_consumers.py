@@ -44,7 +44,7 @@ def _source_matches(workflow: Workflow, job: Job, download: Step, source: Upload
     if "run-id" in given:
         trigger = workflow.triggers.get("workflow_run")
         names = trigger.get("workflows") if isinstance(trigger, dict) else None
-        return (re.fullmatch(r"\s*\$\{\{\s*github\.event\.workflow_run\.id\s*\}\}\s*", str(given["run-id"]))
+        return (bool(given.get("github-token")) and re.fullmatch(r"\s*\$\{\{\s*github\.event\.workflow_run\.id\s*\}\}\s*", str(given["run-id"]))
                 is not None and isinstance(source.workflow_name, str)
                 and source.workflow_name in ([names] if isinstance(names, str) else names if isinstance(names, list) else []))
     return source.workflow == workflow.path and source.job != job.id
@@ -97,7 +97,7 @@ def _executed_paths(step: Step, job: Job, workflow: Workflow):
                 continue
         elif command in ("npm", "pnpm", "yarn") and words[1:2] in (["test"], ["run"], ["start"]):
             operand = "package.json"
-        elif words == ["make"]:
+        elif command == "make" and all(re.fullmatch(r"[\w.-]+", arg) and not arg.startswith("-") for arg in words[1:]):
             operand = "Makefile"
         else:
             continue
@@ -132,8 +132,10 @@ def consumers(workflow: Workflow, job: Job, sources):
                         continue
                     # At the workspace root, unrelated repository files have the same prefix.
                     # Require a visible filename match there, or an explicitly uploaded directory.
-                    if root == "." and not source.path.endswith("/"):
-                        if posixpath.basename(source.path) != member:
-                            continue
+                    workspace = re.fullmatch(r"\s*\$\{\{\s*steps\.[\w-]+\.outputs\.workspace\s*\}\}\s*", source.path)
+                    directory = source.path in (".", "./") or source.path.endswith("/") or workspace
+                    filename = posixpath.basename(source.path)
+                    if not directory and (root == "." or "." in filename) and filename != member:
+                        continue
                     yield source, download, step, path
                     break

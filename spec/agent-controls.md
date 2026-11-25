@@ -149,7 +149,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** Default-deny egress for agents.
 
-**In this repository.** Templates: `obaaf-agent-propose.yml: cache-mode none, no persisted credentials, optional egress monitor` · Checker rules: `OBAAF-GHA-006`, `OBAAF-GHA-007`, `OBAAF-GHA-011`, `OBAAF-GHA-013`, `OBAAF-GHA-020`, `OBAAF-GHA-026`, `OBAAF-JEN-002`, `OBAAF-JEN-006`, `OBAAF-JEN-007`
+**In this repository.** Templates: `obaaf-agent-propose.yml: cache-mode none, no persisted credentials, optional egress monitor` · Checker rules: `OBAAF-GHA-006`, `OBAAF-GHA-007`, `OBAAF-GHA-011`, `OBAAF-GHA-013`, `OBAAF-GHA-020`, `OBAAF-GHA-026`, `OBAAF-GHA-027`, `OBAAF-JEN-002`, `OBAAF-JEN-006`, `OBAAF-JEN-007`
 
 ### R8 Attest every agent run
 

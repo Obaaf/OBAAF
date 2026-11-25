@@ -41,7 +41,8 @@ class ArtifactProducerTest(unittest.TestCase):
         _, steps, _ = ROUTES["action"]
         producer = workflow(steps + "\n" + upload())
         for command, reported in (("cat result/report.txt", False), ("echo ./result/report.txt", False),
-                                  ("sh result/report.txt", True), ("./elsewhere/report.txt", False)):
+                                  ("sh result/report.txt", True), ("sh result/unrelated.sh", False),
+                                  ("./elsewhere/report.txt", False)):
             with self.subTest(command=command):
                 consumer = ("  read:\n    needs: agent\n    runs-on: ubuntu-24.04\n    steps:\n"
                             f"      - uses: actions/download-artifact@{SHA}\n"
@@ -54,6 +55,19 @@ class ArtifactProducerTest(unittest.TestCase):
                 self.assertIn("other repositories", egress(result).controls[0].detail)
                 unrelated = run_check(producer + consumer.replace("name: report", "name: another"))
                 self.assertFalse(any(f.rule == "OBAAF-GHA-027" for f in unrelated.findings))
+
+    def test_build_target_in_downloaded_workspace_is_reported_on_build(self):
+        for route, (runner, steps, _) in ROUTES.items():
+            with self.subTest(route=route):
+                archive = upload().replace("report.txt", "'${{ steps.agent.outputs.workspace }}'")
+                producer = workflow(steps + "\n" + archive, runs_on=runner)
+                consumer = ("  build:\n    needs: agent\n    runs-on: ubuntu-24.04\n    steps:\n"
+                            f"      - uses: actions/download-artifact@{SHA}\n"
+                            "        with: {name: report}\n      - run: make test\n")
+                checked = run_check(producer + consumer, policy=FIREWALL)
+                self.assertEqual(verdict(egress(checked)), VERIFIED)
+                found = [f for f in checked.findings if f.rule == "OBAAF-GHA-027"]
+                self.assertEqual([(f.job, f.facts["path"]) for f in found], [("build", "Makefile")])
 
     def test_triggering_run_is_matched_to_its_named_workflow(self):
         _, steps, _ = ROUTES["action"]

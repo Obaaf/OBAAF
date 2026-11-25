@@ -232,7 +232,7 @@ requirements:
     github_gap: "GitHub's native egress firewall is a technical preview, on Linux runners only; elsewhere use OBAAF's egress action, self-hosted ephemeral runners behind a network policy, or a runtime monitor"
     obaaf:
       templates: ["obaaf-agent-propose.yml: cache-mode none, no persisted credentials, optional egress monitor"]
-      checks: [OBAAF-GHA-006, OBAAF-GHA-007, OBAAF-GHA-011, OBAAF-GHA-013, OBAAF-GHA-020, OBAAF-GHA-026, OBAAF-JEN-002, OBAAF-JEN-006, OBAAF-JEN-007]
+      checks: [OBAAF-GHA-006, OBAAF-GHA-007, OBAAF-GHA-011, OBAAF-GHA-013, OBAAF-GHA-020, OBAAF-GHA-026, OBAAF-GHA-027, OBAAF-JEN-002, OBAAF-JEN-006, OBAAF-JEN-007]
 
   - id: R8
     name: Attested agent runs

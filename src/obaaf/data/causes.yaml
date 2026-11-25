@@ -122,6 +122,11 @@ causes:
     rules: [OBAAF-GHA-020]
     fix_kind: confinement
     next: "Review the reported control and limit the agent's outbound connections to the hosts it needs."
+  - id: downloaded-agent-code
+    sentence: "A consuming job can execute files from an agent job's artifact."
+    rules: [OBAAF-GHA-027]
+    fix_kind: by-hand
+    next: "Inspect the files as data, or limit the consuming job's network and permissions before running them."
   - id: proposal-verification
     sentence: "The workflow may apply agent output without checking both the record and the proposal."
     rules: [OBAAF-GHA-021]
