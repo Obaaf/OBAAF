@@ -1,0 +1,71 @@
+name: Verify merged portable patch on native Git
+
+on:
+  push:
+    branches: [lead/validate-merged-368-fe765a2]
+
+permissions:
+  contents: read
+
+jobs:
+  native-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 7fb9bec7af6310bb59d8918ebd3fcc356958da1b
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Merge the actual flagship commit into the consumer head
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 7fb9bec7af6310bb59d8918ebd3fcc356958da1b
+          git -c user.name=Validation -c user.email=validation@example.invalid merge --no-commit --no-ff fe765a203e2cf07049916b0c9223130557e11578
+          tree="$(git write-tree)"
+          echo "Native combined tree $tree"
+          test "$tree" = 4ac721c21363efb271bfe581469748bc670ec036
+  portable-patch:
+    name: Apply exported patch on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: fe765a203e2cf07049916b0c9223130557e11578
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Set up temporary storage outside Git
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import tempfile
+          from pathlib import Path
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert head == "fe765a203e2cf07049916b0c9223130557e11578"
+          work = tempfile.mkdtemp(prefix="portable-patch-", dir=os.environ["RUNNER_TEMP"])
+          assert subprocess.run(["git", "-C", work, "rev-parse", "--git-dir"], capture_output=True).returncode
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              for key in ["TMPDIR", "TEMP", "TMP"]:
+                  env.write(f"{key}={work}\n")
+      - name: Install the candidate
+        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+      - name: Export, check, apply, and compare resulting bytes
+        shell: python
+        run: |
+          import os
+          import sys
+          import unittest
+          from pathlib import Path
+          sys.path.insert(0, str(Path("tests").resolve()))
+          tests = ["test_git_checks_and_applies_exact_bytes", "test_generated_gate_patch_uses_the_proven_workflow"]
+          suite = unittest.defaultTestLoader.loadTestsFromNames(["test_fix_patch.FixPatchTest." + name for name in tests])
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not result.wasSuccessful() or result.testsRun != 2 or result.skipped:
+              sys.exit(1)
