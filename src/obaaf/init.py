@@ -50,6 +50,8 @@ def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[s
     step_state = {"agent": action_cache}
     unread = []
     lanes = {}
+    found_agent = False
+    read = []
     environments = defaultdict(set)
     notes = []
     unnamed_environments = set()
@@ -67,9 +69,14 @@ def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[s
         workflow = parse(rel, text)
         if workflow.error or workflow.problems:
             raise ValueError(f"{rel}: {workflow.error or workflow.problems[0]}")
-        errors = []
-        checker._apply_local_action_detection(workflow, root, actions, commands, unread, errors, action_cache)
-        checker._apply_local_action_steps(workflow, root, unread, errors, step_state)
+        read.append((path, rel, workflow))
+
+    # Give reusable workflows their caller context before checking scripts and local actions.
+    checker._give_callers([(rel, workflow) for _, rel, workflow in read])
+    declared = checker._LaneDeclarations(config, root, True, False, workflows_sought=True, jenkins_sought=False)
+    prepared = checker._prepare_workflows(read, root, root, config, declared, commands, actions,
+                                          unread, action_cache, step_state)
+    for _, rel, workflow, errors in prepared:
         if errors:
             raise ValueError(errors[0])
         for job in workflow.jobs.values():
@@ -86,9 +93,15 @@ def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[s
             tools = agent_tools.named_agents(job, catalog.detection)
             if not tools and job.agent_step_why:
                 tools = sorted(set(job.agent_step_why.values()))
-            if tools or provider:
-                lanes[key] = "agent"
-                evidence = tools + [f"references {name}" for name in sorted(provider)]
+            classified = (checker.rules_mod.through_job(job, workflow, catalog.detection, config.agents)
+                          if job.local_steps else job)
+            inferred = classified.in_lane("agent")
+            if inferred or tools or provider:
+                found_agent = True
+                if not inferred:
+                    lanes[key] = "agent"
+                evidence = tools or ([classified.reason_for("agent")] if inferred else [])
+                evidence += [f"references {name}" for name in sorted(provider)]
                 notes.append(f"{key}: {', '.join(evidence)}")
             kind, value = job.environment_reading
             # A job that calls a reusable workflow cannot have an environment of its own, so an
@@ -116,7 +129,7 @@ def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[s
         else:
             notes.append(f"Review {name}: no single literal environment can be proposed.")
     notes.extend(checker._local_action_notes(unread))
-    if not lanes:
+    if not found_agent:
         notes.append("To create an agent workflow, start with GitHub Agentic Workflows: https://github.github.com/gh-aw/")
     config = yaml.safe_dump({"lanes": lanes, "protected_secrets": protected}, sort_keys=False)
     workflow_bytes = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
