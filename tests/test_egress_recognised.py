@@ -23,13 +23,14 @@ from obaaf.checker.rules import CANNOT_TELL, NOT_MET, VERIFIED
 
 SHA = "b" * 40
 RELEASED = "c" * 40
+REVIEWED_PIN = "80db1e68769165c9ecf24e553254fa35d6e168d5"
 HR_2_22_0 = "351661ca32ac09a36dc5ee2d536e3128f2a3c8ed"     # v2.22.0, as tagged on 2026-11-13
 HR_2_15_1 = "58077d3c7e43986b6b15fba718e8ea69e387dfcc"     # v2.15.1
 FIREWALL = "mode: enforce\nallow:\n  - api.example.com\n"
 
 
 def catalog(releases=(RELEASED,)):
-    """The catalog with `releases` as the commits of OBAAF's action OBAAF lists (none ship today)."""
+    """The catalog with `releases` as the commits of OBAAF's action OBAAF lists for this test."""
     cat = checker.load()
     detection = copy.deepcopy(cat.detection)
     detection["egress_action_releases"] = list(releases)
@@ -258,7 +259,7 @@ class EgressActionTest(unittest.TestCase):
         return egress(run_check(workflow(steps, **kw), files=files, config=config, cat=cat))
 
     def test_the_action_at_a_released_commit_with_the_agent_inside_clears_it(self):
-        f = self.check(CHECKOUT + "\n" + action())
+        f = self.check(CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
         self.assertEqual((f.kind, verdict(f), f.state), ("egress-action", VERIFIED, "fixed"))
         self.assertIn("DNS query", detail(f))
         self.assertIn("api.example.com", detail(f))
@@ -268,10 +269,15 @@ class EgressActionTest(unittest.TestCase):
         result = run_check(workflow(CHECKOUT + "\n" + action()), config={"lanes": {}})
         self.assertEqual(verdict(egress(result)), VERIFIED)
 
-    def test_today_no_commit_is_listed_so_it_is_cannot_tell(self):
-        f = self.check(action(), cat=checker.load())
+    def test_an_empty_catalog_cannot_verify_the_egress_action(self):
+        f = self.check(action(ref=REVIEWED_PIN), cat=catalog(releases=()))
         self.assertEqual(verdict(f), CANNOT_TELL)
         self.assertIn("none listed", detail(f))
+
+    def test_the_shipped_catalog_rejects_an_unknown_pin(self):
+        f = self.check(action(ref=SHA), cat=checker.load())
+        self.assertEqual(verdict(f), CANNOT_TELL)
+        self.assertIn("not a commit OBAAF lists as released (1 listed)", detail(f))
 
     def test_a_pin_that_is_not_a_listed_commit_is_cannot_tell(self):
         for ref in (SHA, "v1", "main", RELEASED.upper()):
@@ -413,6 +419,52 @@ class EgressActionTest(unittest.TestCase):
         """Found by the first review: actions/cache's post step saves its path after the job."""
         cache = f"      - uses: actions/cache@{SHA}\n        with: {{key: k, path: /tmp/obaaf-egress.*/workspace/node_modules}}"
         self.assertEqual(verdict(self.check(cache + "\n" + action())), NOT_MET)
+
+    def test_a_cache_path_it_cannot_read_to_the_end_is_cannot_tell(self):
+        """Found by the review of #248: only a path that names /tmp or the output was read, so a path
+        from an expression, or one that climbs out with `..`, reached the scratch directory with the
+        control verified. Each of these is "cannot tell" now, with the shipped pin as with a test one."""
+        paths = {
+            "an expression": "'${{ env.AGENT_OUT }}'",
+            "a variable": "'${{ vars.CACHE_PATH }}'",
+            "an input": "'${{ inputs.dir }}'",
+            "a function": "\"${{ format('{0}tmp', '/') }}\"",
+            "climbing from the workspace": "'../../../../../t?p'",
+            "climbing with a class": "'../../../../../tm[p]'",
+            "climbing from home": "'~/../../t?p'",
+            "climbing to the scratch directory": "'../../../../../t?p/obaaf*/workspace'",
+            "another user's home": "'~tmp/x'",
+            "in a list": "\"node_modules\\n../../../../../t?p\"",
+            "excluded, then climbing": "\"!x\\n../../../../../t?p\"",
+            "the root folder": "/", "the root folder, twice": "'//'", "the root folder, with a dot": "'/.'",
+            # Found by the second review of #248.
+            "through /proc": "'/proc/self/root/t?p/obaaf?egress.*/workspace'",
+            "through another process": "'/proc/1/root/t?p'",
+            "an absolute path beside a plain one": "\"~/.npm\\n/proc/thread-self/root/t?p\"",
+            "an absolute path elsewhere": "/usr/local/share/x",
+            "negated twice": "'! !/'",
+            "after a byte-order mark": "\"\\ufeff/\"",
+            "negated twice, then a user's home": "'! !~root/x'",
+            "a list": "[a, b]",
+        }
+        for what, path in paths.items():
+            for name in ("path", "Path"):
+                cache = f"      - uses: actions/cache@{SHA}\n        with: {{key: k, {name}: {path}}}"
+                with self.subTest(what=what, name=name):
+                    f = self.check(cache + "\n" + CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
+                    self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
+                    self.assertIn("saves a cache whose path the checker cannot read to the end", detail(f))
+        for path in ("~/.npm", "node_modules", "'~/.cache/pip\\n~/.npm'", "./.cache", "./", ".",
+                     "/home/runner/.npm", "\"node_modules\\n!node_modules/.cache\""):
+            cache = f"      - uses: actions/cache@{SHA}\n        with: {{key: k, path: {path}}}"
+            with self.subTest(path=path):
+                f = self.check(cache + "\n" + CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
+                self.assertEqual(verdict(f), VERIFIED, detail(f))
+        for restore in ("actions/cache/restore", "actions/cache/save"):
+            cache = f"      - uses: {restore}@{SHA}\n        with: {{key: k, path: '${{{{ env.AGENT_OUT }}}}'}}"
+            with self.subTest(restore=restore):
+                f = self.check(cache + "\n" + CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
+                self.assertEqual(verdict(f), VERIFIED, detail(f))
 
     def test_a_step_before_it_that_leaves_a_process_running_is_cannot_tell(self):
         """Found by the first review: a loop left running by an earlier step ran what the command wrote."""
@@ -736,9 +788,8 @@ class AgentInstallTest(unittest.TestCase):
         for script in ("sudo npm install -g @anthropic-ai/claude-code\nclaude --version",
                        "npm i -g @anthropic-ai/claude-code@2.1.0",
                        "npm install --global @openai/codex@latest && codex --version",
-                       "# the CLI the action runs\npnpm add -g @google/gemini-cli; gemini --version",
-                       "sudo -E npm install -g --no-fund @anthropic-ai/claude-code @openai/codex",
-                       "yarn global add @anthropic-ai/claude-code", "bun add -g @anthropic-ai/claude-code"):
+                       "# the CLI the action runs\nnpm add -g @google/gemini-cli; gemini --version",
+                       "sudo -E npm install -g --no-fund @anthropic-ai/claude-code @openai/codex"):
             f = self.check(CHECKOUT + "\n" + self.install(script) + self.CONFINED)
             with self.subTest(script=script):
                 self.assertEqual(verdict(f), VERIFIED, detail(f))
@@ -785,11 +836,34 @@ class AgentInstallTest(unittest.TestCase):
                        "sudo -b npm install -g @anthropic-ai/claude-code",
                        "sudo -i npm install -g @anthropic-ai/claude-code",
                        "sudo -s npm install -g @anthropic-ai/claude-code",
-                       "sudo -uroot npm install -g @anthropic-ai/claude-code"):
+                       "sudo -uroot npm install -g @anthropic-ai/claude-code",
+                       # Found by the review of #248: pnpm, yarn and bun read configuration from the
+                       # working directory, and Yarn 1 runs the program a `.yarnrc` names in `yarn-path`.
+                       "pnpm add -g @google/gemini-cli; gemini --version",
+                       "yarn global add @anthropic-ai/claude-code", "sudo yarn global add @anthropic-ai/claude-code",
+                       "yarn global add --ignore-scripts @anthropic-ai/claude-code",
+                       "bun add -g @anthropic-ai/claude-code", "bun i -g @openai/codex",
+                       # Found by the second review of #248: npm reads a `.tgz`, `.tar` or `.tar.gz` "version"
+                       # as a file in the working directory, and runs its scripts.
+                       "npm install -g @anthropic-ai/claude-code@vendor.tgz",
+                       "sudo -E npm i -g @anthropic-ai/claude-code@claude-code-1.0.0.TGZ",
+                       "npm install --global @anthropic-ai/claude-code@v1.tar.gz",
+                       "npm i -g @openai/codex@codex.tar"):
             f = self.check(self.install(script) + self.CONFINED)
             with self.subTest(script=script):
                 self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
                 self.assertIn("neither an install it can vouch for nor a run", detail(f))
+
+    def test_a_yarn_install_after_a_checkout_does_not_verify_with_the_shipped_pin(self):
+        """The review of #248: with the reviewed pin listed, `yarn global add` after a checkout made
+        OBAAF-GHA-020 "fixed", though a `.yarnrc` the checkout brings can make yarn run the
+        repository's own program outside the sandbox, with the runner's `sudo`."""
+        steps = CHECKOUT + "\n" + self.install("yarn global add @anthropic-ai/claude-code") + keyed(
+            run="claude -p 'review the change'", ref=REVIEWED_PIN)
+        f = self.check(steps, cat=checker.load())
+        self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
+        key = key_control(run_check(workflow(steps), cat=checker.load()))
+        self.assertEqual(key.verdict, CANNOT_TELL, key.detail)
 
     def test_what_can_make_the_same_words_run_something_else_is_not_read_as_an_install(self):
         """Found by the review: the step's env, its working directory and the defaults of the job or
@@ -970,8 +1044,8 @@ class ReleaseDataTest(unittest.TestCase):
                 self.assertRegex(sha, r"^[0-9a-f]{40}$")
                 self.assertRegex(version, r"^\d+\.\d+\.\d+$")
 
-    def test_no_commit_of_the_egress_action_is_listed_yet(self):
-        self.assertEqual(checker.load().detection["egress_action_releases"], [])
+    def test_only_the_reviewed_commit_of_the_egress_action_is_listed(self):
+        self.assertEqual(checker.load().detection["egress_action_releases"], [REVIEWED_PIN])
 
     def test_listed_commits_of_the_egress_action_are_at_or_after_the_floor(self):
         """Only a commit at or after the floor may be listed: the checker reads the action's
@@ -1142,7 +1216,7 @@ class KeyOutOfReachTest(unittest.TestCase):
         return key_control(run_check(workflow(steps, **kw), cat=cat, config=config))
 
     def test_a_model_key_given_to_the_proxy_at_a_listed_commit_is_out_of_reach(self):
-        control = self.key(CHECKOUT + "\n" + keyed())
+        control = self.key(CHECKOUT + "\n" + keyed(ref=REVIEWED_PIN), cat=checker.load())
         self.assertEqual(control.verdict, VERIFIED)
         self.assertIn("the command can use a key the proxy holds and cannot read it", control.detail)
         self.assertIn("ANTHROPIC_API_KEY (secrets.ANTHROPIC_API_KEY) goes to AWF's API proxy", control.detail)
@@ -1152,8 +1226,13 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertIn("what an accepted install's own scripts do", control.detail)
         self.assertIn("make the provider act for it", control.detail)
 
+    def test_the_shipped_catalog_cannot_verify_key_handling_at_an_unknown_pin(self):
+        control = self.key(keyed(ref=SHA), cat=checker.load())
+        self.assertEqual(control.verdict, CANNOT_TELL)
+        self.assertIn("not a commit OBAAF lists as released (1 listed)", control.detail)
+
     def test_no_listed_commit_or_a_tag_is_cannot_tell(self):
-        control = self.key(keyed(), cat=checker.load())
+        control = self.key(keyed(ref=REVIEWED_PIN), cat=catalog(releases=()))
         self.assertEqual(control.verdict, CANNOT_TELL)
         self.assertIn("not a commit OBAAF lists as released (none listed)", control.detail)
         self.assertIn("goes to AWF's API proxy", control.detail)     # where the key goes, whatever the verdict

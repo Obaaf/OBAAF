@@ -6,7 +6,7 @@ from unittest.mock import patch
 from helpers import TempDir, run_cli
 from obaaf.catalog import load
 
-SHA = "c" * 40
+SHA = "80db1e68769165c9ecf24e553254fa35d6e168d5"
 STEP = """      - name: Review
         env:
           ANTHROPIC_API_KEY: ${{ secrets.MODEL }}
@@ -23,11 +23,8 @@ jobs:
 
 
 class EgressDraftTests(unittest.TestCase):
-    def draft(self, root, releases=(SHA,)):
-        cat = load()
-        cat = dataclasses.replace(cat, detection={**cat.detection, "egress_action_releases": list(releases)})
-        with patch("obaaf.fix_egress.load", return_value=cat):
-            return run_cli("fix", "egress", "--job", "review", root)
+    def draft(self, root):
+        return run_cli("fix", "egress", "--job", "review", root)
 
     def workflow(self, root, step=STEP):
         directory = root / ".github/workflows"
@@ -37,7 +34,10 @@ class EgressDraftTests(unittest.TestCase):
         return path
 
     def test_unlisted_stops_before_reading_path(self):
-        code, out, _ = self.draft("absent", releases=())
+        cat = load()
+        empty = dataclasses.replace(cat, detection={**cat.detection, "egress_action_releases": []})
+        with patch("obaaf.fix_egress.load", return_value=empty):
+            code, out, _ = self.draft("absent")
         self.assertEqual(code, 0)
         self.assertIn("No released commit", out)
 
@@ -154,10 +154,7 @@ class EgressDraftTests(unittest.TestCase):
             self.assertIn("exactly one", err)
         with TempDir() as root:
             self.workflow(root)
-            cat = load()
-            cat = dataclasses.replace(cat, detection={**cat.detection, "egress_action_releases": [SHA]})
-            with patch("obaaf.fix_egress.load", return_value=cat):
-                code, out, err = run_cli("fix", "egress", "--job", "reveiw", root)
+            code, out, err = run_cli("fix", "egress", "--job", "reveiw", root)
             self.assertEqual((code, out), (2, ""))
             self.assertIn("no workflow checked here has a job with the ID 'reveiw'", err)
 
