@@ -94,6 +94,94 @@ jobs:
         self.assertIn("references OPENAI_API_KEY", text)
         self.assertNotIn("To create an agent workflow", text)
 
+    def lanes_after_check(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = cli.main(["check", str(self.root), "--lanes"])
+        self.assertEqual(status, 0, stdout.getvalue() + stderr.getvalue())
+        return dict(line.split(": ", 1) for line in stdout.getvalue().splitlines() if ": " in line)
+
+    def test_a_lane_is_omitted_only_where_the_checkout_finds_the_agent(self):
+        """Review of #362: a job whose agent the checker finds only in a script Git does not track
+        (untracked, ignored or in a submodule) would get no lane from init and none in CI, whose
+        checkout does not hold the script. Init declares it, and says why."""
+        from helpers import git, init_repo
+        init_repo(self.root)
+        workflow = self.workflow.with_name("script.yml")
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("""on: push
+jobs:
+  review:
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - run: bash review.sh
+  direct:
+    steps:
+      - run: claude -p review
+""")
+        (self.root / "review.sh").write_text("codex exec 'review'\n")
+        git(self.root, "add", workflow.relative_to(self.root).as_posix())
+        status, text = self.invoke()
+        self.assertEqual(status, 0, text)
+        self.assertIn('+  .github/workflows/script.yml#review: agent', text)
+        self.assertNotIn("script.yml#direct: agent", text)
+        self.assertIn("Git tracks outside submodules", text)
+        self.assertIn("script.yml#review", text.split("Git tracks outside submodules")[1])
+        (self.root / ".gitignore").write_text("review.sh\n")
+        self.assertIn('+  .github/workflows/script.yml#review: agent', self.invoke()[1])
+        (self.root / ".gitignore").unlink()
+        git(self.root, "add", "review.sh")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertEqual(Config.load(self.root).lanes, {})
+        self.assertNotIn("Git tracks outside submodules", text)
+        lanes = self.lanes_after_check()
+        for job in ("review", "direct"):
+            self.assertTrue(lanes[f".github/workflows/script.yml#{job}"].startswith("agent ("), lanes)
+
+    def test_every_job_init_names_is_an_agent_job_when_checked(self):
+        """Review of #362: the property the change rests on. Each job init lists as an agent job is
+        in the agent lane when the checker runs with what init wrote, declared or not."""
+        from helpers import git, init_repo
+        init_repo(self.root)
+        folder = self.workflow.parent
+        folder.mkdir(parents=True)
+        action = self.root / ".github/actions/assistant/action.yml"
+        action.parent.mkdir(parents=True)
+        action.write_text("name: assistant\nruns:\n  using: composite\n  steps:\n    - uses: openai/codex-action@v1\n")
+        (self.root / "review.sh").write_text("claude -p review\n")
+        (folder / "a.yml").write_text("""on: pull_request
+jobs:
+  action:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+  composite:
+    steps:
+      - uses: ./.github/actions/assistant
+  script:
+    steps:
+      - run: bash review.sh
+  key:
+    steps:
+      - run: python probe.py
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+  call:
+    uses: ./.github/workflows/b.yml
+""")
+        (folder / "b.yml").write_text("on: workflow_call\njobs:\n  inner:\n    steps:\n      - run: npx @openai/codex exec x\n")
+        git(self.root, "add", "-A")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        named = [line.split(":")[0] for line in text.splitlines() if line.startswith(".github/workflows/")]
+        self.assertEqual(sorted(named), sorted(f".github/workflows/{key}" for key in (
+            "a.yml#action", "a.yml#composite", "a.yml#script", "a.yml#key", "b.yml#inner")), text)
+        self.assertEqual(Config.load(self.root).lanes, {".github/workflows/a.yml#key": "agent"})
+        lanes = self.lanes_after_check()
+        for key in named:
+            self.assertTrue(lanes[key].startswith("agent ("), (key, lanes))
+
     def test_conflicts_in_either_file_stop_both_writes(self):
         for target, other in [(self.workflow, self.config), (self.config, self.workflow)]:
             with self.subTest(target=target):

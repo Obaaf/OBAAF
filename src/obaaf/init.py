@@ -6,18 +6,20 @@ import difflib
 import os
 import re
 import shlex
+import shutil
 import sys
+import tempfile
 from collections import defaultdict
 from importlib.resources import files
 from pathlib import Path
-from stat import S_ISREG
+from stat import S_ISLNK, S_ISREG
 from tempfile import NamedTemporaryFile
 
 import yaml
 
 from obaaf import agent_tools, checker, init_scanners
 from obaaf.catalog import load
-from obaaf.checker import CONFIG_LOCATIONS
+from obaaf.checker import CONFIG_LOCATIONS, repo
 from obaaf.checker.egress import MODEL_KEYS
 from obaaf.checker.workflow import one_line, parse, secret_names
 
@@ -40,21 +42,9 @@ def _read(path: Path) -> bytes | None:
     return path.read_bytes()
 
 
-def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[str]]:
+def _read_workflows(root: Path) -> list:
     folder = root / ".github/workflows"
-    catalog = load()
-    config = checker.Config()
-    actions = checker._agent_actions(catalog, config)
-    commands = checker._script_commands(catalog, config)
-    action_cache = {}
-    step_state = {"agent": action_cache}
-    unread = []
-    lanes = {}
-    found_agent = False
     read = []
-    environments = defaultdict(set)
-    notes = []
-    unnamed_environments = set()
     for path in sorted(folder.iterdir()) if folder.exists() else ():
         rel = path.relative_to(root).as_posix()
         if rel == WORKFLOW or not path.name.lower().endswith((".yaml", ".yml")):
@@ -70,15 +60,92 @@ def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[s
         if workflow.error or workflow.problems:
             raise ValueError(f"{rel}: {workflow.error or workflow.problems[0]}")
         read.append((path, rel, workflow))
+    return read
 
+
+def _prepare(root: Path, read: list, catalog, config, unread: list) -> list:
+    """The checker's own reading of `read` under `root`: callers, local actions and scripts."""
+    actions = checker._agent_actions(catalog, config)
+    commands = checker._script_commands(catalog, config)
+    action_cache = {}
+    step_state = {"agent": action_cache}
     # Give reusable workflows their caller context before checking scripts and local actions.
     checker._give_callers([(rel, workflow) for _, rel, workflow in read])
     declared = checker._LaneDeclarations(config, root, True, False, workflows_sought=True, jenkins_sought=False)
-    prepared = checker._prepare_workflows(read, root, root, config, declared, commands, actions,
-                                          unread, action_cache, step_state)
+    return checker._prepare_workflows(read, root, root, config, declared, commands, actions,
+                                      unread, action_cache, step_state)
+
+
+def _agent_jobs(prepared: list, catalog, config) -> dict:
+    """For each job the checker puts in the agent lane unaided, the job as classified."""
+    found = {}
+    for _, rel, workflow, errors in prepared:
+        if errors:
+            continue
+        for job in workflow.jobs.values():
+            classified = (checker.rules_mod.through_job(job, workflow, catalog.detection, config.agents)
+                          if job.local_steps else job)
+            if classified.in_lane("agent"):
+                found[f"{rel}#{job.id}"] = classified
+    return found
+
+
+def _tracked_agent_jobs(root: Path, catalog, config) -> set | None:
+    """The jobs the checker puts in the agent lane from the files Git tracks, outside submodules,
+    which is what the generated workflow's checkout holds. None when `root` is not the top of a Git
+    work tree, where the folder is all there is. An empty set when Git cannot list its files, so that
+    every agent job is then declared.
+
+    Review of #362: the folder can hold what that checkout will not, a script in a submodule or one
+    Git ignores or does not track. A job the checker finds only through such a file would get no
+    declaration from init and no agent lane in CI."""
+    if not (root / ".git").exists():
+        return None
+    how = {}
+    tracked = repo._git_tracked(root, how)
+    if tracked is None:
+        return set()
+    gitlinks = [link.rstrip("/") + "/" for link in how.get("gitlinks", ())]
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = Path(tmp)
+        for rel in tracked:
+            if any(rel.startswith(link) for link in gitlinks):
+                continue
+            source, dest = root / rel, copy / rel
+            try:
+                info = source.lstat()
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if S_ISLNK(info.st_mode):
+                    os.symlink(os.readlink(source), dest)
+                elif S_ISREG(info.st_mode):
+                    shutil.copyfile(source, dest)
+            except OSError:
+                return set()
+        try:
+            read = _read_workflows(copy)
+        except (ValueError, OSError):
+            return set()
+        return set(_agent_jobs(_prepare(copy, read, catalog, config, []), catalog, config))
+
+
+def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[str]]:
+    catalog = load()
+    config = checker.Config()
+    unread = []
+    lanes = {}
+    found_agent = False
+    environments = defaultdict(set)
+    notes = []
+    unnamed_environments = set()
+    untracked_evidence = []
+    read = _read_workflows(root)
+    prepared = _prepare(root, read, catalog, config, unread)
     for _, rel, workflow, errors in prepared:
         if errors:
             raise ValueError(errors[0])
+    inferred_jobs = _agent_jobs(prepared, catalog, config)
+    tracked_agents = _tracked_agent_jobs(root, catalog, config) if inferred_jobs else None
+    for _, rel, workflow, errors in prepared:
         for job in workflow.jobs.values():
             key = f"{rel}#{job.id}"
             names = {name.upper() for name in job.secret_names()}
@@ -93,14 +160,16 @@ def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[s
             tools = agent_tools.named_agents(job, catalog.detection)
             if not tools and job.agent_step_why:
                 tools = sorted(set(job.agent_step_why.values()))
-            classified = (checker.rules_mod.through_job(job, workflow, catalog.detection, config.agents)
-                          if job.local_steps else job)
-            inferred = classified.in_lane("agent")
-            if inferred or tools or provider:
+            classified = inferred_jobs.get(key)
+            # Omitted only where the checker finds the agent in what the checkout will hold, too.
+            inferred = classified is not None and (tracked_agents is None or key in tracked_agents)
+            if classified is not None or tools or provider:
                 found_agent = True
                 if not inferred:
                     lanes[key] = "agent"
-                evidence = tools or ([classified.reason_for("agent")] if inferred else [])
+                if classified is not None and not inferred:
+                    untracked_evidence.append(key)
+                evidence = tools or ([classified.reason_for("agent")] if classified is not None else [])
                 evidence += [f"references {name}" for name in sorted(provider)]
                 notes.append(f"{key}: {', '.join(evidence)}")
             kind, value = job.environment_reading
@@ -129,6 +198,10 @@ def _proposal(root: Path, scanners: list[str]) -> tuple[dict[str, bytes], list[s
         else:
             notes.append(f"Review {name}: no single literal environment can be proposed.")
     notes.extend(checker._local_action_notes(unread))
+    if untracked_evidence:
+        notes.append("Declared as agent jobs although the checker finds their agent here, because it does not "
+                     "find it in the files Git tracks outside submodules, which is what the generated workflow "
+                     "checks: " + ", ".join(untracked_evidence))
     if not found_agent:
         notes.append("To create an agent workflow, start with GitHub Agentic Workflows: https://github.github.com/gh-aw/")
     config = yaml.safe_dump({"lanes": lanes, "protected_secrets": protected}, sort_keys=False)
