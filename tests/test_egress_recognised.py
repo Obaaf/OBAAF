@@ -437,6 +437,15 @@ class EgressActionTest(unittest.TestCase):
             "in a list": "\"node_modules\\n../../../../../t?p\"",
             "excluded, then climbing": "\"!x\\n../../../../../t?p\"",
             "the root folder": "/", "the root folder, twice": "'//'", "the root folder, with a dot": "'/.'",
+            # Found by the second review of #248.
+            "through /proc": "'/proc/self/root/t?p/obaaf?egress.*/workspace'",
+            "through another process": "'/proc/1/root/t?p'",
+            "an absolute path beside a plain one": "\"~/.npm\\n/proc/thread-self/root/t?p\"",
+            "an absolute path elsewhere": "/usr/local/share/x",
+            "negated twice": "'! !/'",
+            "after a byte-order mark": "\"\\ufeff/\"",
+            "negated twice, then a user's home": "'! !~root/x'",
+            "a list": "[a, b]",
         }
         for what, path in paths.items():
             for name in ("path", "Path"):
@@ -445,7 +454,8 @@ class EgressActionTest(unittest.TestCase):
                     f = self.check(cache + "\n" + CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
                     self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
                     self.assertIn("saves a cache whose path the checker cannot read to the end", detail(f))
-        for path in ("~/.npm", "node_modules", "'~/.cache/pip\\n~/.npm'", "./.cache", "./", "."):
+        for path in ("~/.npm", "node_modules", "'~/.cache/pip\\n~/.npm'", "./.cache", "./", ".",
+                     "/home/runner/.npm", "\"node_modules\\n!node_modules/.cache\""):
             cache = f"      - uses: actions/cache@{SHA}\n        with: {{key: k, path: {path}}}"
             with self.subTest(path=path):
                 f = self.check(cache + "\n" + CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
@@ -832,7 +842,13 @@ class AgentInstallTest(unittest.TestCase):
                        "pnpm add -g @google/gemini-cli; gemini --version",
                        "yarn global add @anthropic-ai/claude-code", "sudo yarn global add @anthropic-ai/claude-code",
                        "yarn global add --ignore-scripts @anthropic-ai/claude-code",
-                       "bun add -g @anthropic-ai/claude-code", "bun i -g @openai/codex"):
+                       "bun add -g @anthropic-ai/claude-code", "bun i -g @openai/codex",
+                       # Found by the second review of #248: npm reads a `.tgz`, `.tar` or `.tar.gz` "version"
+                       # as a file in the working directory, and runs its scripts.
+                       "npm install -g @anthropic-ai/claude-code@vendor.tgz",
+                       "sudo -E npm i -g @anthropic-ai/claude-code@claude-code-1.0.0.TGZ",
+                       "npm install --global @anthropic-ai/claude-code@v1.tar.gz",
+                       "npm i -g @openai/codex@codex.tar"):
             f = self.check(self.install(script) + self.CONFINED)
             with self.subTest(script=script):
                 self.assertEqual(verdict(f), CANNOT_TELL, detail(f))

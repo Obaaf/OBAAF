@@ -3014,6 +3014,9 @@ class WorkflowRules:
                         name, at, version = token.partition("@")
                     if name not in names or (at and not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.^~_-]*", version)):
                         return False
+                    if at and re.search(r"[.](?:tgz|tar.gz|tar)$", version, re.I):
+                        return False    # npm reads `name@x.tgz` as a file in the working directory (npm-package-arg's
+                                        # `isFilename`), which a checkout fills (second review of #248)
                     named = True
                 if not named:
                     return False        # options alone install the project, and run its scripts
@@ -3043,9 +3046,11 @@ class WorkflowRules:
         """Why the `path` of an `actions/cache` step, whose post step saves that path after the job, cannot
         be read to the end, or None (review of #248). `_reads_output` finds /tmp and the confined command's
         output where the path names them; a path built from an expression (`${{ env.OUT }}`), one with a
-        `..` part (`../../../../../t?p`, `~/../../tmp`), one that starts `~` and a user's name, and the
-        root folder (`/`, `//`, `/.`) can reach them without naming them, so each is "cannot tell". Only
-        the step with a post step is read:
+        `..` part (`../../../../../t?p`, `~/../../t?p`), one that starts `~` and a user's name, the root
+        folder (`/`, `//`, `/.`) and any other absolute path outside `/home` (`/proc/self/root/t?p`
+        reaches /tmp, second review of #248) can reach them without naming them, so each is "cannot
+        tell"; so are inputs that are not a mapping and a path that is not text. Leading `!`s and
+        spaces are read past, as `actions/cache` reads them. Only the step with a post step is read:
         `actions/cache/save` saves when it runs, before the command, and `actions/cache/restore` saves
         nothing. Not read: a relative path through a symbolic link that a checkout put in the workspace."""
         if not step.uses_action("actions/cache") or step.uses_action("actions/cache/save") \
@@ -3065,7 +3070,7 @@ class WorkflowRules:
         if "${{" in path:
             return "an expression"
         for line in path.splitlines():
-            line = line.strip().lstrip("!").strip()
+            line = re.sub(r"^[\s\ufeff!]+", "", line).strip().strip("\ufeff")    # `! !/` negates twice
             if not line:
                 continue
             if re.search(r"(?:^|[/\\])\.\.(?:[/\\]|$)", line):
@@ -3074,6 +3079,8 @@ class WorkflowRules:
                 return "a '~' with a user's name, whose home the checker does not read"
             if re.fullmatch(r"[\"']?/[/\\.]*[\"']?", line):
                 return "the root folder, which holds /tmp"
+            if line.startswith("/") and not re.match(r"/home/[^/\s]", line):
+                return "an absolute path outside /home, which can reach /tmp through a link the checker does not read"
         return None
 
     def _reads_output(self, step: Step, ids: set) -> list[str]:
