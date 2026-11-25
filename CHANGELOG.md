@@ -4,6 +4,10 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### OpenSSL's variables can make an action run unread code
+
+A name beginning `OPENSSL_` in the `env` of a step outside OBAAF's egress action, or of its job or workflow, now makes that step one that can run code the checker did not read (slice 2c.13). Node.js, which runs every JavaScript action, loads the configuration `OPENSSL_CONF` names, and the libraries that configuration names, when it starts. So `actions/checkout` with `OPENSSL_CONF` in its `env`, before the egress action, now makes OBAAF-GHA-020 and `key-out-of-reach` (OBAAF-GHA-005) "cannot tell", where both were verified. On GitHub's firewall such a step is "cannot tell" too, as the other names are under D-133. Nothing changes on this repository or on the first adopter.
+
 ### The workflow `obaaf init` writes can read a settings snapshot
 
 From #367 (#355 item 6), with the review's changes; decisions D-109 and D-111. **The generated workflow now installs the checker at `8caddd6`** (it installed `4e2ba22`), and with the repository variable `OBAAF_USE_SETTINGS` set to `true` both its report and its gate give `obaaf check` the snapshot at `.github/obaaf-settings.json`, with `--settings`. On a pull request the snapshot's bytes come from the target commit, read from Git and written over the pull request's copy at the same path, so the code-owner check still names that path; on a push they come from the pushed commit. A snapshot that is missing, not a regular file, or not in the snapshot format fails the run; one that is too old or for another repository does not, and its evidence stays "cannot tell" ([how to turn it on](docs/ci-integration.md#a-required-check-in-github-actions)).
