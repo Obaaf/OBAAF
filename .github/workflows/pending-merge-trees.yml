@@ -1,0 +1,36 @@
+name: Validate pending flagship merge trees
+on:
+  push:
+    branches: [lead/verify-merge-order-df18d29-24b4070]
+permissions:
+  contents: read
+jobs:
+  trees:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: df18d29a6caf763912bae6c74e7a94febbdd114b
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check each pending merge on its real base and in dispatch order
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = df18d29a6caf763912bae6c74e7a94febbdd114b
+          git config user.name 'OBAAF validation'
+          git config user.email 'validation@users.noreply.github.com'
+          while read -r pr sha; do
+            tree=$(git merge-tree --write-tree df18d29a6caf763912bae6c74e7a94febbdd114b "$sha")
+            echo "PR $pr directly on df18d29: $tree"
+            git merge --no-edit --no-ff "$sha"
+            echo "Through PR $pr in dispatch order: $(git rev-parse HEAD^{tree})"
+          done <<'HEADS'
+          364 24b4070738eb7216d4898ecf6a116a2b8683c32c
+          365 7de1abdaf8dc6247f986e33d481a497001afe92b
+          367 60ba958709925ccd24c5bd23fa62b9fce34bc43c
+          366 7d8478ec2d1ef22a49ec52457d091a4a4d0473ae
+          368 d9e643f7e4cf7c284fd6c1e568c696de82d5ed92
+          HEADS
+          test "$(git rev-parse HEAD^{tree})" = cd1a407ca32b37bdc698d67832d9cccfcbd3fbd9
