@@ -33,7 +33,8 @@ from obaaf.checker.jenkins.model import (
     untrusted_source,
 )
 from obaaf.checker.jenkins.parser import (
-    Assign, Binary, Call, ClassDef, Closure, Decl, Import, Index, ListLit, Loop, MapLit, MethodDef, Name, Num, Opaque,
+    Assign, Binary, Block, Call, ClassDef, Closure, Decl, Import, Index, ListLit, Loop, MapLit, MethodDef, Name, Num,
+    Opaque,
     Prop, Str, Switch, Unary,
     callee_name, path_of,
 )
@@ -3524,7 +3525,8 @@ class JenkinsRules:
     # labels): `env` used as a value (not followed by `.`, `?.` or `[`), written to, incremented, or with a method
     # that may set a variable named. Bounded, and run only on those short texts.
     _ENV_TEXT_RISK = re.compile(
-        r"""\benv\b(?!\s*(?:\?\.|\.|\[))"""
+        r"""\b(?:getProperty|getAt|invokeMethod|setProperty)\b|\.\s*&|\.\s*["']\$|"""
+        r"""(?<!['"])\benv\b(?!['"])(?!\s*(?:\?\.|\.|\[))"""
         r"""|\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\*\*|<<|>>>|>>|\?:|[-+*/%&|^])?=(?![=~])"""
         r"""|\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\+\+|--)|(?:\+\+|--)\s*\benv\b"""
         r"""|\benv\b\s*\??\.\s*&?\s*(?:setProperty|put|putAt|putAll|with|identity|tap|invokeMethod|metaClass|"""
@@ -3548,9 +3550,12 @@ class JenkinsRules:
         tree = self.p.tree
         if tree is None:
             return []
-        lines = (self.p.source or "").split("\n")
+        from obaaf.checker.jenkins.lexer import translate_unicode_escapes
+        lines = translate_unicode_escapes(self.p.source or "").split("\n")
         writes = []
-        script_names = {"this", "script", "steps", "binding"} | self.p.script_vars
+        # Receivers that can be the script itself: `this` and the names Groovy gives a closure's owners, variables the
+        # file gives one of them anywhere, and every parameter of a method or closure (a caller may pass `this`).
+        script_names = {"this", "script", "steps", "binding", "owner", "delegate", "thisObject"} | self.p.script_vars
         parents: dict = {}
         entries = []               # (node, the line to report, the interpolation's text or None)
         roots = [(tree, None, None)]
@@ -3583,16 +3588,41 @@ class JenkinsRules:
                         else:
                             roots.append((sub.tree, here, text))
 
-        def env_ref(n) -> bool:
+        for n, _line, _own in entries:
+            if isinstance(n, MethodDef):
+                script_names.update(p for p in n.params if isinstance(p, str))
+            elif isinstance(n, (Closure, Block)) and getattr(n, "params", None):
+                script_names.update(p for p in n.params if isinstance(p, str))
+        for _round in range(4):
+            before = len(script_names)
+            for n, _line, _own in entries:
+                value = n.value if isinstance(n, (Decl, Assign)) else None
+                name = n.name if isinstance(n, Decl) else (n.target.name if isinstance(n, Assign) and isinstance(
+                    n.target, Name) else None)
+                if name and value is not None and (path_of(value) in script_names or (
+                        isinstance(value, Call) and (path_of(value.callee) or "").rsplit(".", 1)[-1] in (
+                            "getOwner", "getDelegate", "getThisObject"))):
+                    script_names.add(name)
+            if len(script_names) == before:
+                break
+
+        def scriptish(n) -> bool:
+            return n is None or path_of(n) in script_names or (isinstance(n, Call) and (
+                path_of(n.callee) or "").rsplit(".", 1)[-1] in ("getOwner", "getDelegate", "getThisObject"))
+
+        def env_ref(n, writing: bool = False) -> bool:
+            """Whether `n` is, or may be, the build's `env`. A property named `env` of a receiver that cannot be the
+            script (`buildInfo.env`, `config.env`) counts only where it is written to."""
             if isinstance(n, Name):
                 return n.name == "env"
             if isinstance(n, Prop):
-                return n.name == "env" or ("${" in n.name and path_of(n.target) in script_names)
+                if n.name == "env":
+                    return writing or scriptish(n.target)
+                return "${" in n.name and scriptish(n.target)
             if isinstance(n, Call) and (path_of(n.callee) or "").rsplit(".", 1)[-1] in ("getProperty", "getAt"):
-                receiver = n.callee.target if isinstance(n.callee, Prop) else None
                 key = literal(n.args[0]) if n.args else None
-                return (receiver is None or path_of(receiver) in script_names) and (key is None or key == "env")
-            if isinstance(n, Index) and path_of(n.target) in script_names:
+                return key is None or key == "env"
+            if isinstance(n, Index) and scriptish(n.target):
                 key = literal(n.index)
                 return key is None or key == "env"
             return False
@@ -3606,6 +3636,27 @@ class JenkinsRules:
                 postfix_lines[key] = bool(self._ENV_POSTFIX.search(text))
             return postfix_lines[key]
 
+        opaque_seen: dict = {}
+
+        def opaque_near_env(line: int, own) -> bool:
+            key = own if own is not None else line
+            if key not in opaque_seen:
+                text = own if own is not None else text_of(line, line + 10, None)
+                opaque_seen[key] = bool(re.search(r"\benv\b|getProperty|getAt", text))
+            return opaque_seen[key]
+
+        def label_end(cases: list, k: int, line: int) -> int:
+            """The last line a case label can be on: the line of the case's first statement, or of the next case, or
+            ten lines on."""
+            case = cases[k]
+            start = getattr(case, "line", line)
+            stmts = getattr(case, "stmts", None)
+            if stmts:
+                return max(getattr(stmts[0], "line", start), start)
+            if k + 1 < len(cases):
+                return max(getattr(cases[k + 1], "line", start), start)
+            return start + 10
+
         def risky_text(text: str) -> bool:
             return bool(self._ENV_TEXT_RISK.search(text))
 
@@ -3614,7 +3665,12 @@ class JenkinsRules:
 
         for n, line, own in entries:
             parent = parents.get(id(n))
-            if env_ref(n):
+            above_parent = parents.get(id(parent)) if parent is not None else None
+            written = isinstance(parent, (Prop, Index)) and parent.target is n and (
+                (isinstance(above_parent, Assign) and above_parent.target is parent) or (
+                    isinstance(above_parent, Call) and above_parent.callee is parent and isinstance(parent, Prop)
+                    and parent.name in self._ENV_SETTERS))
+            if env_ref(n, writing=written):
                 if isinstance(parent, (Prop, Index)) and parent.target is n:
                     use = parent
                     above = parents.get(id(use))
@@ -3645,8 +3701,10 @@ class JenkinsRules:
                     writes.append(("?", line))         # "$m"(...), x."$m"(...): a method whose name is computed
                 elif (path_of(callee) or "").rsplit(".", 1)[-1] == "invokeMethod":
                     writes.append(("?", line))
-            elif isinstance(n, Opaque) and line and (re.search(r"\benv\b", own) if own is not None
-                                                     else re.search(r"\benv\b", text_of(line, line + 10, None))):
+            elif isinstance(n, Prop) and n.name in ("getProperty", "getAt", "setProperty", "invokeMethod") and not (
+                    isinstance(parent, Call) and parent.callee is n):
+                writes.append(("?", line))             # this.&getProperty: a pointer to a method that reaches env
+            elif isinstance(n, Opaque) and line and opaque_near_env(line, own):
                 # (env.PATH, env.X) = [...], foo(env.PATH = 'x'): a statement the parser could not read, from its first
                 # line and the ten after it, which may hold the rest of it
                 writes.append(("?", line))
@@ -3654,9 +3712,8 @@ class JenkinsRules:
                     text_of(line, getattr(n.body, "line", line), own)):
                 writes.append(("?", line))             # a loop's header, a method's parameter defaults
             elif isinstance(n, Switch) and line and any(
-                    risky_text(text_of(getattr(case, "line", line), (case.stmts[0].line if getattr(case, "stmts", None)
-                                                                     else getattr(case, "line", line)), own))
-                    for case in n.cases):
+                    risky_text(text_of(getattr(case, "line", line), label_end(n.cases, k, line), own))
+                    for k, case in enumerate(n.cases)):
                 writes.append(("?", line))             # case { env.PATH = '/x'; true }: a case label
         return writes
 

@@ -3104,6 +3104,15 @@ there, before or after this change (#370). The claims reviewer's third pass foun
 reported with the interpolation's own line numbers and that an unreadable statement there was looked for in the
 file's first lines; both are fixed, and a loop bounded by an `env` value no longer counts.
 
+**Fourth attack pass** (the same sub-agent, about 220 attempts on `75146e9`). All earlier cases were `unknown`. It
+got past with `getProperty('env')` on a closure's `owner`, `delegate` or `thisObject`, a computed property of one
+of them, a pointer to `getProperty`, a `\u0065nv` escape in the texts the parser drops (they were searched before
+the escapes were translated), `getProperty` with a computed name in a default or a loop's header, and a case label
+over several lines; it also found false "cannot tell" for `buildInfo.env.collect()` and a YAML file's `env`. Each
+is fixed: `getProperty` and `getAt` reach `env` on any receiver, a property named `env` counts on a receiver that
+can be the script (or where it is written to), the texts are translated first and searched for `getProperty` too,
+and a case label runs to the next case. Reflection (`this.metaClass.getProperty(this, 'env')`) is a stated limit.
+
 **Claims review** (a second Opus 5.5 sub-agent): the template is "cannot tell" for its `PATH` change only (replacing
 both `withEnv` calls with `dir('.')` gives three passes); a check under such a variable before a publish in a later
 stage's failure-path `post` block gives a new high OBAAF-JEN-011, which the texts now say; `--revision-file`

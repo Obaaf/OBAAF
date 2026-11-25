@@ -88,12 +88,15 @@ CASES = [
     ("pipeline environment plain", pipeline(PLAIN, top="environment { FOO = 'bar' }"), P),
     ("environment PATH in another stage", pipeline(
         PLAIN, build="sh 'make'").replace("stage('Fetch') {", "stage('Fetch') {\n      environment { PATH = '/x' }"), P),
-    ("script env.PATH = in an earlier stage", pipeline(PLAIN, build="script { env.PATH = '/opt/tools:' + env.PATH }"), U),
+    ("script env.PATH = in an earlier stage",
+     pipeline(PLAIN, build="script { env.PATH = '/opt/tools:' + env.PATH }"), U),
     ("script env['PATH'] =", pipeline(PLAIN, build="script { env['PATH'] = '/opt/tools' }"), U),
-    ("script env.setProperty('PATH', ...)", pipeline(PLAIN, build="script { env.setProperty('PATH', '/opt/tools') }"), U),
+    ("script env.setProperty('PATH', ...)",
+     pipeline(PLAIN, build="script { env.setProperty('PATH', '/opt/tools') }"), U),
     ("script this.env.PATH =", pipeline(PLAIN, build="script { this.env.PATH = '/opt/tools' }"), U),
     ("script env computed name", pipeline(PLAIN, build="script { def n = 'PATH'; env.\"${n}\" = '/opt/tools' }"), U),
-    ("script env[n] computed", pipeline(PLAIN, build="script { def n = sh(script: 'cat n', returnStdout: true); env[n] = '/x' }"), U),
+    ("script env[n] computed",
+     pipeline(PLAIN, build="script { def n = sh(script: 'cat n', returnStdout: true); env[n] = '/x' }"), U),
     ("script env.FOO =", pipeline(PLAIN, build="script { env.FOO = 'bar' }"), P),
     # From the review's attack on the first version of this change (each was a pass there):
     # Groovy reads \0 to \377 as an octal escape, so '\120ATH' is PATH.
@@ -182,7 +185,8 @@ CASES = [
     ("a script property holding env", in_when("this.e = env; this.e.PATH = '/x'"), U),
     ("a method's default parameter", "def f(a = (env.PATH = '/tmp/x')) { a }\n"
      + pipeline(PLAIN, build="script { f() }"), U),
-    ("a switch case closure", pipeline(PLAIN, build="script { switch (1) { case { env.PATH = '/tmp/x'; true }: break } }"),
+    ("a switch case closure",
+     pipeline(PLAIN, build="script { switch (1) { case { env.PATH = '/tmp/x'; true }: break } }"),
      U),
     ("env.PATH++", pipeline(PLAIN, build="script { env.PATH++ }"), U),
     ("an unreadable statement inside a GString in a method", "def m() {\n  echo 'x'\n}\n" + pipeline(PLAIN) + "\n" * 20
@@ -190,8 +194,33 @@ CASES = [
     # Ordinary reads stay passes
     ("a loop bounded by an env value", pipeline(PLAIN, build="script { for (int i = 0; i < env.N.toInteger(); i++) "
                                                              "{ echo 'x' } }"), P),
-    ("env.getOverriddenEnvironment()", pipeline(PLAIN, build="script { echo env.getOverriddenEnvironment().toString() }"),
+    ("env.getOverriddenEnvironment()",
+     pipeline(PLAIN, build="script { echo env.getOverriddenEnvironment().toString() }"),
      P),
+    # From the fourth attack pass (each was a pass at 75146e9)
+    ("getProperty('env') on a closure's owner", pipeline(
+        PLAIN, build="script { def c = { owner.getProperty('env').PATH = \"${env.WORKSPACE}/t\" }; c() }"), U),
+    ("a computed property of a closure's delegate", pipeline(
+        PLAIN, build="script { def n = 'env'; def c = { delegate.\"${n}\".PATH = '/t' }; c.delegate = this; c() }"), U),
+    ("a pointer to getProperty", pipeline(PLAIN, build="script { def gp = this.&getProperty; gp('env').PATH = '/t' }"),
+     U),
+    ("a unicode-escaped env with ++", pipeline(PLAIN, build="script { \\u0065nv.PATH++ }"), U),
+    ("a default reaching env by a computed name", "def setUp(a =\n    getProperty('e' + 'nv').setProperty('PATH', '/t')) {"
+     " a }\n" + pipeline(PLAIN, build="script { setUp() }"), U),
+    ("a loop header reaching env by a computed name", in_when("for (getProperty('e' + 'nv').PATH = '/t'; false; ) {}"),
+     U),
+    ("a case label over several lines", pipeline(PLAIN, build="script {\n switch (1) {\n  case {\n   "
+                                                              "env.setProperty('PATH', '/t'); true\n  }:\n  case 2: "
+                                                              "break }\n}"), U),
+    # A property named env of something that cannot be the script, read, and the word env in a string, stay passes
+    ("Artifactory's buildInfo.env", pipeline(PLAIN, build="script { def b = Artifactory.newBuildInfo(); "
+                                                          "b.env.collect() }"), P),
+    ("a YAML file's env",
+     pipeline(PLAIN, build="script { def c = readYaml(file: 'c.yml'); def n = c.env.collect { it } }"),
+     P),
+    ("'env' as a default", "def deploy(String target = 'env') { echo target }\n"
+     + pipeline(PLAIN, build="script { deploy() }"), P),
+    ("'env' as a case label", pipeline(PLAIN, build="script { switch (params.T) { case 'env': echo 'x'; break } }"), P),
     # A failure the step ignores stays a finding whatever runs: OBAAF-JEN-011 reports it, and OBAAF-JEN-010 and 012
     # see no check, as before the review.
     ("withEnv PATH, failure ignored", pipeline(
