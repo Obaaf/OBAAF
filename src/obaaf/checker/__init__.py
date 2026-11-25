@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from obaaf import yamlutil
 from obaaf.catalog import Catalog, load
 from obaaf.checker import acceptance as acceptance_mod
+from obaaf.checker import artifact_consumers
 from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import jenkins as jenkins_mod
@@ -2512,6 +2513,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
     prepared = _prepare_workflows(read, root, None if on_its_own else root, config, declared, script_cmds,
                                   agent_actions, unread_actions, action_cache, steps_state)
     rules_mod.give_call_effects(groups, catalog.detection, config.agents)
+    artifact_sources = artifact_consumers.uploads(readable)
     for path, rel, workflow, reported in prepared:
         rels.append(rel)
         owned_paths.extend(_as_found(path, root))
@@ -2534,7 +2536,8 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
                 suspect_jobs.append((rel, job.id))
         try:
             found = rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets,
-                                            agents=config.agents, firewall=firewall, settings=settings).run()
+                                            agents=config.agents, firewall=firewall, settings=settings,
+                                            artifact_sources=artifact_sources).run()
         except expr_mod.TooComplex as exc:
             # A file the checker could not read is an error, never a pass.
             errors.append(f"{rel}: {exc}")

@@ -1234,6 +1234,8 @@ Only an explicit `obaaf fix --gate LEVEL` changes CI from reporting to failing a
 
 ### D-133 Withhold egress credit when the agent job may upload an artifact
 
+**Second step requested by Sean (F-359, #355 item 7).** An ordinary artifact upload alone leaves the producing job’s egress verdict intact. OBAAF-GHA-027 reports a visible transfer and possible execution on the consumer. A cleared producer control states the limits of that reading, including custom retrieval and other repositories. The distinct key-out-of-reach control retains D-133’s possible-upload reading.
+
 **Decision.** When the checker sees a possible artifact upload in an agent job, OBAAF-GHA-020 stays open even for an inspection-only upload with no visible downloader. Under either GitHub's native firewall or OBAAF's egress action, otherwise verified `egress-enforced` becomes "cannot tell". Under the action, the same applies to `key-out-of-reach`. An independently established "not met" verdict stands.
 
 **Reason.** A build or test can execute the uploaded files with the consuming job's own credentials and network access. Consumers can be outside the repository. Reporting a job that downloads and runs agent output is separate pre-launch work (#355 item 7).

@@ -753,10 +753,10 @@ rules:
       OBAAF lists as released, with a plain allow-list with no public suffix at or under a name, the
       agent as its command (no other step and no `env` of the job is given a credential, and the job
       cannot request OIDC tokens) and no step after it.
-      With either control, a possible artifact upload in the agent job makes otherwise verified
-      `egress-enforced` credit "cannot tell", even for inspection-only uploads with no visible download
-      (decision D-133). The same applies to `key-out-of-reach` under OBAAF's action. An independent "not
-      met" verdict stands. A possible upload is a step that uses upload-artifact or upload-pages-artifact;
+      A recognised artifact upload does not alone change the producing job's egress verdict.
+      OBAAF-GHA-027 reports visible execution of the download on the consuming job. Other steps
+      whose local behaviour is unread still withhold egress credit, and a possible upload still
+      withholds credit for `key-out-of-reach` under OBAAF's action (decision D-133). A possible upload is a step that uses upload-artifact or upload-pages-artifact;
       one that uses any action but `actions/checkout`, `actions/download-artifact`, `actions/cache`, and
       OBAAF's egress action and Harden-Runner at listed commits (so an agent run through an action, or an
       `actions/setup-` action, is "cannot tell"); one that runs a script other than lines of `echo`, `pwd`,
@@ -1193,6 +1193,20 @@ rules:
 
   # Jenkins (advisory). These rules read a Jenkinsfile and the files it names; controller
   # configuration is reported as coverage unknowns, never as a pass. See docs/jenkins.md.
+  - id: OBAAF-GHA-027
+    title: Job may execute an agent job's uploaded files
+    severity: medium
+    category: authority
+    requirements: [G8.1]
+    agent_controls: [R7]
+    supports: [FR7]
+    why: >-
+      A later job can run agent-written code with its own credentials and network access.
+    description: >-
+      A job downloads a named agent artifact and a subsequent step can execute files in the download location. The checker reads ordinary GitHub artifact actions in one workflow and named workflow_run subscriptions using the triggering run ID. Direct script invocations, common interpreters, package scripts and make are recognised. Custom downloads, expressions, wrapper scripts, other repositories, caches and job outputs may escape detection.
+    fix: >-
+      Review the downloaded files as data. If they must run, give the consuming job its own network and permission limits.
+
   - id: OBAAF-JEN-001
     title: Credentials available to change-request code or an AI agent
     severity: high

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 from obaaf import agent_tools
 from obaaf.catalog import Catalog
-from obaaf.checker import agent_flags
+from obaaf.checker import agent_flags, artifact_consumers
 from obaaf.checker import egress as egress_mod
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
@@ -746,7 +746,8 @@ class WorkflowRules:
 
     def __init__(self, workflow: Workflow, catalog: Catalog, protected: dict | None = None,
                  agents: dict | None = None, firewall: "egress_mod.FirewallPolicy | None" = None,
-                 settings: SettingsEvidence | None = None) -> None:
+                 settings: SettingsEvidence | None = None, artifact_sources=None) -> None:
+        self.artifact_sources = artifact_sources if artifact_sources is not None else artifact_consumers.uploads([workflow])
         self.wf = workflow
         self.catalog = catalog
         self.detection = catalog.detection
@@ -795,6 +796,7 @@ class WorkflowRules:
             self.untrusted_checkout(job)
             self.script_injection(job)
             self.agent_rules(job)
+            self.artifact_consumer(job)
             self.agent_tool_installs(job)
             self.agent_tool_settings(job)
             self.release_rules(job)
@@ -830,7 +832,7 @@ class WorkflowRules:
             return
         view = _through_view(self.wf, self.detection, self.agents)
         second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
-                               firewall=self.firewall, settings=self.settings)
+                               firewall=self.firewall, settings=self.settings, artifact_sources=self.artifact_sources)
         second._through = True
         second._problems = self.wf.problems      # a problem the second pass finds is the file's
         found = second.run()
@@ -1870,6 +1872,15 @@ class WorkflowRules:
         }
         self.add("OBAAF-GHA-020", job.line, templates[kind], job, kind=kind, controls=[egress], **values, **agents)
 
+    def artifact_consumer(self, job: Job) -> None:
+        for source, download, step, path in artifact_consumers.consumers(self.wf, job, self.artifact_sources):
+            self.add("OBAAF-GHA-027", step.line,
+                     "Job '{job}' downloads artifact '{artifact}' in '{download}' from agent job '{producer}' "
+                     "({workflow}). Step '{step}' can run '{path}' from the download with the consuming job's "
+                     "network and permissions. Review the artifact as data before running its contents.",
+                     job, step, kind="artifact-consumer", artifact=source.name, producer=source.job,
+                     workflow=source.workflow, download=download.name, path=path)
+
     # -------------------------------------------------------------- GHA-025
     _INSTALL_SCRIPT_LIMIT = 400_000     # characters of one step's scripts, after variables are put in
     # Programs that run what they are given on standard input, or as the text of `-c`, as code.
@@ -2609,6 +2620,8 @@ class WorkflowRules:
             if step.uses is None or (step.confines and step.uses.partition("@")[2] in releases):
                 continue
             where = f"step '{one_line(first.name, 80)}' in job '{one_line(job.id, 80)}' runs a script, which can change"
+            if step.clean_action in ("actions/upload-artifact", "actions/upload-pages-artifact", "actions/upload-artifact/merge"):
+                continue
             if step.index > first.index:
                 return (f"{where} through GITHUB_ENV or GITHUB_PATH what step '{one_line(step.name, 80)}', which runs "
                         "after it, runs, and an action runs with the token that uploads artifacts")
@@ -2618,7 +2631,7 @@ class WorkflowRules:
                         "has), and an action runs with the token that uploads artifacts")
         return None
 
-    def _artifact_upload(self, job: Job) -> str | None:
+    def _artifact_upload(self, job: Job, *, egress: bool = False) -> str | None:
         """Return producer-side evidence. A later job's existence or behavior is immaterial."""
         direct_agents = set((self.detection.get("agent_installs") or {}).values())
         releases = self.detection.get("egress_action_releases") or ()
@@ -2631,7 +2644,11 @@ class WorkflowRules:
             action = step.clean_action
             where = f"step '{one_line(step.name, 80)}' in job '{one_line(job.id, 80)}'"
             if action in ("actions/upload-artifact", "actions/upload-artifact/merge", "actions/upload-pages-artifact"):
-                return f"{where} uploads an artifact"
+                if not egress:
+                    return f"{where} uploads an artifact"
+                if self._upload_env_steers(job, step):
+                    return f"{where} uploads an artifact, but {steered}"
+                continue
             if step.uses is not None:
                 ref = step.uses.partition("@")[2]
                 if step.confines and ref in releases:
@@ -2670,7 +2687,13 @@ class WorkflowRules:
             rank = {VERIFIED: 0, CANNOT_TELL: 1, NOT_MET: 2}
             best = min(readings, key=lambda r: rank[r.verdict])     # the first of the best, in the order above
             conditions = tuple(c for reading in readings for c in reading.conditions)
-            return Control(self.EGRESS_NAME, best.verdict, best.detail, self.EGRESS_ID, conditions), best.kind, best.values
+            detail = best.detail
+            if best.verdict == VERIFIED:
+                detail += (" This verdict covers the producing job. A later job can run uploaded files with its own "
+                           "network and credentials. The checker matches visible artifact names and execution paths. "
+                           "Custom downloads, scripts, computed values, other repositories, caches and job outputs "
+                           "can carry files or code beyond that check.")
+            return Control(self.EGRESS_NAME, best.verdict, detail, self.EGRESS_ID, conditions), best.kind, best.values
         declared = job.env.get("OBAAF_EGRESS") or self.wf.env.get("OBAAF_EGRESS")
         kind, values = ("declared", {"declared": str(declared)}) if declared else ("none", {})
         if declared:
@@ -2758,7 +2781,7 @@ class WorkflowRules:
                 unsure.append(f"the policy allows {one_line(', '.join(wide[:5]), 120)}, which is or has under it "
                               "a public suffix (where anyone can register a name), and the firewall's README does "
                               "not say whether an allowed name covers the names under it")
-        upload = self._artifact_upload(job) or self._script_steers_action(job)
+        upload = self._artifact_upload(job, egress=True) or self._script_steers_action(job)
         if upload:
             unsure.append(f"{upload}. The job's network restriction does not extend to its artifact in another job")
         verdict = egress_mod.worst(problems, unsure)
@@ -3539,7 +3562,7 @@ class WorkflowRules:
                               "and the path may reach /tmp or the confined command's output")
                 continue
             if not before:
-                if step.clean_action in ("actions/upload-artifact", "actions/upload-artifact/merge"):
+                if step.clean_action in ("actions/upload-artifact", "actions/upload-artifact/merge", "actions/upload-pages-artifact"):
                     continue
                 after.append(where)
             elif refs:
@@ -3552,13 +3575,13 @@ class WorkflowRules:
             group(unsure, after, " can run after it or beside it, and the checker cannot tell "
                   "whether it runs or loads anything the command wrote (an actions/upload-artifact step is "
                   "read as an upload instead)")
-        upload = self._artifact_upload(job)
+        upload = self._artifact_upload(job, egress=True)
         if upload:
             unsure.append(f"{upload}. The job's network restriction does not extend to its artifact in another job")
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             detail = (f"the agent's command runs under OBAAF's egress action at a commit OBAAF lists as released, "
-                      f"allowing {one_line(', '.join(allow_shown), 200)}, and no other step runs after it. "
+                      f"allowing {one_line(', '.join(allow_shown), 200)}, and no later step other than an artifact upload was recognised. "
                       f"{self._leaks(placements)}")
         else:
             detail = egress_mod.joined(problems or unsure)

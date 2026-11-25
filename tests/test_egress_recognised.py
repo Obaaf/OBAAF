@@ -385,9 +385,9 @@ class EgressActionTest(unittest.TestCase):
     def test_output_uploads_and_later_steps_limit_egress_evidence(self):
         upload = (f"      - uses: actions/upload-artifact@{SHA}\n"
                   "        with: {name: out, path: '${{ steps.agent.outputs.workspace }}'}")
-        self.assertEqual(verdict(self.check(action() + "\n" + upload)), CANNOT_TELL)
+        self.assertEqual(verdict(self.check(action() + "\n" + upload)), VERIFIED)
         named = upload.replace("      - uses:", "      - name: Upload what obaaf-egress left\n        uses:")
-        self.assertEqual(verdict(self.check(action() + "\n" + named)), CANNOT_TELL)
+        self.assertEqual(verdict(self.check(action() + "\n" + named)), VERIFIED)
         unsure = {
             "any script after it": "      - run: echo done",
             "another output": "      - run: echo '${{ steps.agent.outputs.denied }}'",

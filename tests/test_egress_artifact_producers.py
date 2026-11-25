@@ -21,13 +21,13 @@ ROUTES = {
 
 
 class ArtifactProducerTest(unittest.TestCase):
-    def test_upload_changes_producer_verdict_without_a_visible_consumer(self):
+    def test_visible_upload_preserves_producer_egress_without_a_consumer(self):
         for route, (runner, steps, baseline_key) in ROUTES.items():
             for action_name in (None, "upload-artifact", "upload-pages-artifact"):
                 with self.subTest(route=route, upload=action_name):
                     body = steps if action_name is None else steps + "\n" + upload(action_name)
                     result = run_check(workflow(body, runs_on=runner), policy=FIREWALL)
-                    expected = VERIFIED if action_name is None else CANNOT_TELL
+                    expected = VERIFIED
                     self.assertEqual(verdict(egress(result)), expected)
                     finding = secret_finding(result)
                     controls = {control.id: control.verdict for control in finding.controls}
@@ -35,7 +35,40 @@ class ArtifactProducerTest(unittest.TestCase):
                     key = CANNOT_TELL if action_name and route == "action" else baseline_key
                     self.assertEqual(controls["key-out-of-reach"], key)
                     egress_state = next(f.state for f in result.findings if f.rule == "OBAAF-GHA-020")
-                    self.assertEqual(egress_state, "fixed" if action_name is None else "cannot-tell")
+                    self.assertEqual(egress_state, "fixed")
+
+    def test_only_the_job_that_could_run_downloaded_code_gets_the_finding(self):
+        _, steps, _ = ROUTES["action"]
+        producer = workflow(steps + "\n" + upload())
+        for command, reported in (("cat result/report.txt", False), ("echo ./result/report.txt", False),
+                                  ("sh result/report.txt", True), ("./elsewhere/report.txt", False)):
+            with self.subTest(command=command):
+                consumer = ("  read:\n    needs: agent\n    runs-on: ubuntu-24.04\n    steps:\n"
+                            f"      - uses: actions/download-artifact@{SHA}\n"
+                            "        with: {name: report, path: result}\n"
+                            f"      - name: inspect\n        run: {command}\n")
+                result = run_check(producer + consumer)
+                found = [f for f in result.findings if f.rule == "OBAAF-GHA-027"]
+                self.assertEqual([(f.job, f.step) for f in found], [("read", "inspect")] if reported else [])
+                self.assertEqual(verdict(egress(result)), VERIFIED)
+                self.assertIn("other repositories", egress(result).controls[0].detail)
+                unrelated = run_check(producer + consumer.replace("name: report", "name: another"))
+                self.assertFalse(any(f.rule == "OBAAF-GHA-027" for f in unrelated.findings))
+
+    def test_triggering_run_is_matched_to_its_named_workflow(self):
+        _, steps, _ = ROUTES["action"]
+        producer = "name: Producer\n" + workflow(steps + "\n" + upload())
+        consumer = ("on:\n  workflow_run:\n    workflows: [Producer]\n    types: [completed]\n"
+                    "jobs:\n  read:\n    runs-on: ubuntu-24.04\n    steps:\n"
+                    f"      - uses: actions/download-artifact@{SHA}\n"
+                    "        with:\n          name: report\n          path: result\n"
+                    "          run-id: '${{ github.event.workflow_run.id }}'\n"
+                    "          github-token: '${{ github.token }}'\n"
+                    "      - run: sh result/report.txt\n")
+        for subscribed, count in (("Producer", 1), ("Elsewhere", 0)):
+            with self.subTest(subscribed=subscribed):
+                result = run_check(producer, files={".github/workflows/read.yml": consumer.replace("Producer", subscribed)})
+                self.assertEqual(sum(f.rule == "OBAAF-GHA-027" for f in result.findings), count)
 
     def test_a_sibling_jobs_upload_does_not_change_producer_egress(self):
         for route, (runner, steps, _) in ROUTES.items():
