@@ -3520,12 +3520,14 @@ class JenkinsRules:
                             "getAt", "containsKey", "keySet", "entrySet", "values", "toString", "hashCode", "isEmpty",
                             "size", "equals"})
     _ENV_SETTERS = frozenset({"setProperty", "put", "putAt"})
+    _ENV_MUTATORS = _ENV_SETTERS | {"with", "identity", "tap", "putAll", "invokeMethod", "metaClass", "setMetaClass",
+                                    "overrideAll", "override"}
     _IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
     # In text the parser keeps no node for (a loop's header, a method's parameters and their defaults, a switch's case
     # labels): `env` used as a value (not followed by `.`, `?.` or `[`), written to, incremented, or with a method
     # that may set a variable named. Bounded, and run only on those short texts.
     _ENV_TEXT_RISK = re.compile(
-        r"""\b(?:getProperty|getAt|invokeMethod|setProperty)\b|\.\s*&|\.\s*["']\$|[\[.]\s*(?:'env'|"env")|"""
+        r"""\b(?:getProperty|getAt|invokeMethod|setProperty)\b|\.\s*&|\.\s*["']\$|[\[.]\s*(?:'{1,3}env'{1,3}|"{1,3}env"{1,3})|"""
         r"""(?<!['"])\benv\b(?!['"])(?!\s*(?:\?\.|\.|\[))"""
         r"""|\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\*\*|<<|>>>|>>|\?:|[-+*/%&|^])?=(?![=~])"""
         r"""|\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\+\+|--)|(?:\+\+|--)\s*\benv\b"""
@@ -3555,8 +3557,7 @@ class JenkinsRules:
         writes = []
         # Receivers that can be the script itself: `this` and the names Groovy gives a closure's owners, variables the
         # file gives one of them anywhere, and every parameter of a method or closure (a caller may pass `this`).
-        script_names = {"this", "script", "steps", "binding", "owner", "delegate", "thisObject", "it"} | \
-            self.p.script_vars
+        script_names = {"this", "script", "steps", "binding", "owner", "delegate", "thisObject"} | self.p.script_vars
         parents: dict = {}
         entries = []               # (node, the line to report, the interpolation's text or None)
         roots = [(tree, None, None)]
@@ -3589,56 +3590,75 @@ class JenkinsRules:
                         else:
                             roots.append((sub.tree, here, text))
 
+        # A method's or closure's parameter, and `it`, may be the script, or anything else (a map with an `env` key):
+        # their `env` counts only where it is written to or given a method that may set a variable.
+        param_names = {"it"}
         for n, _line, _own in entries:
             if isinstance(n, MethodDef):
-                script_names.update(p for p in n.params if isinstance(p, str))
+                param_names.update(p for p in n.params if isinstance(p, str))
             elif isinstance(n, (Closure, Block)) and getattr(n, "params", None):
-                script_names.update(p for p in n.params if isinstance(p, str))
-        def scriptish(n) -> bool:
-            """Whether `n` can be the script: a name in `script_names`, a chain of `owner`, `delegate` or
-            `thisObject` after one (`owner.owner`), or `getOwner()` and its kin on anything."""
+                param_names.update(p for p in n.params if isinstance(p, str))
+        def scriptish(n) -> str | None:
+            """"strong" when `n` can be the script by its name (a name in `script_names`, a chain of `owner`,
+            `delegate` or `thisObject` after one, `getOwner()` and its kin on anything), "weak" when it is a
+            parameter or `it` (or such a chain after one), None otherwise."""
             if n is None:
-                return True
+                return "strong"
             if isinstance(n, Call):
                 callee = n.callee
                 name = callee.name if isinstance(callee, Prop) else (path_of(callee) or "")
-                return name in ("getOwner", "getDelegate", "getThisObject")
+                return "strong" if name in ("getOwner", "getDelegate", "getThisObject") else None
             path = path_of(n)
             if path is None:
-                return isinstance(n, Prop) and n.name in ("owner", "delegate", "thisObject") and scriptish(n.target)
+                if isinstance(n, Prop) and n.name in ("owner", "delegate", "thisObject"):
+                    return scriptish(n.target)
+                return None
             first, *rest = path.split(".")
-            return first in script_names and all(part in ("owner", "delegate", "thisObject") for part in rest)
+            if not all(part in ("owner", "delegate", "thisObject") for part in rest):
+                return None
+            return "strong" if first in script_names else "weak" if first in param_names else None
+
+        weak_env: set = set()
+
+        def env_ref(n, writing: bool = False) -> str | None:
+            """"strong" when `n` is, or may be, the build's `env`; "weak" when it may be, through a parameter or `it`
+            (`it.env`), so that only a write or a method that may set a variable counts; None otherwise. A property
+            named `env` of a receiver that cannot be the script (`buildInfo.env`, `config.env`) counts only where it is
+            written to."""
+            if isinstance(n, Name):
+                return "strong" if n.name == "env" else "weak" if n.name in weak_env else None
+            if isinstance(n, Prop):
+                if n.name == "env":
+                    return "strong" if writing else scriptish(n.target)
+                return scriptish(n.target) if "${" in n.name else None
+            if isinstance(n, Call) and (n.callee.name if isinstance(n.callee, Prop) else (path_of(n.callee) or "")) in (
+                    "getProperty", "getAt"):
+                key = literal(n.args[0]) if n.args else None
+                return "strong" if key is None or key == "env" else None
+            if isinstance(n, Index):
+                level = scriptish(n.target)
+                key = literal(n.index)
+                return level if level and (key is None or key == "env") else None
+            return None
 
         for _round in range(4):
-            before = len(script_names)
+            before = len(script_names) + len(param_names) + len(weak_env)
             for n, _line, _own in entries:
                 value = n.value if isinstance(n, (Decl, Assign)) else None
                 name = n.name if isinstance(n, Decl) else (n.target.name if isinstance(n, Assign) and isinstance(
                     n.target, Name) else None)
-                if name and value is not None and (scriptish(value) or any(
-                        isinstance(m, Name) and m.name in ("this", "owner", "delegate", "thisObject")
-                        for m in find_nodes(value, lambda _m: True, limit=2_000))):
+                if not name or value is None or name in script_names:
+                    continue
+                level = scriptish(value)
+                if level == "strong" or any(isinstance(m, Name) and m.name in ("this", "owner", "delegate", "thisObject")
+                                            for m in find_nodes(value, lambda _m: True, limit=2_000)):
                     script_names.add(name)            # def s = this, def s = c ? this : null
-            if len(script_names) == before:
+                elif level == "weak":
+                    param_names.add(name)             # def t = s, with s a parameter
+                elif env_ref(value) == "weak":
+                    weak_env.add(name)                # def e = s.env, with s a parameter: a write through e counts
+            if len(script_names) + len(param_names) + len(weak_env) == before:
                 break
-
-        def env_ref(n, writing: bool = False) -> bool:
-            """Whether `n` is, or may be, the build's `env`. A property named `env` of a receiver that cannot be the
-            script (`buildInfo.env`, `config.env`) counts only where it is written to."""
-            if isinstance(n, Name):
-                return n.name == "env"
-            if isinstance(n, Prop):
-                if n.name == "env":
-                    return writing or scriptish(n.target)
-                return "${" in n.name and scriptish(n.target)
-            if isinstance(n, Call) and (n.callee.name if isinstance(n.callee, Prop) else (path_of(n.callee) or "")) in (
-                    "getProperty", "getAt"):
-                key = literal(n.args[0]) if n.args else None
-                return key is None or key == "env"
-            if isinstance(n, Index) and scriptish(n.target):
-                key = literal(n.index)
-                return key is None or key == "env"
-            return False
 
         postfix_lines: dict = {}
 
@@ -3683,7 +3703,8 @@ class JenkinsRules:
                 (isinstance(above_parent, Assign) and above_parent.target is parent) or (
                     isinstance(above_parent, Call) and above_parent.callee is parent and isinstance(parent, Prop)
                     and parent.name in self._ENV_SETTERS))
-            if env_ref(n, writing=written):
+            level = env_ref(n, writing=written)
+            if level:
                 if isinstance(parent, (Prop, Index)) and parent.target is n:
                     use = parent
                     above = parents.get(id(use))
@@ -3697,15 +3718,13 @@ class JenkinsRules:
                         if use.name in self._ENV_SETTERS:
                             key = literal(above.args[0]) if len(above.args) >= 2 else None
                             writes.append((key if key and self._IDENTIFIER.fullmatch(key) else "?", line))
-                        elif use.name not in self._ENV_READS:
+                        elif use.name not in self._ENV_READS and (level == "strong" or use.name in self._ENV_MUTATORS):
                             writes.append(("?", line))
-                    elif isinstance(use, Prop) and use.name in self._ENV_SETTERS | {
-                            "with", "identity", "tap", "putAll", "invokeMethod", "metaClass", "setMetaClass",
-                            "overrideAll", "override"}:
+                    elif isinstance(use, Prop) and use.name in self._ENV_MUTATORS:
                         writes.append(("?", line))     # env.&setProperty, env.metaClass
                     elif postfix(line, own):
                         writes.append(("?", line))     # env.PATH++: the parser keeps no node for a postfix operator
-                else:
+                elif level == "strong":
                     writes.append(("?", line))         # env as a value: an alias, a delegate, an argument, a result
             elif isinstance(n, Call):
                 callee = n.callee

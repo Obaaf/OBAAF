@@ -236,6 +236,18 @@ CASES = [
      U),
     ("owner.owner.env in a when expression", in_when("def c = { owner.owner.env.putAll([PATH: '/t']) }; c()"), U),
     ("it.env", pipeline(PLAIN, build="script { this.with { it.env.putAll([PATH: '/t']) } }"), U),
+    # From the last attack pass: a triple-quoted 'env' in a default or a loop's header
+    ("a triple-quoted env in a default", "def f(a = this[" + "'" * 3 + "env" + "'" * 3 + "].putAll([PATH: '/t'])) { a }\n"
+     + pipeline(PLAIN, build="script { f() }"), U),
+    ("a parameter's env given putAll", "def setup(s) { def t = s; t.env.putAll([PATH: '/t']) }\n"
+     + pipeline(PLAIN, build="script { setup(this) }"), U),
+    ("a parameter's env given to a variable, then written", "def setup(s) { def e = s.env; e.PATH = '/t' }\n"
+     + pipeline(PLAIN, build="script { setup(this) }"), U),
+    # A list of maps with an env key, read through it or a closure's parameter, stays a pass
+    ("it.env read", pipeline(PLAIN, build="script { def targets = [[name: 'a', env: 'prod']]; "
+                                          "targets.each { echo(it.env) }; targets.each { x -> echo(\"${x.env}\") } }"), P),
+    ("a parameter's env collected", "def pub(b) { b.env.collect { it } }\n"
+     + pipeline(PLAIN, build="script { pub([env: [1]]) }"), P),
     # A failure the step ignores stays a finding whatever runs: OBAAF-JEN-011 reports it, and OBAAF-JEN-010 and 012
     # see no check, as before the review.
     ("withEnv PATH, failure ignored", pipeline(

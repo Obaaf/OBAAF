@@ -3117,6 +3117,9 @@ and a case label runs to the next case.
 method's result or an index (`me().getProperty('env')`, `[this][0].getAt('env')`, `getOwner().getProperty`) and
 `this['env']` or `this.'env'` in the dropped texts, both fixed; and, needing data flow, `this` through a ternary,
 `it`, `owner.owner`, now read, and `me().env`, a stated limit with other reflection the checker does not model.
+A last pass (about 60 attempts on `8d98aea`) found a triple-quoted `env` in the dropped texts, fixed; and the claims
+reviewer found that `targets.each { echo(it.env) }` was "cannot tell", so a parameter's or `it`'s `env` now counts
+only where it is written to or given a method that may set a variable, and a variable given one is followed.
 
 **Claims review** (a second Opus 5.5 sub-agent): the template is "cannot tell" for its `PATH` change only (replacing
 both `withEnv` calls with `dir('.')` gives three passes); a check under such a variable before a publish in a later
