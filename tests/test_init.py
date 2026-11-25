@@ -70,11 +70,29 @@ jobs:
         self.assertEqual(status, 0, text)
         config = Config.load(self.root)
         self.assertEqual(config.protected_secrets, {"PRIVATE_MODEL": "production"})
-        self.assertEqual(config.lanes, {".github/workflows/jobs.yml#ai": "agent",
-                                        ".github/workflows/jobs.yml#custom": "agent"})
+        self.assertEqual(config.lanes, {".github/workflows/jobs.yml#custom": "agent"})
         self.assertIn("Review DEPLOY_TOKEN", text)
         self.assertIn("Review ANTHROPIC_API_KEY", text)
         self.assertIn("codex", text.lower())
+
+    def test_script_agent_with_a_provider_key_keeps_its_inferred_lane(self):
+        workflow = self.workflow.with_name("script.yml")
+        workflow.parent.mkdir(parents=True)
+        (self.root / "review.sh").write_text("codex exec 'review'\n")
+        workflow.write_text("""on: push
+jobs:
+  review:
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - run: bash review.sh
+""")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertEqual(Config.load(self.root).lanes, {})
+        self.assertIn("script.yml#review:", text)
+        self.assertIn("references OPENAI_API_KEY", text)
+        self.assertNotIn("To create an agent workflow", text)
 
     def test_conflicts_in_either_file_stop_both_writes(self):
         for target, other in [(self.workflow, self.config), (self.config, self.workflow)]:
@@ -193,8 +211,7 @@ jobs:
         self.assertEqual(status, 0, text)
         self.assertIn("local.yml#named: codex", text)
         self.assertIn("provider.yml#custom: references AZURE_OPENAI_API_KEY", text)
-        self.assertEqual(set(Config.load(self.root).lanes), {
-            ".github/workflows/local.yml#named", ".github/workflows/provider.yml#custom"})
+        self.assertEqual(Config.load(self.root).lanes, {".github/workflows/provider.yml#custom": "agent"})
         self.assertIn("Review AZURE_OPENAI_API_KEY", text)
 
     def test_unnamed_access_in_other_environment_keeps_named_secret_for_review(self):
