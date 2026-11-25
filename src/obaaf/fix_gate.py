@@ -17,13 +17,20 @@ from obaaf.init import WORKFLOW
 from obaaf.checker.workflow import one_line
 
 BASELINE = Path(".github/obaaf-baseline.json")
+SETTINGS = Path(".github/obaaf-settings.json")
 REPORT = b'obaaf check source "${config[@]}" --fail-on never\n'
-# Both the pre-gate report and the first gate-capable template installed this checker. The digest is
-# that template as it landed on flagship with #293 (27b15c9, after ad03f16 changed its pull-request
-# policy step). A later change to the template other than its setup pin stops it matching, and then
-# earlier workflows are no longer recognised; the tests of earlier workflows fail (review-gpt #306).
+# Every gate-capable template init has shipped, as it landed, with the checker it installed. A team
+# keeps its workflow's checker when only the gate changes, so each is recognised at its own pin and,
+# after the pin-only update docs/upgrading.md describes, at the current template's pin. The bytes are
+# package data, not rebuilt from the current template: a later edit of the template then cannot stop
+# workflows installed from an earlier one being recognised (review-gpt #306, #367). A test holds each
+# file to the SHA-256 it had when it landed, so add a file here whenever the template changes.
+SETUP = rb"uses: Obaaf/OBAAF/actions/setup-obaaf@[0-9a-f]{40}"
+FIRST_GATE = files("obaaf.data").joinpath("init-gate-27b15c9.yaml")
 ORIGINAL_SETUP = b"uses: Obaaf/OBAAF/actions/setup-obaaf@4e2ba222d31f9ce8e7e352f18e8f88c75aabcbd8"
-GATE_TEMPLATE_DIGEST = "ad3c9f980acc1003b31695d3f7fdbee488ec4ecf10fbe12ac7a8621ddbaa67cb"
+SETTINGS_GATE = files("obaaf.data").joinpath("init-gate-settings-8caddd6.yaml")
+SETTINGS_SETUP = b"uses: Obaaf/OBAAF/actions/setup-obaaf@8caddd6f06c50b9266d8116fd672f39b55770477"
+LANDED = ((FIRST_GATE, ORIGINAL_SETUP), (SETTINGS_GATE, SETTINGS_SETUP))
 LEGACY_DIGEST = "58b64917ab435b974f4d6defac5b9c6f2dab3c536097cdef8e7e8402f4977b5c"
 
 
@@ -39,13 +46,14 @@ def _candidate(original, path, level):
             return None
         original = original.replace(b"\r\n", b"\n")
     template = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
-    # Reconstruct the first gate-capable template only when the complete historical
-    # body matches its digest. Gate activation does not change the installed checker.
-    historical = re.sub(rb"uses: Obaaf/OBAAF/actions/setup-obaaf@[0-9a-f]{40}", ORIGINAL_SETUP, template)
+    current = re.findall(SETUP, template)
     templates = [template]
-    historical_known = sha256(historical).hexdigest() == GATE_TEMPLATE_DIGEST
-    if historical_known and historical != template:
-        templates.append(historical)
+    for landed, pin in LANDED:
+        body = landed.read_bytes()
+        for moved in (body, *(body.replace(pin, setup) for setup in current[:1])):
+            if moved not in templates:
+                templates.append(moved)
+    first = FIRST_GATE.read_bytes()
     names = tuple(init_scanners.SCANNERS)
     for count in range(len(names) + 1):
         for selected in combinations(names, count):
@@ -58,7 +66,7 @@ def _candidate(original, path, level):
                     continue
             body = original.removesuffix(tail)
             for source in templates:
-                legacy = historical_known and source == historical and sha256(body).hexdigest() == LEGACY_DIGEST
+                legacy = source == first and sha256(body).hexdigest() == LEGACY_DIGEST
                 if body == source or legacy or any(
                     body == _gate_workflow(source, path, old) for old in ("low", "medium", "high")
                 ):
@@ -109,6 +117,11 @@ def run(args, root, options, lock, show_diff):
     print(f"Gate preview at --fail-on {args.gate}: {gated} "
           f"{'finding currently counts' if gated == 1 else 'findings currently count'}. "
           f"Baseline: {one_line(str(options.baseline)) if options.baseline else 'absent; zero baseline acceptances'}.")
+    if b"OBAAF_USE_SETTINGS" in updated and (root / SETTINGS).exists():
+        # The preview cannot take --settings (D-112), and the workflow's runs may read the snapshot.
+        print(f"This count does not use {SETTINGS.as_posix()}. If the repository variable OBAAF_USE_SETTINGS "
+              "is true, the workflow's runs give the checker a snapshot (on a pull request, the target "
+              "commit's), so their count can differ.")
     show_diff(edit)
     if args.patch is not None:
         from obaaf.fix_patch import save_patch
