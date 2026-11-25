@@ -20,7 +20,7 @@ def _job(copy, options, result, name):
     matches = []
     for rel in result.workflow_files:
         path = base / rel
-        text = path.read_text(encoding="utf-8")
+        text = path.read_bytes().decode("utf-8")
         wf = workflow.parse(rel, text)
         if name in wf.jobs:
             matches.append((path, text, wf.jobs[name]))
@@ -32,54 +32,58 @@ def _job(copy, options, result, name):
     return matches[0]
 
 
-def _plain(value):
-    """The loader's annotated mappings and lists as plain data. Dates, numbers and text are kept."""
-    if isinstance(value, dict):
-        return {_plain(k): _plain(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_plain(v) for v in value]
-    return value
+def _field(node, key):
+    return next((k, value) for k, value in node.value if k.value == key)
 
 
-class _DisplayDumper(yaml.SafeDumper):
-    """Prints a script of several lines as a block, as it is usually written."""
+def _replace_run(text, node, action, inputs):
+    """Move the original run scalar under with, preserving every other step field."""
+    key, script = _field(node, "run")
+    start, end = key.start_mark.index, script.end_mark.index
+    # Values generated from environment names can themselves be YAML booleans.
+    encoded = {k: v if yaml.safe_load(v) == v else "'" + v + "'"
+               for k, v in inputs.items() if k != "run"}
+    if node.flow_style:
+        fields = ", ".join(f"{k}: {v}" for k, v in encoded.items())
+        return text[:start] + f"uses: {action}, with: {{{fields}, " + text[start:end] + "}" + text[end:]
+    newline = "\r\n" if "\r\n" in text else "\n"
+    indent = " " * key.start_mark.column
+    fields = [f"uses: {action}", indent + "with:"]
+    fields.extend(f"{indent}  {k}: {v}" for k, v in encoded.items())
+    original = text[start:end].splitlines(keepends=True)
+    moved = indent + "  " + original[0] + "".join("  " + line for line in original[1:])
+    return text[:start] + newline.join(fields) + newline + moved + text[end:]
 
 
-def _text(dumper, value):
-    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style="|" if "\n" in value else None)
+def _job_text(text, name):
+    jobs = _field(yaml.compose(text), "jobs")[1]
+    key, value = _field(jobs, name)
+    start = key.start_mark.index
+    end = value.end_mark.index
+    if jobs.flow_style:
+        return text[start:end]
+    start -= key.start_mark.column
+    # Block mappings can end at the next job's key, past its leading spaces.
+    if text[end - value.end_mark.column:end].isspace():
+        end -= value.end_mark.column
+    return text[start:end]
 
 
-_DisplayDumper.add_representer(str, _text)
-
-
-def _needs_escapes(value):
-    """Whether any text in `value` holds a character other than a line feed or tab that Python does
-    not count as printable."""
-    if isinstance(value, str):
-        return any(c not in "\n\t" and not c.isprintable() for c in value)
-    if isinstance(value, dict):
-        return any(_needs_escapes(k) or _needs_escapes(v) for k, v in value.items())
-    if isinstance(value, list):
-        return any(_needs_escapes(v) for v in value)
-    return False
-
-
-def _flow(data):
-    """One line of YAML for `data`. PyYAML escapes what YAML cannot hold as it is (a character outside
-    the Basic Multilingual Plane as one `\\U` escape, the Unicode line separators), quotes text that would
-    read as another type, and writes dates as dates. Review of A3a (review-gpt #283): the JSON written
-    here before split an emoji into two halves that YAML reads as two characters, and refused a date."""
-    return yaml.dump(data, Dumper=yaml.SafeDumper, default_flow_style=True, width=float("inf"),
-                     allow_unicode=False, sort_keys=False).rstrip("\n")
-
-
-def _rewrite(job, text, name, catalog, agents, pin):
+def _rewrite(job, text, name, catalog, agents, pin, selector):
     if any(isinstance(event, yaml.events.AliasEvent) for event in yaml.parse(text)):
         raise ValueError("workflow uses YAML aliases; review shared steps by hand")
-    candidates = WorkflowRules(job.workflow, catalog, agents=agents).draft_agent_steps(job)
-    if len(candidates) != 1:
-        raise ValueError("the checker must recognise exactly one direct agent step; review this job by hand")
-    step = candidates[0].raw
+    if selector is None:
+        candidates = [candidate.raw for candidate in
+                      WorkflowRules(job.workflow, catalog, agents=agents).draft_agent_steps(job)]
+        if len(candidates) != 1:
+            raise ValueError("the checker must recognise exactly one direct agent step; "
+                             "give --step with its exact name or ID")
+    else:
+        candidates = [item for item in job.raw.get("steps", []) if isinstance(item, dict)
+                      and selector and selector in (item.get("id"), item.get("name"))]
+        if len(candidates) != 1:
+            raise ValueError("--step must match exactly one step by its name or ID")
+    step = candidates[0]
     if (not isinstance(step.get("run"), str) or set(step) - {"run", "id", "name", "if", "env",
                                                             "timeout-minutes", "continue-on-error"}
             or job.raw.get("defaults") or job.workflow.raw.get("defaults")):
@@ -108,26 +112,16 @@ def _rewrite(job, text, name, catalog, agents, pin):
         inputs["env"] = " ".join(passed)
     new = {k: v for k, v in step.items() if k != "run"}
     new.update(uses=f"Obaaf/OBAAF/actions/egress@{pin}", **{"with": inputs})
-    new = _plain(new)
-
-    def field(node, key):
-        return next(value for k, value in node.value if k.value == key)
-
     doc = yaml.compose(text)
-    steps = field(field(field(doc, "jobs"), name), "steps")
-    raw_steps = job.raw["steps"]
-    index = next(i for i, item in enumerate(raw_steps) if item is step)
-    node = steps.value[index]
-    start, end = node.start_mark.index, node.end_mark.index
-    # A flow mapping on one line. Keep the surrounding document, including
-    # indentation consumed by a block node's end mark, exactly as the checker saw it.
-    tail = re.search(r"\s*\Z", text[start:end]).group()
-    edited = text[:start] + _flow(new) + tail + text[end:]
+    job_node = _field(_field(doc, "jobs")[1], name)[1]
+    steps = _field(job_node, "steps")[1]
+    index = next(i for i, item in enumerate(job.raw["steps"]) if item is step)
+    edited = _replace_run(text, steps.value[index], new["uses"], inputs)
     expected = yamlutil.load(text)
     expected["jobs"][name]["steps"][index] = new
     if yamlutil.load(edited) != expected:
         raise ValueError("could not preserve the surrounding workflow; review this job by hand")
-    return edited, _plain(expected["jobs"][name]), blocked, broken, index
+    return edited, new, blocked, broken, index
 
 
 def run(args, catalog=None):
@@ -150,21 +144,17 @@ def run(args, catalog=None):
             before = check_inputs(copy, options, today, catalog)
             check_copy_matches(root, check_inputs(root, options, today, catalog), before)
             path, text, job = _job(copy, options, before, args.job)
-            edited, draft, blocked, broken, index = _rewrite(job, text, args.job, catalog, before.config.agents, pin)
-            path.write_text(edited, encoding="utf-8")
+            edited, draft, blocked, broken, index = _rewrite(job, text, args.job, catalog, before.config.agents, pin, args.step)
+            path.write_bytes(edited.encode("utf-8"))
             after = check_inputs(copy, options, today, catalog)
         if getattr(args, "brief", False):
             from obaaf.fix_egress_brief import work_order
-            print(work_order(job, index, draft["steps"][index], blocked, broken, options, after))
+            print(work_order(job, index, draft, blocked, broken, options, after))
             return 0
         shown = path.relative_to(copy).as_posix()
-        # Everything is worked out before anything is printed, so a refusal prints only itself
-        # (review of A3a: a date in the job printed the verdicts and then refused).
-        # Escapes for the whole job when any text holds a character Python does not count as printable
-        # (a direction override, a zero-width space, U+0085, a private-use character): printed as it
-        # is, it could make a script read otherwise, or read back as other text (second review pass).
-        draft_text = yaml.dump({args.job: draft}, Dumper=_DisplayDumper, sort_keys=False,
-                               allow_unicode=not _needs_escapes(draft))
+        draft_text = _job_text(edited, args.job)
+        if any(c not in "\r\n\t" and not c.isprintable() for c in draft_text):
+            raise ValueError("job contains non-printable source characters; review this job by hand")
         lines = [
             "Draft only. Replace the reserved .invalid placeholder with required hosts. The checker "
             "evaluates this exact placeholder list. If you adopt the draft, review the action's denied "

@@ -68,7 +68,7 @@ class EgressDraftTests(unittest.TestCase):
             self.assertIn("OBAAF-GHA-020: cannot-tell", out)
             # The later step is named among the conditions, not only in the printed job (review of A3a:
             # the sentence about splitting is printed for every job, and the step's text only in the job).
-            details = out.split("Conditions still requiring work on the egress action:")[1].split("\nreview:")[0]
+            details = out.split("Conditions still requiring work on the egress action:")[1].split("\n  review:")[0]
             self.assertIn("step 'step 2' can run after it or beside it", details)
         with TempDir() as root:
             self.workflow(root)
@@ -143,7 +143,7 @@ class EgressDraftTests(unittest.TestCase):
                 self.assertIn("RELEASED: 2026-01-02", out)
                 self.assertEqual(path.read_bytes(), original)
                 if name == "emoji":
-                    self.assertIn("name: \U0001F916 Review", out)
+                    self.assertIn('name: "\U0001F916 Review"', out)
                     self.assertIn("run: claude -p 'review \U0001F600'", out)
 
     def test_a_refusal_prints_nothing_else(self):
@@ -186,7 +186,7 @@ class EgressDraftTests(unittest.TestCase):
                             .replace("permissions: {}", "permissions: {id-token: write, models: read}"))
             code, out, err = self.draft(root)
             self.assertEqual(code, 0, err)
-            details = out.split("Conditions still requiring work on the egress action:")[1].split("\nreview:")[0]
+            details = out.split("Conditions still requiring work on the egress action:")[1].split("\n  review:")[0]
             for reason in ("OIDC", "GitHub Models", "ubuntu-latest", "follow-0", "follow-4"):
                 self.assertIn(reason, details)
 
@@ -198,6 +198,35 @@ class EgressDraftTests(unittest.TestCase):
             self.assertIn("env: OTHER_PROVIDER_KEY REVIEW_KEY", out)
             self.assertIn("OBAAF-GHA-020: fixed", out)
             self.assertIn("secrets.MODEL is passed to the command", out)
+
+    def test_named_harness_keeps_source_and_refuses_ambiguous_names(self):
+        steps = ("      - uses: actions/checkout@v4 # pin comment\n"
+                 "        with: {x: 020}\n"
+                 "      - id: harness\n"
+                 "        name: Run harness\n"
+                 "        env: {COUNT: 1_000, TOKEN_MODE: 0755}\n"
+                 "        timeout-minutes: 020\n"
+                 "        run: |\n"
+                 "          python review.py\n"
+                 "      # following step\n"
+                 "      - run: echo done\n")
+        with TempDir() as root:
+            path = self.workflow(root, steps)
+            original = path.read_bytes()
+            for selector in ("harness", "Run harness"):
+                code, out, err = run_cli("fix", "egress", "--job", "review", "--step", selector, root)
+                self.assertEqual((code, err), (0, ""))
+                job = (WORKFLOW + steps).split("jobs:\n")[1]
+                before, after = job.split("        run: |\n          python review.py\n")
+                self.assertIn(before + "        uses: ", out)
+                self.assertTrue(out.endswith(after))
+                self.assertIn("          run: |\n            python review.py\n", out)
+            self.assertEqual(original, path.read_bytes())
+            path.write_text(WORKFLOW + steps + "      - name: harness\n        run: echo other\n")
+            for selector in ("harness", "absent"):
+                code, out, err = run_cli("fix", "egress", "--job", "review", "--step", selector, root)
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn("exactly one step", err)
 
     def test_no_apply(self):
         self.assertEqual(run_cli("fix", "egress", "--job", "review", "--apply")[0], 2)
