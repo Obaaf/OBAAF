@@ -1,0 +1,57 @@
+name: Verify first-sitting init and report evidence
+on:
+  push:
+    branches: [lead/verify-87-init-handoff-ae86067]
+permissions:
+  contents: read
+jobs:
+  handoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ae86067cae8fcd11be92457db2d8b21448b76beb
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Observe the published CLI on two disposable repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TMPDIR="$(mktemp -d "$RUNNER_TEMP/obaaf-87.XXXXXX")"
+          if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import subprocess
+          import tempfile
+          
+          for case in ("ordinary", "misplaced"):
+              repo = Path(tempfile.mkdtemp(prefix=case+"-"))
+              workflow = repo / ".github/workflows/build.yml"
+              workflow.parent.mkdir(parents=True)
+              workflow.write_text("name: Build\non: push\npermissions: {contents: read}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ready\n")
+              if case == "misplaced":
+                  (repo / ".obaaf.yml").write_text("{}\n")
+              def git(*args):
+                  subprocess.run(["git", *args], check=True, cwd=repo, capture_output=True)
+              git("init", "-q")
+              git("add", ".")
+              git("-c", "user.name=Fixture", "-c", "user.email=test@example.com", "commit", "-qm", "Initial fixture")
+              for args in (["init"], ["init", "--apply"], ["check", ".", "--fail-on", "never"]):
+                  run = subprocess.run(["obaaf", *args], cwd=repo, capture_output=True, text=True)
+                  config = (repo / ".github/obaaf.yml").exists()
+                  generated = sorted(p.name for p in workflow.parent.glob("*") if p != workflow)
+                  status = f"{case} | {' '.join(args)} | exit={run.returncode} | config={config} | new_workflows={generated}"
+                  print(status, flush=True)
+                  for line in (run.stdout + "\n" + run.stderr).splitlines():
+                      if any(term in line.lower() for term in ("what to do next", "summary was unavailable", "proposed setup on a temporary copy", "look-alike", "looks like", "misplaced", "not supported", "not read", "error:", "wrote ", "current repository:")):
+                          print("  " + line.replace(str(repo), "<fixture>"))
+                  if case == "ordinary":
+                      assert run.returncode == 0, status
+                  if args == ["init"]:
+                      assert not config and not generated, status
+          PY
