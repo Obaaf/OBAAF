@@ -3525,7 +3525,7 @@ class JenkinsRules:
     # labels): `env` used as a value (not followed by `.`, `?.` or `[`), written to, incremented, or with a method
     # that may set a variable named. Bounded, and run only on those short texts.
     _ENV_TEXT_RISK = re.compile(
-        r"""\b(?:getProperty|getAt|invokeMethod|setProperty)\b|\.\s*&|\.\s*["']\$|"""
+        r"""\b(?:getProperty|getAt|invokeMethod|setProperty)\b|\.\s*&|\.\s*["']\$|[\[.]\s*(?:'env'|"env")|"""
         r"""(?<!['"])\benv\b(?!['"])(?!\s*(?:\?\.|\.|\[))"""
         r"""|\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\*\*|<<|>>>|>>|\?:|[-+*/%&|^])?=(?![=~])"""
         r"""|\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\+\+|--)|(?:\+\+|--)\s*\benv\b"""
@@ -3555,7 +3555,8 @@ class JenkinsRules:
         writes = []
         # Receivers that can be the script itself: `this` and the names Groovy gives a closure's owners, variables the
         # file gives one of them anywhere, and every parameter of a method or closure (a caller may pass `this`).
-        script_names = {"this", "script", "steps", "binding", "owner", "delegate", "thisObject"} | self.p.script_vars
+        script_names = {"this", "script", "steps", "binding", "owner", "delegate", "thisObject", "it"} | \
+            self.p.script_vars
         parents: dict = {}
         entries = []               # (node, the line to report, the interpolation's text or None)
         roots = [(tree, None, None)]
@@ -3593,22 +3594,33 @@ class JenkinsRules:
                 script_names.update(p for p in n.params if isinstance(p, str))
             elif isinstance(n, (Closure, Block)) and getattr(n, "params", None):
                 script_names.update(p for p in n.params if isinstance(p, str))
+        def scriptish(n) -> bool:
+            """Whether `n` can be the script: a name in `script_names`, a chain of `owner`, `delegate` or
+            `thisObject` after one (`owner.owner`), or `getOwner()` and its kin on anything."""
+            if n is None:
+                return True
+            if isinstance(n, Call):
+                callee = n.callee
+                name = callee.name if isinstance(callee, Prop) else (path_of(callee) or "")
+                return name in ("getOwner", "getDelegate", "getThisObject")
+            path = path_of(n)
+            if path is None:
+                return isinstance(n, Prop) and n.name in ("owner", "delegate", "thisObject") and scriptish(n.target)
+            first, *rest = path.split(".")
+            return first in script_names and all(part in ("owner", "delegate", "thisObject") for part in rest)
+
         for _round in range(4):
             before = len(script_names)
             for n, _line, _own in entries:
                 value = n.value if isinstance(n, (Decl, Assign)) else None
                 name = n.name if isinstance(n, Decl) else (n.target.name if isinstance(n, Assign) and isinstance(
                     n.target, Name) else None)
-                if name and value is not None and (path_of(value) in script_names or (
-                        isinstance(value, Call) and (path_of(value.callee) or "").rsplit(".", 1)[-1] in (
-                            "getOwner", "getDelegate", "getThisObject"))):
-                    script_names.add(name)
+                if name and value is not None and (scriptish(value) or any(
+                        isinstance(m, Name) and m.name in ("this", "owner", "delegate", "thisObject")
+                        for m in find_nodes(value, lambda _m: True, limit=2_000))):
+                    script_names.add(name)            # def s = this, def s = c ? this : null
             if len(script_names) == before:
                 break
-
-        def scriptish(n) -> bool:
-            return n is None or path_of(n) in script_names or (isinstance(n, Call) and (
-                path_of(n.callee) or "").rsplit(".", 1)[-1] in ("getOwner", "getDelegate", "getThisObject"))
 
         def env_ref(n, writing: bool = False) -> bool:
             """Whether `n` is, or may be, the build's `env`. A property named `env` of a receiver that cannot be the
@@ -3619,7 +3631,8 @@ class JenkinsRules:
                 if n.name == "env":
                     return writing or scriptish(n.target)
                 return "${" in n.name and scriptish(n.target)
-            if isinstance(n, Call) and (path_of(n.callee) or "").rsplit(".", 1)[-1] in ("getProperty", "getAt"):
+            if isinstance(n, Call) and (n.callee.name if isinstance(n.callee, Prop) else (path_of(n.callee) or "")) in (
+                    "getProperty", "getAt"):
                 key = literal(n.args[0]) if n.args else None
                 return key is None or key == "env"
             if isinstance(n, Index) and scriptish(n.target):

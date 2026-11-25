@@ -215,9 +215,10 @@ file.
   `env.setProperty(...)`, `put`, `putAt`, or another method of `env` that does not only read it (`with { }`,
   `identity { }`, `putAll`, a pointer such as `env.&setProperty`). `env` is reached by its name, by
   `getProperty('env')` or `getAt('env')` on any receiver, and by `x.env`, `x['env']` or a computed property where
-  `x` can be the script (`this`, `script`, `steps`, a closure's `owner`, `delegate` or `thisObject`, a method's or
-  closure's parameter, a variable given one of these); a property named `env` of anything else (`buildInfo.env`)
-  counts only where it is written to. Every node of the parsed file is read for this, and every `${...}` of its
+  `x` can be the script (`this`, `script`, `steps`, a closure's `owner`, `delegate` or `thisObject` and chains of
+  them, `getOwner()`, a method's or closure's parameter, `it`, a variable given an expression that names one of
+  these, such as `c ? this : null`); a property named `env` of anything else (`buildInfo.env`) counts only where it
+  is written to. Every node of the parsed file is read for this, and every `${...}` of its
   strings as statements, whether the walker reaches it or not (a `when { expression { } }`, a method a directive
   calls), and so is the text the parser keeps no node for (a loop's header, a method's parameter defaults, a switch's
   case labels, a postfix `++`).
@@ -238,12 +239,13 @@ and skips the stage before the post block runs. A variable set around another st
 Not read: what the agent's own environment holds (the controller's node properties, `tools { }`, a container's
 image, `docker.image(...).inside('-e ...')`, a pod template's `envVars`); code from outside the file that runs
 where the walker does not reach (`load` or a shared-library step in a `when` expression), which the other rules do
-not read there either (#370); reflection such as `this.metaClass.getProperty(this, 'env')`; and a step that checks
-which program the shell finds (`command -v obaaf`). Some safe files get "cannot tell": a parameter or local
+not read there either (#370); `this` or `env` carried through a method's result (`me().env`) or other reflection
+the checker does not model; and a step that checks which program the shell finds (`command -v obaaf`). Some safe files get "cannot tell": a parameter or local
 variable named `env`, a copy from `env.getEnvironment()`, `env` given to a variable only to read it
 (`def e = env; echo e.X`), `println env`, `env.metaClass` read, a harmless `withEnv` in a `when` expression, a
-statement the parser cannot read near a mention of `env`, `getProperty` in a loop's header, a default or a case
-label, and names such as `PYTHON_VERSION` that the prefix rule counts. Before the review of #365 only an `export`
+statement the parser cannot read near a mention of `env`, `getProperty` or a string holding the word `env`
+(`'dev env x'`) in a loop's header, a default or a case label, a parameter's `env` given a method call
+(`def pub(b) { b.env.collect() }`), and names such as `PYTHON_VERSION` that the prefix rule counts. Before the review of #365 only an `export`
 inside the check's own script stopped the reader, so `withEnv(["PATH+X=${env.WORKSPACE}/tools"])` around
 `obaaf verify release` cleared all three rules whatever `tools` held. OBAAF's own publish template is "cannot
 tell" under all three for this reason (below).

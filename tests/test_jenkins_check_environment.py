@@ -221,6 +221,21 @@ CASES = [
     ("'env' as a default", "def deploy(String target = 'env') { echo target }\n"
      + pipeline(PLAIN, build="script { deploy() }"), P),
     ("'env' as a case label", pipeline(PLAIN, build="script { switch (params.T) { case 'env': echo 'x'; break } }"), P),
+    # From the fifth attack pass (each was a pass at 3bb3520)
+    ("getProperty on a method's result", "def me() { this }\n"
+     + pipeline(PLAIN, build="script { me().getProperty('env').PATH = '/t' }"), U),
+    ("getOwner().getProperty", pipeline(PLAIN, build="script { def c = { getOwner().getProperty('env').PATH = '/t' }; "
+                                                    "c() }"), U),
+    ("getAt on an index", pipeline(PLAIN, build="script { [this][0].getAt('env').PATH = '/t' }"), U),
+    ("this['env'] in a default", "def f(a = this['env'].putAll([PATH: '/t'])) { a }\n"
+     + pipeline(PLAIN, build="script { f() }"), U),
+    ("this['env'] in a loop's header", in_when("for (this['env'].PATH = '/t'; false; ) {}"), U),
+    ("this['env'] in a case label", pipeline(PLAIN, build="script { switch (1) { case { this['env'].putAll([PATH: '/t']); "
+                                                         "true }: break } }"), U),
+    ("this through a ternary", pipeline(PLAIN, build="script { def s = true ? this : null; s.env.putAll([PATH: '/t']) }"),
+     U),
+    ("owner.owner.env in a when expression", in_when("def c = { owner.owner.env.putAll([PATH: '/t']) }; c()"), U),
+    ("it.env", pipeline(PLAIN, build="script { this.with { it.env.putAll([PATH: '/t']) } }"), U),
     # A failure the step ignores stays a finding whatever runs: OBAAF-JEN-011 reports it, and OBAAF-JEN-010 and 012
     # see no check, as before the review.
     ("withEnv PATH, failure ignored", pipeline(

@@ -3111,7 +3111,12 @@ the escapes were translated), `getProperty` with a computed name in a default or
 over several lines; it also found false "cannot tell" for `buildInfo.env.collect()` and a YAML file's `env`. Each
 is fixed: `getProperty` and `getAt` reach `env` on any receiver, a property named `env` counts on a receiver that
 can be the script (or where it is written to), the texts are translated first and searched for `getProperty` too,
-and a case label runs to the next case. Reflection (`this.metaClass.getProperty(this, 'env')`) is a stated limit.
+and a case label runs to the next case.
+
+**Fifth attack pass** (the same sub-agent, about 100 attempts on `3bb3520`). It found `getProperty('env')` on a
+method's result or an index (`me().getProperty('env')`, `[this][0].getAt('env')`, `getOwner().getProperty`) and
+`this['env']` or `this.'env'` in the dropped texts, both fixed; and, needing data flow, `this` through a ternary,
+`it`, `owner.owner`, now read, and `me().env`, a stated limit with other reflection the checker does not model.
 
 **Claims review** (a second Opus 5.5 sub-agent): the template is "cannot tell" for its `PATH` change only (replacing
 both `withEnv` calls with `dir('.')` gives three passes); a check under such a variable before a publish in a later
