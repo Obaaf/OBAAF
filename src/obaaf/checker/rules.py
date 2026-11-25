@@ -2952,14 +2952,17 @@ class WorkflowRules:
         on it separated by `&&` or `;`, must be one of those two and nothing else; comment lines are
         skipped. Anything else makes it False, as does a script in another shell, an action, or a
         key of the step beyond the plain ones, so that a step running an agent in a form the patterns
-        miss is not read as an install from its words alone (the limits are below). Each install must be global and name a listed package, with only
-        options that take no value, and `sudo` only with `-E`, `-H` or `-n`. The step may have no `env`
+        miss is not read as an install from its words alone (the limits are below). Each install must be
+        `npm`'s, global, and name a listed package, with only
+        options that take no value, and `sudo` only with `-E`, `-H` or `-n`: since the review of #248,
+        `pnpm add -g`, `yarn global add` and `bun add -g` are not read as installs only, because each
+        reads configuration from the working directory, and Yarn 1 runs the program a `.yarnrc` names
+        there (`yarn-path`) in its place, outside the sandbox. The step may have no `env`
         or `working-directory`, and neither the job nor the workflow may set any `env` or
         `defaults.run`: each can make the same words run something else (`BASH_ENV`, `NODE_OPTIONS`,
         `PATH`, `npm_config_*`, a shell of the author's choosing). Found by the review of 2c.8. Not read,
         and not readable from the workflow: what earlier steps put in the environment (`GITHUB_ENV`,
-        `GITHUB_PATH`, files in the home directory) and package-manager configuration in the working
-        directory, which `pnpm`, `yarn` and `bun` may read."""
+        `GITHUB_PATH`, files in the home directory)."""
         packages = self.detection.get("agent_installs") or {}
         if not packages or step.uses is not None or not isinstance(step.raw.get("run"), str):
             return False
@@ -2991,8 +2994,14 @@ class WorkflowRules:
                 found = self._INSTALL_RE.fullmatch(command)
                 if not found:
                     return False
+                if not found.group(1).startswith("npm"):
+                    # pnpm, yarn and bun read configuration from the working directory, which a checkout
+                    # fills, and Yarn 1 runs the file a `.yarnrc` names in `yarn-path` instead of itself
+                    # (review of #248, reproduced with Yarn 1.22.22). npm reads no project configuration
+                    # in global mode.
+                    return False
                 tokens = found.group(2).split()
-                if not found.group(1).startswith("yarn") and not {"-g", "--global"} & set(tokens):
+                if not {"-g", "--global"} & set(tokens):
                     return False        # a local install brings in the whole project's packages and scripts
                 named = False
                 for token in tokens:
@@ -3028,6 +3037,44 @@ class WorkflowRules:
         own = packages | {name + r"(?![\w-])" for name in packages}
         others = [re.compile(p, re.M) for p in patterns if p not in own]
         return not any(rx.search(text) for rx in others) and any(name in text for name in packages)
+
+    @staticmethod
+    def _unread_cache_path(step: Step) -> str | None:
+        """Why the `path` of an `actions/cache` step, whose post step saves that path after the job, cannot
+        be read to the end, or None (review of #248). `_reads_output` finds /tmp and the confined command's
+        output where the path names them; a path built from an expression (`${{ env.OUT }}`), one with a
+        `..` part (`../../../../../t?p`, `~/../../tmp`), one that starts `~` and a user's name, and the
+        root folder (`/`, `//`, `/.`) can reach them without naming them, so each is "cannot tell". Only
+        the step with a post step is read:
+        `actions/cache/save` saves when it runs, before the command, and `actions/cache/restore` saves
+        nothing. Not read: a relative path through a symbolic link that a checkout put in the workspace."""
+        if not step.uses_action("actions/cache") or step.uses_action("actions/cache/save") \
+                or step.uses_action("actions/cache/restore"):
+            return None
+        given = step.raw.get("with")
+        if given is None:
+            return None
+        if not isinstance(given, dict):
+            return "its inputs are not written out"
+        paths = [value for key, value in given.items() if str(key).strip().lower() == "path"]   # inputs ignore case
+        if not paths:
+            return None
+        if not all(isinstance(path, str) for path in paths):
+            return "its path is not text"
+        path = "\n".join(paths)
+        if "${{" in path:
+            return "an expression"
+        for line in path.splitlines():
+            line = line.strip().lstrip("!").strip()
+            if not line:
+                continue
+            if re.search(r"(?:^|[/\\])\.\.(?:[/\\]|$)", line):
+                return "a '..' part, which can leave the folder it starts from"
+            if line.startswith("~") and not re.match(r"~(?:[/\\]|$)", line):
+                return "a '~' with a user's name, whose home the checker does not read"
+            if re.fullmatch(r"[\"']?/[/\\.]*[\"']?", line):
+                return "the root folder, which holds /tmp"
+        return None
 
     def _reads_output(self, step: Step, ids: set) -> list[str]:
         """Where a step refers to what a confined command could write: an `outputs.workspace` or
@@ -3476,6 +3523,12 @@ class WorkflowRules:
             if refs and step.uses_action("actions/cache"):
                 problems.append(f"{where} saves /tmp or the confined command's output to a cache (its post step "
                                 "saves after the job), from which a later run can load it")
+                continue
+            unread = self._unread_cache_path(step) if before else None
+            if unread:
+                unsure.append(f"{where}, before it, saves a cache whose path the checker cannot read to the end "
+                              f"({unread}); its post step saves after the job, from which a later run can load it, "
+                              "and the path may reach /tmp or the confined command's output")
                 continue
             if not before:
                 if step.clean_action in ("actions/upload-artifact", "actions/upload-artifact/merge"):

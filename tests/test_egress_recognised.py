@@ -420,6 +420,42 @@ class EgressActionTest(unittest.TestCase):
         cache = f"      - uses: actions/cache@{SHA}\n        with: {{key: k, path: /tmp/obaaf-egress.*/workspace/node_modules}}"
         self.assertEqual(verdict(self.check(cache + "\n" + action())), NOT_MET)
 
+    def test_a_cache_path_it_cannot_read_to_the_end_is_cannot_tell(self):
+        """Found by the review of #248: only a path that names /tmp or the output was read, so a path
+        from an expression, or one that climbs out with `..`, reached the scratch directory with the
+        control verified. Each of these is "cannot tell" now, with the shipped pin as with a test one."""
+        paths = {
+            "an expression": "'${{ env.AGENT_OUT }}'",
+            "a variable": "'${{ vars.CACHE_PATH }}'",
+            "an input": "'${{ inputs.dir }}'",
+            "a function": "\"${{ format('{0}tmp', '/') }}\"",
+            "climbing from the workspace": "'../../../../../t?p'",
+            "climbing with a class": "'../../../../../tm[p]'",
+            "climbing from home": "'~/../../t?p'",
+            "climbing to the scratch directory": "'../../../../../t?p/obaaf*/workspace'",
+            "another user's home": "'~tmp/x'",
+            "in a list": "\"node_modules\\n../../../../../t?p\"",
+            "excluded, then climbing": "\"!x\\n../../../../../t?p\"",
+            "the root folder": "/", "the root folder, twice": "'//'", "the root folder, with a dot": "'/.'",
+        }
+        for what, path in paths.items():
+            for name in ("path", "Path"):
+                cache = f"      - uses: actions/cache@{SHA}\n        with: {{key: k, {name}: {path}}}"
+                with self.subTest(what=what, name=name):
+                    f = self.check(cache + "\n" + CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
+                    self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
+                    self.assertIn("saves a cache whose path the checker cannot read to the end", detail(f))
+        for path in ("~/.npm", "node_modules", "'~/.cache/pip\\n~/.npm'", "./.cache", "./", "."):
+            cache = f"      - uses: actions/cache@{SHA}\n        with: {{key: k, path: {path}}}"
+            with self.subTest(path=path):
+                f = self.check(cache + "\n" + CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
+                self.assertEqual(verdict(f), VERIFIED, detail(f))
+        for restore in ("actions/cache/restore", "actions/cache/save"):
+            cache = f"      - uses: {restore}@{SHA}\n        with: {{key: k, path: '${{{{ env.AGENT_OUT }}}}'}}"
+            with self.subTest(restore=restore):
+                f = self.check(cache + "\n" + CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
+                self.assertEqual(verdict(f), VERIFIED, detail(f))
+
     def test_a_step_before_it_that_leaves_a_process_running_is_cannot_tell(self):
         """Found by the first review: a loop left running by an earlier step ran what the command wrote."""
         for run in ("nohup sh -c 'while sleep 5; do sh ./x.sh; done' &", "./watch.sh &", "setsid ./watch.sh",
@@ -742,9 +778,8 @@ class AgentInstallTest(unittest.TestCase):
         for script in ("sudo npm install -g @anthropic-ai/claude-code\nclaude --version",
                        "npm i -g @anthropic-ai/claude-code@2.1.0",
                        "npm install --global @openai/codex@latest && codex --version",
-                       "# the CLI the action runs\npnpm add -g @google/gemini-cli; gemini --version",
-                       "sudo -E npm install -g --no-fund @anthropic-ai/claude-code @openai/codex",
-                       "yarn global add @anthropic-ai/claude-code", "bun add -g @anthropic-ai/claude-code"):
+                       "# the CLI the action runs\nnpm add -g @google/gemini-cli; gemini --version",
+                       "sudo -E npm install -g --no-fund @anthropic-ai/claude-code @openai/codex"):
             f = self.check(CHECKOUT + "\n" + self.install(script) + self.CONFINED)
             with self.subTest(script=script):
                 self.assertEqual(verdict(f), VERIFIED, detail(f))
@@ -791,11 +826,28 @@ class AgentInstallTest(unittest.TestCase):
                        "sudo -b npm install -g @anthropic-ai/claude-code",
                        "sudo -i npm install -g @anthropic-ai/claude-code",
                        "sudo -s npm install -g @anthropic-ai/claude-code",
-                       "sudo -uroot npm install -g @anthropic-ai/claude-code"):
+                       "sudo -uroot npm install -g @anthropic-ai/claude-code",
+                       # Found by the review of #248: pnpm, yarn and bun read configuration from the
+                       # working directory, and Yarn 1 runs the program a `.yarnrc` names in `yarn-path`.
+                       "pnpm add -g @google/gemini-cli; gemini --version",
+                       "yarn global add @anthropic-ai/claude-code", "sudo yarn global add @anthropic-ai/claude-code",
+                       "yarn global add --ignore-scripts @anthropic-ai/claude-code",
+                       "bun add -g @anthropic-ai/claude-code", "bun i -g @openai/codex"):
             f = self.check(self.install(script) + self.CONFINED)
             with self.subTest(script=script):
                 self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
                 self.assertIn("neither an install it can vouch for nor a run", detail(f))
+
+    def test_a_yarn_install_after_a_checkout_does_not_verify_with_the_shipped_pin(self):
+        """The review of #248: with the reviewed pin listed, `yarn global add` after a checkout made
+        OBAAF-GHA-020 "fixed", though a `.yarnrc` the checkout brings can make yarn run the
+        repository's own program outside the sandbox, with the runner's `sudo`."""
+        steps = CHECKOUT + "\n" + self.install("yarn global add @anthropic-ai/claude-code") + keyed(
+            run="claude -p 'review the change'", ref=REVIEWED_PIN)
+        f = self.check(steps, cat=checker.load())
+        self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
+        key = key_control(run_check(workflow(steps), cat=checker.load()))
+        self.assertEqual(key.verdict, CANNOT_TELL, key.detail)
 
     def test_what_can_make_the_same_words_run_something_else_is_not_read_as_an_install(self):
         """Found by the review: the step's env, its working directory and the defaults of the job or
