@@ -98,7 +98,9 @@ def check_git_targets(root, edits):
         return
     done = _query(git, root, "rev-parse", "--is-inside-work-tree")
     if done.returncode:
-        if not marked or b"not a git repository" in done.stderr:
+        # Only the answer of Git's search for a repository. A `.git` file whose target has gone gives
+        # "not a git repository: PATH" and would hide a work tree above it (fourth review of #368).
+        if not marked or b"not a git repository (or any" in done.stderr:
             return
         raise ProofError(f"{TOP_ONLY}, and Git could not read the repository here: "
                          + one_line(done.stderr.decode(errors="replace").strip()))

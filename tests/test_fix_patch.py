@@ -253,6 +253,20 @@ class FixPatchReviewTest(unittest.TestCase):
         code, _, err = self.export()
         self.assertEqual(code, 0, err)
 
+    def test_a_broken_git_file_between_the_folder_and_the_top_is_refused(self):
+        # A `.git` file whose target has gone, in a folder between: Git answers "not a git
+        # repository: PATH", and from the top the patch would change the top's own files.
+        source = self.policy(b"\n", True)
+        inner = self.root / "mid" / "svc"
+        (inner / ".github/workflows").mkdir(parents=True)
+        (inner / ".github/workflows/build.yml").write_bytes(self.workflow.read_bytes())
+        config = inner / ".github/policý review.yml"
+        config.write_bytes(source)
+        (self.root / "mid" / ".git").write_text("gitdir: " + str(self.root.parent / "gone") + "\n")
+        code, _, err = run_cli("fix", inner, "--config", config, "--owner", "@team", "--patch", self.patch)
+        self.assertEqual(code, 2, err)
+        self.assertFalse(self.patch.exists())
+
     def test_an_ignored_untracked_target_is_refused(self):
         self.config.write_bytes(self.policy(b"\n", True))
         (self.root / ".git/info").mkdir(exist_ok=True)
