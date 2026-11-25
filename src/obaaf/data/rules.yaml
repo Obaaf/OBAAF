@@ -210,7 +210,8 @@ rules:
       the loader's variables and a write to `GITHUB_PATH` no longer count as reasons of this control's own
       (slice 2c.10b), though such a variable or step can make a step a possible upload; since the action
       removes every `OPENSSL_` variable from them before libcrypto loads (slice 2c.11a), OpenSSL's no
-      longer count either (slice 2c.11b). The second control records the selected snapshot date and the evidence it supplies. Not read for the third
+      longer count either (slice 2c.11b), though since slice 2c.13 one in an `env` of another step, or of
+      the job or the workflow, makes another step a possible upload, because Node.js, which runs every JavaScript action, loads what they name. The second control records the selected snapshot date and the evidence it supplies. Not read for the third
       control: what a script, an action other than `actions/checkout` or the agent itself fetches while the
       job runs, apart from a few commands the checker knows (`gh pr checkout`, `git fetch` of `pull/N/head`);
       a workflow that starts this one with `workflow_dispatch` and passes on text an outsider wrote; a value
@@ -764,7 +765,8 @@ rules:
       of an agent's CLI (so `npm ci` or `make` is "cannot tell"); every step of a job in a container; a step
       otherwise not counted, the egress action aside, when an `env` sets a variable that can make it run
       code the checker did not read (bash's, the loader's, Python's, `PATH`, `HOME`, `NODE_OPTIONS`,
-      `NODE_PATH`, git's but its identity names, `XDG_CONFIG_HOME`, `TAR_OPTIONS`) or after a step that may
+      `NODE_PATH`, git's but its identity names, `XDG_CONFIG_HOME`, `TAR_OPTIONS` and, since slice 2c.13,
+      any name beginning `OPENSSL_`, whose configuration and modules Node.js loads) or after a step that may
       change later steps; and, on the firewall only, an action after a script that is not plain `echo`
       lines, or one with a post step before it (`actions/checkout`), because the script, the agent's
       included, can change through `GITHUB_ENV` or `GITHUB_PATH` what those run, and actions hold the token
