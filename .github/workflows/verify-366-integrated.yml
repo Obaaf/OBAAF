@@ -1,0 +1,161 @@
+name: Verify the egress review candidate on current flagship
+
+on:
+  push:
+    branches: [lead/validate-366-7e1ba02]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        test: [suite, comparisons]
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 7e1ba02c83291f55fef23d1f73a5c91bfd5e3bfb
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Prepare the checker and Git-free temporary storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 7e1ba02c83291f55fef23d1f73a5c91bfd5e3bfb
+          git merge-base --is-ancestor 9ef9269332c66ffb38b73582e0b7f7f06810adbc HEAD
+          test "$(git rev-parse HEAD^{tree})" = 73ed7dad61324c2e7ded99a34be1304c6b0aaceb
+          echo "Integrated review tree $(git rev-parse HEAD^{tree})"
+          git diff --check 9ef9269332c66ffb38b73582e0b7f7f06810adbc HEAD
+          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          export TMPDIR="$worktemp"
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Run the full acceptance suite and repository checks
+        if: matrix.test == 'suite'
+        run: |
+          set -euo pipefail
+
+          obaaf docs build --check
+          python -m unittest discover -s tests > "$RUNNER_TEMP/tests.log" 2>&1 || { tail -100 "$RUNNER_TEMP/tests.log"; exit 1; }
+          grep -E '^(Ran [0-9]+ tests|OK)' "$RUNNER_TEMP/tests.log"
+          PYTHONPATH=tests python -m unittest test_artifact_consumer_index test_egress_artifact_producers
+          PYTHONPATH=tests python - <<'PY'
+          from time import perf_counter
+          from types import SimpleNamespace
+          from unittest.mock import patch
+          from test_artifact_consumer_index import artifacts, step, workflow
+
+          wf = workflow([step("actions/upload-artifact", name="sample", path="sample.txt") for _ in range(90)])
+          sources = artifacts.uploads([wf])
+          for command, expected in [("sh result/sample.txt", 90), ("cat result/sample.txt", 0)]:
+              downloads = [step("actions/download-artifact", name="sample", path="result") for _ in range(90)]
+              records = [step(run=command) for _ in range(90)]
+              job = SimpleNamespace(id="reader", raw={}, steps=[*downloads, *records])
+              start = perf_counter()
+              with patch.object(artifacts, "_executed_paths", wraps=artifacts._executed_paths) as parse:
+                  hits = list(artifacts.consumers(wf, job, sources))
+              elapsed = perf_counter() - start
+              print(f"{command}: 90 uploads, 90 downloads, 90 candidate steps, {len(hits)} hits, {parse.call_count} parses, {elapsed:.6f}s")
+              assert len(hits) == expected and parse.call_count <= len(job.steps)
+              assert [id(hit[2]) for hit in hits] == [id(record) for record in records[:expected]]
+          PY
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt setuptools
+          python -c 'from setuptools.build_meta import build_sdist; import os; build_sdist(os.environ["TMPDIR"])'
+          python -m pip wheel --no-deps --no-build-isolation --wheel-dir "$TMPDIR" "$TMPDIR"/obaaf-*.tar.gz
+          python -m venv "$TMPDIR/package"
+          "$TMPDIR/package/bin/python" -m pip install --constraint actions/setup-obaaf/constraints.txt "$TMPDIR"/obaaf-*.whl
+          (cd "$TMPDIR" && "$TMPDIR/package/bin/obaaf" catalog > /dev/null)
+          obaaf catalog > /dev/null
+          obaaf docs build --check
+          python site/build.py --output "$RUNNER_TEMP/resource-site"
+          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
+      - name: Compare text, JSON, SARIF and summary on both repositories
+        if: matrix.test == 'comparisons'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/base-src"
+          git archive 9ef9269332c66ffb38b73582e0b7f7f06810adbc src | tar -x -C "$RUNNER_TEMP/base-src"
+          git init -q "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout init --no-cone
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout set --no-cone '/*' '!/bugs/' '!/fresh-*/'
+          git -C "$RUNNER_TEMP/expectrail" fetch -q --filter=blob:none --depth=1 https://github.com/Expectrail/Expectrail.git de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          git -C "$RUNNER_TEMP/expectrail" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/expectrail" rev-parse HEAD)" = de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          cd "$RUNNER_TEMP"
+          python - <<'PY'
+          import difflib
+          import hashlib
+          import json
+          from collections import Counter
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          candidate = Path(os.environ["GITHUB_WORKSPACE"])
+          sources = [temp / "base-src/src", candidate / "src"]
+          reports = temp / "comparison-evidence"
+          reports.mkdir()
+          for path, level, expected in [(candidate, "medium", 0), (temp / "expectrail", "low", 1)]:
+              extra = ["--no-fixes"] if level == "low" else []
+              for mode in [["--format", "text"], ["--format", "json"], ["--format", "sarif"], ["--summary"]]:
+                  observations = []
+                  for src in sources:
+                      env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
+                      module = subprocess.check_output(
+                          [sys.executable, "-c", "import obaaf.cli; print(obaaf.cli.__file__)"],
+                          env=env, text=True,
+                      ).strip()
+                      assert Path(module).resolve().is_relative_to(src.resolve())
+                      argv = ["obaaf", "check", str(path), "--baseline", str(path / ".github/obaaf-baseline.json"),
+                              "--fail-on", level, *extra, *mode]
+                      run = subprocess.run(argv, env=env, capture_output=True)
+                      observations.append((run.returncode, run.stdout, run.stderr))
+                  before, after = observations
+                  label = f"{path.name}-{mode[-1].strip('-')}"
+                  for side, (code, out, err) in zip(("base", "candidate"), observations):
+                      (reports / f"{label}-{side}.stdout").write_bytes(out)
+                      (reports / f"{label}-{side}.stderr").write_bytes(err)
+                      (reports / f"{label}-{side}.exit").write_text(str(code))
+                  changes = list(difflib.diff_bytes(difflib.unified_diff, before[1].splitlines(True), after[1].splitlines(True)))
+                  (reports / f"{label}.diff").write_bytes(b"".join(changes))
+                  if mode[-1] == "json" and changes:
+                      old, new = (json.loads(obs[1]) for obs in observations)
+                      for field in sorted(set(old) | set(new)):
+                          if old.get(field) == new.get(field):
+                              continue
+                          if isinstance(old.get(field), list) and isinstance(new.get(field), list):
+                              def rows(report):
+                                  return Counter(json.dumps(row, sort_keys=True) for row in report[field])
+                              removed = rows(old) - rows(new)
+                              added = rows(new) - rows(old)
+                              for direction, items in [("removed", removed), ("added", added)]:
+                                  for row, count in items.items():
+                                      print(label, field, direction, count, row)
+                          else:
+                              print(label, field, "changed", old.get(field), new.get(field))
+                  if mode[-1] in ("--summary", "text") and changes:
+                      print(b"".join(changes).decode(errors="replace"))
+                  print(label, "stdout diff lines", len(changes), "sha256", hashlib.sha256(after[1]).hexdigest())
+                  assert (before[0], before[2]) == (after[0], after[2])
+                  assert observations[0][0] == expected, (level, mode, observations[0][0])
+                  print(f"Compared {path.name} {' '.join(mode)} exit={expected}", flush=True)
+          PY
+      - name: Retain both reports and their complete diffs for review
+        if: always() && matrix.test == 'comparisons'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: scoped-checker-comparisons
+          path: ${{ runner.temp }}/comparison-evidence
+          if-no-files-found: error
