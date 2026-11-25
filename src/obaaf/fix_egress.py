@@ -51,7 +51,10 @@ def _replace_run(text, node, action, inputs):
     fields = [f"uses: {action}", indent + "with:"]
     fields.extend(f"{indent}  {k}: {v}" for k, v in encoded.items())
     original = text[start:end].splitlines(keepends=True)
-    moved = indent + "  " + original[0] + "".join("  " + line for line in original[1:])
+    # A line that holds only its break stays as it was: indented, it reads the same and
+    # gains trailing spaces (review of #363).
+    moved = indent + "  " + original[0] + "".join(
+        line if not line.strip("\r\n") else "  " + line for line in original[1:])
     return text[:start] + newline.join(fields) + newline + moved + text[end:]
 
 
@@ -62,6 +65,10 @@ def _job_text(text, name):
     end = value.end_mark.index
     if jobs.flow_style:
         return text[start:end]
+    # Only indentation may stand before the job's key on its line. After an explicit
+    # `? jobs` key the line begins `: `, and the preview would not be the job (review of #363).
+    if text[start - key.start_mark.column:start].strip(" "):
+        raise ValueError("the job's key does not start its line; review this job by hand")
     start -= key.start_mark.column
     if value.flow_style:
         # A closing brace ends the YAML node before its inline comment and newline.
@@ -85,7 +92,10 @@ def _rewrite(job, text, name, catalog, agents, pin, selector):
             raise ValueError("the checker must recognise exactly one direct agent step; "
                              "give --step with its exact name or ID")
     else:
-        candidates = [item for item in job.raw.get("steps", []) if isinstance(item, dict)
+        steps = job.raw.get("steps")
+        if not isinstance(steps, list):
+            raise ValueError("the job has no list of steps")
+        candidates = [item for item in steps if isinstance(item, dict)
                       and selector and selector in (item.get("id"), item.get("name"))]
         if len(candidates) != 1:
             raise ValueError("--step must match exactly one step by its name or ID")
@@ -125,7 +135,13 @@ def _rewrite(job, text, name, catalog, agents, pin, selector):
     edited = _replace_run(text, steps.value[index], new["uses"], inputs)
     expected = yamlutil.load(text)
     expected["jobs"][name]["steps"][index] = new
-    if yamlutil.load(edited) != expected:
+    try:
+        preserved = yamlutil.load(edited) == expected
+    except yaml.YAMLError:
+        # An explicit `? run` key: the edit puts `uses:` after the `?` (review of #363). The
+        # reader's own message names a text the user never wrote.
+        preserved = False
+    if not preserved:
         raise ValueError("could not preserve the surrounding workflow; review this job by hand")
     return edited, new, blocked, broken, index
 
@@ -159,7 +175,12 @@ def run(args, catalog=None):
             return 0
         shown = path.relative_to(copy).as_posix()
         draft_text = _job_text(edited, args.job)
-        if any(c not in "\r\n\t" and not c.isprintable() for c in draft_text):
+        # The job is printed as it is written, so a character a terminal acts on could make it read
+        # otherwise than the job that was checked. A carriage return is allowed only before a line
+        # feed: YAML reads one alone as a line break, and a terminal returns to the start of the line
+        # and prints the next line over it (review of #363).
+        if (any(c not in "\r\n\t" and not c.isprintable() for c in draft_text)
+                or re.search(r"\r(?!\n)", draft_text)):
             raise ValueError("job contains non-printable source characters; review this job by hand")
         lines = [
             "Draft only. Replace the reserved .invalid placeholder with required hosts. The checker "

