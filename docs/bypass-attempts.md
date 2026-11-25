@@ -3082,8 +3082,20 @@ Stated limits: the agent's own environment (`tools { }`, a container's image or 
 parameter or local named `env`, a copy from `env.getEnvironment()`, a comment or string showing a write, and names
 such as `PYTHON_VERSION`.
 
+**Second attack pass** (the same sub-agent, about 265 attempts on `9f9ffee`). The four classes were fixed (all 39
+cases `unknown`), but the second version found writes to `env` in Groovy the walker does not walk with a scan of the
+file's text, and that scan was got past with an alias of `env`, a comment between `env` and the name, `(env)`, a
+`\u0050` escape, a triple-quoted or quoted name, `this."env"`, a multiple assignment, a computed setter name, a
+method pointer (`env.&setProperty`), `env.identity { }`, `getProperty('e' + 'nv')`, a computed `withEnv` or a
+pointer to one; and one 256 KiB line of `env[` took 135 s. The scan is replaced by a reading of every node of the
+parsed file, and of every `${...}` parsed as statements; a call or pointer whose name is computed, and a statement
+the parser could not read near `env`, are "cannot tell". The same pass found the lexer change correct: colour codes
+give the verdicts they gave, `'\174\174 true'` and `'\046'`, which passed, now give their findings, and slashy
+strings are not decoded.
+
 **Claims review** (a second Opus 5.5 sub-agent): the template is "cannot tell" for its `PATH` change only (replacing
 both `withEnv` calls with `dir('.')` gives three passes); a check under such a variable before a publish in a later
 stage's failure-path `post` block gives a new high OBAAF-JEN-011, which the texts now say; `--revision-file`
-accepted only 40 or 64 lower-case hex digits with at most one line ending, refused everything else with exit 2 and
-gave no traceback.
+accepted only 40 or 64 lower-case hex digits with at most one line ending, refused every other file it could read
+with exit 2 and gave no traceback; a FIFO with no writer waits. Its second pass found the computed setter name the
+attack found too.

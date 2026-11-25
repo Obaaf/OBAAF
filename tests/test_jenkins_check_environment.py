@@ -51,6 +51,12 @@ def pipeline(verify: str, *, top: str = "", build: str = "sh 'make'", verify_env
 PLAIN = f"sh '{CHECK.format(rev=REV)}'"
 
 
+def in_when(code: str) -> str:
+    """The plain pipeline with a stage before the copy whose `when { expression { } }` runs `code`."""
+    return pipeline(PLAIN).replace("stage('Fetch') {", "stage('Prep') {\n      when { expression { " + code
+                                   + "; return true } }\n      steps { sh 'true' }\n    }\n    stage('Fetch') {")
+
+
 def wrapped(entries: str) -> str:
     return f"withEnv({entries}) {{ {PLAIN} }}"
 
@@ -137,6 +143,34 @@ CASES = [
         "withCredentials([file(credentialsId: 'x', variable: 'LD_PRELOAD')]) { " + PLAIN + " }"), U),
     # Reading env is not writing it
     ("env.PATH compared", pipeline(PLAIN, build="script { if (env.PATH == '/x' || env.PATH =~ /y/) { echo 'z' } }"), P),
+    # From the second attack pass (each was a pass at 9f9ffee): Groovy the walker does not walk is read node by node.
+    ("an alias of env in a when expression", in_when("def e = env; e.PATH = \"${env.WORKSPACE}/t:${env.PATH}\""), U),
+    ("an alias defined outside, used in a when expression", "def e = env\n" + in_when("e['PATH'] = '/x'"), U),
+    ("a comment between env and the name", in_when("env/**/.PATH = '/x'"), U),
+    ("env in parentheses", in_when("(env).PATH = '/x'"), U),
+    ("a unicode escape in the name", in_when("env.\\u0050ATH = '/x'"), U),
+    ("a triple-quoted property name", in_when("env." + "'" * 3 + "PATH" + "'" * 3 + " = '/x'"), U),
+    ("a quoted setter", in_when("env.\"setProperty\"('PATH', '/x')"), U),
+    ("this.\"env\"", in_when("this.\"env\".PATH = '/x'"), U),
+    ("a multiple assignment", in_when("(env.PATH, env.FOO) = ['/x', 'y']"), U),
+    ("a setter's computed name", in_when("env.setProperty('PA' + 'TH', '/x')"), U),
+    ("a setter's computed name in a GString", pipeline(PLAIN, build="echo \"${env.setProperty('PA' + 'TH', '/x')}\""),
+     U),
+    ("a method pointer to setProperty", pipeline(PLAIN, build="script { def sp = env.&setProperty; sp('PATH', '/x') }"),
+     U),
+    ("env.identity { }", pipeline(PLAIN, build="script { env.identity { PATH = '/x' } }"), U),
+    ("getProperty of a computed name", pipeline(PLAIN, build="script { getProperty('e' + 'nv').PATH = '/x' }"), U),
+    ("this.\"${'env'}\"", pipeline(PLAIN, build="script { this.\"${'env'}\".PATH = '/x' }"), U),
+    ("a computed withEnv", pipeline("script { def m = 'with' + 'Env'; \"$m\"([\"PATH+X=${env.WORKSPACE}/t\"]) { "
+                                    + PLAIN + " } }"), U),
+    ("a pointer to a computed method", pipeline("script { def m = 'withEnv'; def w = this.&\"$m\"; w(['PATH+X=/t']) { "
+                                                + PLAIN + " } }"), U),
+    ("an assignment in an argument", pipeline(PLAIN, build="script { echo(env.PATH = '/x') }"), U),
+    ("an assignment in a while condition", pipeline(PLAIN, build="script { while ((env.PATH = '/x') == null) {} }"), U),
+    # Reading env, or a computed property of another object, is not writing env
+    ("a method on a computed parameter", pipeline(PLAIN, build="script { def k = 'X'; echo params.\"${k}\".trim() }"),
+     P),
+    ("reading env in a when expression", in_when("env.BRANCH_NAME.startsWith('release/')"), P),
     # A failure the step ignores stays a finding whatever runs: OBAAF-JEN-011 reports it, and OBAAF-JEN-010 and 012
     # see no check, as before the review.
     ("withEnv PATH, failure ignored", pipeline(
@@ -163,6 +197,15 @@ def verdicts(text: str) -> tuple:
 
 
 class CheckEnvironmentTest(unittest.TestCase):
+    def test_text_that_looks_like_writes_is_not_slow(self):
+        # The second version scanned the text with a pattern that took 135 s on a 256 KiB comment of `env[env[...`, and
+        # counted lines from the start for every match (18.6 s on 1,000 KiB of `env.a=1` lines).
+        for text in (pipeline(PLAIN, build="// " + "env[" * 64_000),
+                     pipeline(PLAIN, build="\n".join("// env.a=1" for _ in range(100_000)))):
+            started = time.monotonic()
+            verdicts(text)
+            self.assertLess(time.monotonic() - started, 10)
+
     def test_many_assignments_and_checks_are_read_once(self):
         # The first version read the file's assignments again for every check: 2,000 of each took 4.2 s here and
         # 6,300 took 27 (1.2 and 3.4 now).

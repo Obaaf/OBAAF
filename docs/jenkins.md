@@ -204,25 +204,30 @@ check does not clear any of the three rules when its shell may run another progr
 so when a variable `steers` counts is set around the step, by a `withEnv` entry (through any receiver: `withEnv`,
 `this.withEnv`, `steps.withEnv`, `s.withEnv`), an `environment { }` block, a matrix axis or a credential binding's
 variable, or anywhere in the file by a write to the build's `env`: `env.X = ...` (compound operators too),
-`env['X'] = ...`, `env.setProperty(...)`, `put`, `putAll`, `with { }` and the like, through `this.env`,
-`script.env`, `steps.env`, any `x.env`, `getProperty('env')` or an alias of `env`, and wherever the text is (a
-`when { expression { } }`, a method a directive calls, a GString). The names are `PATH` (`PATH+NAME` included:
+`env['X'] = ...`, `env.setProperty(...)`, `put`, `putAt`, or any other method of `env` that does not only read it
+(`with { }`, `identity { }`, `putAll`, a method pointer such as `env.&setProperty`), through `this.env`,
+`script.env`, `steps.env`, any `x.env`, `getProperty('env')`, `this['env']` or a variable the file assigns one of
+them, wherever it is written: every statement of the parsed file is read for this, and every `${...}` of its strings
+as statements, whether the walker reaches it or not (a `when { expression { } }`, a method a directive calls). The names are `PATH` (`PATH+NAME` included:
 Jenkins puts the value in front of `PATH`), `HOME`, `ENV`, `SHELLOPTS`, `PS4`, `PROMPT_COMMAND`, `EXECIGNORE`,
 `GCONV_PATH`, `ACTIONS_ALLOW_UNSECURE_COMMANDS` and those beginning `BASH`, `LD_`, `DYLD_` or `PYTHON` (six of
 Python's that load nothing, such as `PYTHONUNBUFFERED`, excepted), in any letter case, with Groovy's `\uXXXX` and
 octal escapes read (`'\120ATH'` is `PATH`): the names the GitHub Actions rules read since slice 2d.13. A name the
-checker cannot read (a computed entry, a list held in a variable, a quoted property), and a place the file names
-`withEnv` that the checker does not read (a method pointer, a quoted name, `options { withEnv(...) }`), count the
-same. Such a check is "cannot tell", and the reason names the variable and its line, with two exceptions: a check
+checker cannot read (a computed entry or key, a list held in a variable, a setter given a computed name), a call
+or method pointer whose name is computed (`"$m"(...)`, `this.&"$m"`, `invokeMethod`), a statement the parser could
+not read that names `env` on its line or the ten after it, and a place the file names `withEnv` that the checker does
+not read as a call (a method pointer, `options { withEnv(...) }`, a `when` expression), count the same. Such a check is "cannot tell", and the reason names the variable and its line, with two exceptions: a check
 whose failure the step already ignores stays a finding, and a `--pre-approval` check stays a medium OBAAF-JEN-012.
 A publish in a later stage's failure-path `post` block, whose only check is such a check, gets a high OBAAF-JEN-011,
-as after an `export PATH` in the script, because nothing then shows that a failed check skips the stage. A variable
+as after an `export PATH` in the script: the check may not run the reviewed checker, so nothing shows that it fails
+and skips the stage before the post block runs. A variable
 set around another step changes nothing; a write to `env` counts for every step of the file, whatever its place.
 Not read: what the agent's own environment holds (the controller's node properties, `tools { }`, a container's
 image, `docker.image(...).inside('-e ...')`, a pod template's `envVars`), `env` handed on through a list or a map
-(`[env].each { it.PATH = ... }`), and a step that checks which program the shell finds (`command -v obaaf`). Some
-safe files get "cannot tell": a parameter or local variable named `env`, a copy from `env.getEnvironment()`, a
-comment or string that shows a write to `env`, and names such as `PYTHON_VERSION` that the prefix rule counts. Before the
+(`[env].each { it.PATH = ... }`, `[env]*.setProperty(...)`), and a step that checks which program the shell finds
+(`command -v obaaf`). Some safe files get "cannot tell": a parameter or local variable named `env`, a copy from
+`env.getEnvironment()`, `env.metaClass` read, a harmless `withEnv` in a `when` expression, a statement the parser
+cannot read near a mention of `env`, and names such as `PYTHON_VERSION` that the prefix rule counts. Before the
 review of #365 only an `export` inside the check's own script stopped the reader, so
 `withEnv(["PATH+X=${env.WORKSPACE}/tools"])` around `obaaf verify release` cleared all three rules whatever `tools`
 held. OBAAF's own publish template is "cannot tell" under all three for this reason (below).

@@ -33,8 +33,8 @@ from obaaf.checker.jenkins.model import (
     untrusted_source,
 )
 from obaaf.checker.jenkins.parser import (
-    Assign, Binary, Call, ClassDef, Closure, Decl, Import, Index, ListLit, Loop, MapLit, MethodDef, Name, Num, Prop,
-    Str,
+    Assign, Binary, Call, ClassDef, Closure, Decl, Import, Index, ListLit, Loop, MapLit, MethodDef, Name, Num, Opaque,
+    Prop, Str,
     callee_name, path_of,
 )
 from obaaf.checker.rules import Finding, steers
@@ -3505,23 +3505,126 @@ class JenkinsRules:
                         "runs")
         for binding in info.ctx.creds:
             for name in (*binding.variables, *binding.paths):
-                if isinstance(name, str) and (name == "?" or steers(name)):
+                if isinstance(name, str) and name == "?":
+                    return (f"{binding.how} at line {binding.line} puts a credential around the step in a variable "
+                            "whose name the checker cannot read, which may change the program the step's shell runs")
+                if isinstance(name, str) and steers(name):
                     return (f"{binding.how} at line {binding.line} puts a credential in {name} around the step, which "
                             "can change the program the step's shell runs")
         return self._file_steering()
 
-    # A write to the build's `env` in the file's text, wherever it is (a `when { expression { } }`, a GString, a method
-    # a directive calls): a property or index assigned (compound operators too, not `==` or `=~`), or a method that
-    # sets or may set a variable. The receiver is `env` after anything (`this.env`, `script.env`, `s.env`) or
-    # `getProperty('env')`.
-    _ENV_RECEIVER = r"""(?:\benv\b|\bgetProperty\s*\(\s*['"]env['"]\s*\))\s*"""
-    _ASSIGN_OP = r"""\s*(?:\*\*|<<|>>>|>>|\?:|[-+*/%&|^])?=(?![=~])"""
-    _ENV_WRITE = re.compile(
-        _ENV_RECEIVER + r"""(?:\??\.\s*(?P<prop>[A-Za-z_]\w*)|\??\.\s*(?P<quoted>'[^'\n]*'|"[^"\n]*")|"""
-        r"""\[(?P<index>[^\]\n]*)\])""" + _ASSIGN_OP
-        + r"""|""" + _ENV_RECEIVER + r"""\??\.\s*(?P<method>setProperty|put|putAt|putAll|overrideAll|override|"""
-        r"""with|invokeMethod|metaClass|setVariable)\b(?P<args>\s*\(\s*(?:'[A-Za-z_]\w*'|"[A-Za-z_]\w*"))?""")
-    _PLAIN_KEY = re.compile(r"""\s*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)")\s*""")
+    # Methods of `env` that only read it; any other method called on it, or named without a call (a method pointer,
+    # `env.&setProperty`), may set a variable (`setProperty`, `put`, `with { }`, `identity { }`, `invokeMethod`).
+    _ENV_READS = frozenset({"getEnvironment", "getProperty", "get", "getAt", "containsKey", "keySet", "entrySet",
+                            "values", "toString", "hashCode", "isEmpty", "size", "equals"})
+    _ENV_SETTERS = frozenset({"setProperty", "put", "putAt"})
+
+    def _tree_env_writes(self) -> list:
+        """(name, line) for every write to the build's `env` anywhere in the parsed file, and in every `${...}` of its
+        strings, whether or not the walker reads that place (a `when { expression { } }`, a method a directive calls,
+        a GString): an assignment to a property or an index of `env`, a setter called on it, and "?" for what may set
+        one whose name is not read (another method of `env`, a method pointer to one, a computed property or key, a
+        call or method pointer whose name is computed, `invokeMethod`, a statement the parser could not read that
+        names `env`). `env` is `env` after any receiver (`this.env`, `s.env`), `getProperty('env')`, `this['env']`,
+        or a variable the file assigns one of them anywhere; a name a computed `getProperty` or property gives is
+        taken for `env`. Not followed: `env` in a list or map, or given to a closure's parameter."""
+        import time as _time
+        from obaaf.checker.jenkins.parser import parse as parse_groovy
+        tree = self.p.tree
+        if tree is None:
+            return []
+        writes = []
+        nodes, seen_exprs, pending = [], set(), [tree]
+        while pending and len(nodes) < 2_000_000:
+            for n in find_nodes(pending.pop(), lambda _n: True):
+                nodes.append(n)
+                if isinstance(n, Str) and n.interpolated:
+                    for text in n.exprs:
+                        if text in seen_exprs or not re.search(r"\benv\b|[(&\"']|this|script|steps", text):
+                            continue
+                        seen_exprs.add(text)
+                        # `${env.PATH = ...}`: an interpolation is read as statements, so an assignment in it is one
+                        try:
+                            sub = parse_groovy(text.strip().removeprefix("->"), deadline=_time.monotonic() + 1.0)
+                        except Exception:              # noqa: BLE001 - a text the parser refuses is not read
+                            sub = None
+                        if sub is None or sub.error or sub.tree is None:
+                            if re.search(r"\benv\b", text):
+                                writes.append(("?", getattr(n, "line", 0)))
+                        else:
+                            pending.append(sub.tree)
+        aliases: set = set()
+
+        script_names = {"this", "script", "steps", "binding"} | self.p.script_vars
+
+        def env_like(n, surely: bool = False) -> bool:
+            """Whether `n` is the build's `env`; with `surely`, only when its name says so (a computed name is taken
+            for `env` where it is written to, not where a method is called on it)."""
+            if isinstance(n, Name):
+                return n.name == "env" or n.name in aliases
+            if isinstance(n, Prop):
+                return n.name == "env" or (not surely and "${" in n.name and path_of(n.target) in script_names)
+            if isinstance(n, Call) and (path_of(n.callee) or "").rsplit(".", 1)[-1] == "getProperty":
+                key = literal(n.args[0]) if n.args else None
+                return key == "env" or (not surely and key is None)
+            if isinstance(n, Index) and path_of(n.target) in script_names:
+                key = literal(n.index)
+                return key == "env" or (not surely and key is None)
+            return False
+
+        for _round in range(3):                       # def e = env; def f = e: aliases of aliases
+            before = len(aliases)
+            for n in nodes:
+                if isinstance(n, Decl) and n.value is not None and env_like(n.value):
+                    aliases.add(n.name)
+                elif isinstance(n, Assign) and isinstance(n.target, Name) and env_like(n.value):
+                    aliases.add(n.target.name)
+            if len(aliases) == before:
+                break
+        used = {id(n.callee) for n in nodes if isinstance(n, Call)} | {id(n.target) for n in nodes if isinstance(n, Assign)}
+        lines = (self.p.source or "").split("\n")
+
+        def mentions_env(first: int, last: int) -> bool:
+            return bool(re.search(r"\benv\b", "\n".join(lines[max(first - 1, 0):max(last, first)])))
+
+        for n in nodes:
+            line = getattr(n, "line", 0)
+            if isinstance(n, Assign):
+                t = n.target
+                if isinstance(t, Prop) and env_like(t.target):
+                    writes.append((t.name if re.fullmatch(r"[A-Za-z_]\w*", t.name) else "?", line))
+                elif isinstance(t, Index) and env_like(t.target):
+                    key = literal(t.index)
+                    writes.append((key if key and re.fullmatch(r"[A-Za-z_]\w*", key) else "?", line))
+            elif isinstance(n, Call):
+                callee = n.callee
+                if isinstance(callee, Str) and callee.interpolated:
+                    writes.append(("?", line))         # "$m"(...): a method whose name is computed
+                elif isinstance(callee, Prop) and "${" in callee.name:
+                    writes.append(("?", line))         # this."$m"(...)
+                elif (path_of(callee) or "").rsplit(".", 1)[-1] == "invokeMethod":
+                    writes.append(("?", line))
+                elif isinstance(callee, Prop) and env_like(callee.target, surely=True):
+                    if callee.name in self._ENV_SETTERS:
+                        key = literal(n.args[0]) if len(n.args) >= 2 else None
+                        writes.append((key if key and re.fullmatch(r"[A-Za-z_]\w*", key) else "?", line))
+                    elif callee.name not in self._ENV_READS:
+                        writes.append(("?", line))
+            elif isinstance(n, Prop) and id(n) not in used:
+                if env_like(n.target, surely=True) and n.name in (
+                        self._ENV_SETTERS | {"with", "identity", "tap", "putAll", "invokeMethod", "metaClass",
+                                             "setMetaClass", "overrideAll", "override"}):
+                    writes.append(("?", line))         # env.&setProperty, env.metaClass
+                elif "${" in n.name and path_of(n.target) in script_names:
+                    writes.append(("?", line))         # this.&"$m": a pointer to a method whose name is computed
+            elif isinstance(n, Opaque) and line and mentions_env(line, line + 10):
+                # (env.PATH, env.X) = [...], foo(env.PATH = 'x'): a statement the parser could not read, from its first
+                # line and the ten after it, which may hold the rest of it
+                writes.append(("?", line))
+            elif isinstance(n, Loop) and line and mentions_env(line, getattr(n.body, "line", line)) and re.search(
+                    r"(?<![=!<>])=(?![=~])", "\n".join(lines[line - 1:getattr(n.body, "line", line)])):
+                writes.append(("?", line))             # for (env.PATH = '/x'; ...): the header keeps no assignment
+        return writes
 
     def _file_steering(self) -> str | None:
         """The part of `_steered` that is the same for every step of the file, worked out once."""
@@ -3529,23 +3632,11 @@ class JenkinsRules:
         if cached is not None:
             return cached[0]
         reason = None
-        writes = list(self.p.env_scripted)
-        source = self.p.source or ""
-        for m in self._ENV_WRITE.finditer(source):
-            line = source.count("\n", 0, m.start()) + 1
-            if m.group("prop"):
-                writes.append((m.group("prop"), line))
-            elif m.group("index") is not None:
-                key = self._PLAIN_KEY.fullmatch(m.group("index"))
-                writes.append(((key.group(1) or key.group(2)) if key else "?", line))
-            elif m.group("method") in ("setProperty", "put", "putAt") and m.group("args"):
-                writes.append((m.group("args").split("(", 1)[1].strip().strip("'\""), line))
-            else:
-                writes.append(("?", line))       # a quoted or computed property, putAll, with, invokeMethod, ...
+        writes = list(self.p.env_scripted) + self._tree_env_writes()
         for name, line in sorted(writes, key=lambda w: w[1]):
             if name == "?":
-                reason = (f"line {line} sets a variable in the build's environment whose name the checker cannot read, "
-                          "which may change the program the step's shell runs")
+                reason = (f"line {line} may set a variable in the build's environment whose name the checker cannot "
+                          "read, or call a method it cannot name, which may change the program the step's shell runs")
                 break
             if steers(name.split("+", 1)[0]):
                 reason = (f"line {line} sets {name} in the build's environment, which can change the program the step's "
@@ -3555,14 +3646,16 @@ class JenkinsRules:
             def names_with_env(n) -> bool:
                 if isinstance(n, (Name, Prop)):
                     return n.name == "withEnv"
-                if isinstance(n, Str):
-                    return n.text() == "withEnv"
+                if isinstance(n, Call) and isinstance(n.callee, Str):
+                    return n.callee.text() == "withEnv"
                 return False
             read = self.p.with_env_read
-            lines = [n.line for n in find_nodes(self.p.tree, names_with_env) if id(n) not in read and n.line]
-            if lines:
-                reason = (f"line {min(lines)} names withEnv in a form the checker does not read (a method pointer, a "
-                          "quoted name, options { withEnv(...) }), so what it sets around which steps is not known")
+            found = [n for n in find_nodes(self.p.tree, names_with_env)
+                     if id(n) not in read and not (isinstance(n, Call) and id(n.callee) in read) and n.line]
+            if found:
+                reason = (f"line {min(n.line for n in found)} names withEnv in a form or place the checker does not read "
+                          "(a method pointer, a quoted name, options { withEnv(...) }, a when expression), so what it "
+                          "sets around which steps is not known")
         self._script_cache[("file-steering",)] = (reason,)
         return reason
 
