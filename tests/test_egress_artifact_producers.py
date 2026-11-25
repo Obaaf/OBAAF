@@ -69,7 +69,8 @@ class ArtifactProducerTest(unittest.TestCase):
                 checked = run_check(producer + consumer, policy=FIREWALL)
                 self.assertEqual(verdict(egress(checked)), VERIFIED)
                 found = [f for f in checked.findings if f.rule == "OBAAF-GHA-027"]
-                self.assertEqual([(f.job, f.facts["path"]) for f in found], [("build", "Makefile")])
+                # The download lands in the workspace, so every step that is not read-only can run it (#366 review).
+                self.assertEqual([(f.job, f.facts["path"]) for f in found], [("build", ".")])
 
     def test_triggering_run_is_matched_to_its_named_workflow(self):
         _, steps, _ = ROUTES["action"]

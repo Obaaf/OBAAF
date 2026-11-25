@@ -1874,7 +1874,9 @@ class WorkflowRules:
 
     def artifact_consumer(self, job: Job) -> None:
         # At most one finding per step (review of #366: one per upload, download and step grew as their product).
-        for matched, download, step, path in artifact_consumers.consumers(self.wf, job, self.artifact_sources):
+        steered = lambda step: self._upload_env_steers(job, step)     # noqa: E731
+        for matched, download, step, path in artifact_consumers.consumers(self.wf, job, self.artifact_sources,
+                                                                          steered):
             source = matched[0]
             others = len({(u.workflow, u.job, u.name) for u in matched}) - 1
             self.add("OBAAF-GHA-027", step.line,
@@ -2670,10 +2672,11 @@ class WorkflowRules:
                     "network and credentials: OBAAF-GHA-027 reports a job that downloads the artifact with "
                     "actions/download-artifact in the same run (workflows of this repository that call one another "
                     "included) or in a run started by workflow_run, and has a later step that is not plainly "
-                    "read-only and names the download's folder (any such step, when the folder is the workspace or "
-                    "cannot be read). Not followed: downloads by other actions or in scripts, a computed artifact "
-                    "name, run ID or repository, an artifact uploaded again by another job, caches, job outputs, and "
-                    "code from the repository that reads the download without naming its folder.")
+                    "read-only and may run files from the download's folder (any such step, when the folder is the "
+                    "workspace or cannot be read). Not followed: downloads by other actions or in scripts, a computed "
+                    "run ID or repository, an artifact a job outside the agent lane uploads again (a merge aside), "
+                    "caches, job outputs, a folder named through a shell variable, and what the repository's own "
+                    "programs do with a downloaded file they are given.")
             return Control(self.EGRESS_NAME, best.verdict, detail, self.EGRESS_ID, conditions), best.kind, best.values
         declared = job.env.get("OBAAF_EGRESS") or self.wf.env.get("OBAAF_EGRESS")
         kind, values = ("declared", {"declared": str(declared)}) if declared else ("none", {})

@@ -210,7 +210,8 @@ rules:
       the loader's variables and a write to `GITHUB_PATH` no longer count as reasons of this control's own
       (slice 2c.10b), though such a variable or step can make a step a possible upload; since the action
       removes every `OPENSSL_` variable from them before libcrypto loads (slice 2c.11a), OpenSSL's no
-      longer count either (slice 2c.11b). The second control records the selected snapshot date and the evidence it supplies. Not read for the third
+      longer count either (slice 2c.11b), though since the review of #366 one in an `env` of another step
+      makes that step a possible upload (Node.js loads what they name). The second control records the selected snapshot date and the evidence it supplies. Not read for the third
       control: what a script, an action other than `actions/checkout` or the agent itself fetches while the
       job runs, apart from a few commands the checker knows (`gh pr checkout`, `git fetch` of `pull/N/head`);
       a workflow that starts this one with `workflow_dispatch` and passes on text an outsider wrote; a value
@@ -1198,18 +1199,26 @@ rules:
       job whose pattern may take one; downloads with actions/download-artifact in the same run (workflows
       of this repository that call one another count as one) or in a run started by workflow_run with
       `run-id: ${{ github.event.workflow_run.id }}`. A computed artifact name or pattern is read as any. The
-      reading fails closed (review of #366): every later step that names the download's folder, in its
-      script, working directory, `env`, inputs or a local `uses`, is reported unless it is plainly read-only
-      (actions that only upload or download, or a bash or sh script whose every command is one of a short
-      list that read files and run none, such as `cat`, `jq`, `grep` and `sha256sum`, writing at most to the
-      step summary); when the folder is the workspace or cannot be read, every later step is, with the same
-      exception. The upload's layout rules nothing out, since the agent writes what it uploads. So a step
-      that hands a downloaded file to the repository's own program is reported too. Not followed: downloads
-      by other actions or in scripts, a computed run ID or repository, an artifact uploaded again by a job
-      outside the agent lane, caches, job outputs, and code from the repository that reads the download
-      without naming its folder.
+      reading fails closed (review of #366). A later step that is not plainly read-only (an action that only
+      uploads, downloads or attests, or a bash or sh script whose every command is one of a short list that
+      read files and run none, such as `cat`, `jq`, `grep` and `sha256sum`, writing at most to the step
+      summary) is reported when it runs in the download's folder, uses a local action from it, names it in
+      an `env` or input value, runs a program from it, gives an interpreter a file or code from it (or code
+      on its input, in a step that names the folder), gives a package manager, build tool, test runner,
+      container or git a path there or runs one in a folder at or above it (test runners collect the files
+      below them), writes what it read from the folder elsewhere, or names the folder in a script the
+      checker cannot read word by word; when the folder is the workspace or cannot be read, every such step
+      is. A variable or an earlier step that can change what a step runs (including one that writes a value
+      naming the folder into `GITHUB_ENV` or `GITHUB_PATH`) makes naming the folder enough, read-only
+      steps included. The upload's layout rules nothing out, since the agent writes what it uploads. Not
+      followed: downloads by other actions or in scripts, a computed run ID or repository, an artifact a job
+      outside the agent lane uploads again (a merge aside), caches, job outputs, a folder named through a
+      shell variable, and what the repository's own programs do with a downloaded file they are given.
     fix: >-
-      Review the downloaded files as data. If they must run, give the consuming job its own network and permission limits.
+      Read the downloaded files as data (the read-only commands above, or the repository's own programs given
+      a file), in a folder of their own. No control clears this finding: where the job must run what the agent
+      wrote, accept the finding with an owner, a reason and an expiry, and give the job no more network,
+      secrets or permissions than it needs.
 
   - id: OBAAF-JEN-001
     title: Credentials available to change-request code or an AI agent

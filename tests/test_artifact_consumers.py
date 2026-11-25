@@ -84,7 +84,6 @@ class ExecutionFormsTest(unittest.TestCase):
             "checksums": run("sha256sum result/a result/b"),
             "a test": run("'[ -s result/report.txt ] && echo present'"),
             "another folder's script": run("./scripts/test.sh"),
-            "a build of the checkout": run("npm test"),
             "a folder with the download's name as a prefix": run("bash results/run.sh"),
             "an upload of the download": f"      - name: consume\n        uses: actions/upload-artifact@{SHA}\n"
                                          "        with: {name: copy, path: result}\n",
@@ -96,9 +95,73 @@ class ExecutionFormsTest(unittest.TestCase):
 
     def test_writing_the_download_where_later_steps_read_settings_is_not_read_only(self):
         for cmd in ("cat result/env >> \"$GITHUB_ENV\"", "cat result/p >> $GITHUB_PATH", "cat result/x > run.sh",
-                    "cat result/x 2>&1 | tee out", "cat <<EOF result/x"):
+                    "cat result/x 2>&1 | tee out"):
             with self.subTest(cmd):
                 self.assertEqual(len(found(run_check(producer() + consumer(run(f"'{cmd}'"))))), 1)
+
+
+class SecondPassTest(unittest.TestCase):
+    """The attacker's second pass on the first fix (review of #366): each was a way past or a cost."""
+
+    def test_ways_past_the_first_fix(self):
+        reported = {
+            "a hash inside a word": run("'echo build#1; sh result/run.sh'"),
+            "a URL fragment": run("'echo https://example.com/doc#run && bash result/run.sh'"),
+            "the workspace expression": run("'sh ${{ github.workspace }}/result/run.sh'"),
+            "PWD": run("'sh \"$PWD/result/run.sh\"'"),
+            "PWD in braces": run("'${PWD}/result/run.sh'"),
+            "pwd substituted": run("'sh \"$(pwd)/result/run.sh\"'"),
+            "a command substitution": run("'echo $(./result/run.sh)'"),
+            "a glob over the folder": run("sh resul?/run.sh"),
+            "a job BASH_ENV and cat": run("cat result/summary.md").replace(
+                "      - name: consume", "      - name: consume\n        env: {BASH_ENV: result/env.sh}"),
+            "LD_PRELOAD and cat": run("cat result/summary.md", "        env: {LD_PRELOAD: ./result/x.so}\n"),
+            "a prompt expansion": run("'echo \"${X@P}\"'", "        env: {X: '$(./result/run.sh)'}\n"),
+            "an interpreter reading a here-document": "      - name: consume\n        run: |\n"
+                                                        "          bash <<EOF\n          ./result/run.sh\n          EOF\n",
+        }
+        for name, step in reported.items():
+            with self.subTest(name):
+                self.assertEqual(len(found(run_check(producer() + consumer(step)))), 1, name)
+
+    def test_a_glob_over_the_folders_of_every_artifact(self):
+        for cmd in ("sh artifacts/*/run.sh", "'for f in artifacts/*/install.sh; do bash \"$f\"; done'"):
+            with self.subTest(cmd=cmd):
+                result = run_check(producer() + consumer(run(cmd), download_with="{path: artifacts}"))
+                self.assertEqual(len(found(result)), 1)
+
+    def test_an_earlier_step_that_writes_the_folder_into_the_runners_files(self):
+        writer = "      - run: echo 'NODE_OPTIONS=--require ./result/hook.js' >> \"$GITHUB_ENV\"\n"
+        text = producer() + consumer(f"      - name: again\n        uses: actions/upload-artifact@{SHA}\n"
+                                     "        with: {name: again, path: result/}\n")
+        steered = text.replace("    steps:\n      - uses: actions/download-artifact",
+                               "    steps:\n" + writer + "      - uses: actions/download-artifact")
+        self.assertEqual(found(run_check(text)), [])
+        self.assertEqual([f.step for f in found(run_check(steered))], ["again"])
+        harmless = steered.replace("--require ./result/hook.js", "production")
+        self.assertEqual(found(run_check(harmless)), [])
+        for env in ("{NODE_OPTIONS: --require ./result/hook.js}", "{TAR_OPTIONS: '--checkpoint-action=exec=sh ./result/x'}"):
+            with self.subTest(env=env):
+                job_env = text.replace("  use:\n    needs: agent\n", f"  use:\n    needs: agent\n    env: {env}\n")
+                self.assertEqual(len(found(run_check(job_env))), 1)
+
+    def test_downloads_times_folders_times_steps_is_not_cubic(self):
+        n = 400
+        uploads = "".join(f"\n      - uses: actions/upload-artifact@{SHA}\n        with: {{name: a{i}, path: out/}}"
+                          for i in range(n))
+        downloads = "".join(f"      - uses: actions/download-artifact@{SHA}\n        with: {{path: q}}\n" for _ in range(n))
+        runs = "".join("      - run: sh z\n" for _ in range(n))
+        _, steps, _ = ROUTES["action"]
+        text = workflow(steps + uploads) + "  use:\n    needs: agent\n    runs-on: ubuntu-24.04\n    steps:\n" + downloads + runs
+        started = time.monotonic()
+        self.assertEqual(found(run_check(text)), [])
+        self.assertLess(time.monotonic() - started, 20)
+        deep = "/".join(["a"] * 8000)
+        text = producer() + consumer(*[run("sh z") for _ in range(60)]).replace(
+            "  use:\n    needs: agent\n", f"  use:\n    needs: agent\n    env: {{D: '{deep}'}}\n")
+        started = time.monotonic()
+        run_check(text)
+        self.assertLess(time.monotonic() - started, 20)
 
 
 class LayoutsTest(unittest.TestCase):
@@ -116,12 +179,12 @@ class LayoutsTest(unittest.TestCase):
             with self.subTest(download=download):
                 result = run_check(producer() + consumer(run("cat README.md"), run("npm test"),
                                                          download_with=download))
-                self.assertEqual([f.facts["path"] for f in found(result)], ["package.json"])
+                self.assertEqual([(f.step, f.facts["path"]) for f in found(result)], [("consume", ".")])
 
     def test_a_computed_folder_is_any_folder(self):
         result = run_check(producer() + consumer(run("./scripts/test.sh"),
                                                  download_with="{name: report, path: '${{ env.D }}'}"))
-        self.assertEqual([f.facts["path"] for f in found(result)], ["scripts/test.sh"])
+        self.assertEqual([f.facts["path"] for f in found(result)], ["a location the checker cannot read"])
 
     def test_absolute_and_home_folders(self):
         for path, cmd in (("/tmp/art", "bash /tmp/art/x.sh"), ("~/art", "bash \"$HOME/art/x.sh\""),
@@ -233,6 +296,22 @@ class RunsTest(unittest.TestCase):
                                                                            download_with="{name: all, path: result}"))), [])
 
 
+class FolderToolsTest(unittest.TestCase):
+    def test_a_test_runner_or_build_tool_above_the_download_is_reported(self):
+        """Test runners and package scripts collect files from the folders below them, so `npm test`, `make
+        test` or `pytest` at the workspace's top runs `result/conftest.py` or `result/x.test.js` if the agent
+        wrote one; a repository script given a downloaded file is not reported (its data, a stated limit)."""
+        base = producer()
+        for cmd, count in (("npm test", 1), ("make test", 1), ("pytest", 1), ("python -m pytest", 1),
+                           ("go test ./...", 1), ("python3 tools/parse.py result/report.json", 0),
+                           ("python -m mypkg.cli --in result/report.json", 0), ("./scripts/check.sh result/r.json", 0),
+                           ("npm test", 0)):
+            with self.subTest(cmd=cmd):
+                download = "{name: report, path: '${{ runner.temp }}/agent'}" if count == 0 and cmd == "npm test" \
+                    else "{name: report, path: result}"
+                self.assertEqual(len(found(run_check(base + consumer(run(cmd), download_with=download)))), count)
+
+
 class FalsePositivesTest(unittest.TestCase):
     def test_a_group_written_to_the_step_summary_is_read_only(self):
         step = ("      - name: consume\n        run: |\n          {\n            echo '## Report'\n"
@@ -243,7 +322,7 @@ class FalsePositivesTest(unittest.TestCase):
 
     def test_a_download_into_another_folder_leaves_unrelated_steps_alone(self):
         result = run_check(producer() + consumer(run("cat result/report.txt"), run("./scripts/test.sh"),
-                                                 run("make test")))
+                                                 run("python3 tools/summarize.py result/report.json")))
         self.assertEqual(found(result), [])
 
 
