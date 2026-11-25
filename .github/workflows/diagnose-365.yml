@@ -1,0 +1,49 @@
+name: Diagnose the Jenkins template self-check
+
+on:
+  push:
+    branches: [lead/validate-365-af7a6ac]
+    paths: [.github/workflows/diagnose-365.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: af7a6acf69d094fe8e533173239d1c1e94403ab0
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Prepare the checker and Git-free temporary storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = af7a6acf69d094fe8e533173239d1c1e94403ab0
+          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Inspect self-check and template coverage
+        run: |
+          set +e
+          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium --summary
+          gate=$?
+          echo "OBAAF medium gate exit=$gate"
+          obaaf check templates/jenkins/obaaf-release-publish.Jenkinsfile --format json > "$RUNNER_TEMP/template.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = json.loads((Path(os.environ["RUNNER_TEMP"]) / "template.json").read_text())
+          print("Report fields:", sorted(report))
+          print("Template findings:", [(row.get("rule"), row.get("message")) for row in report.get("findings", [])])
+          PY
+          exit "$gate"
