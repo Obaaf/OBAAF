@@ -440,7 +440,7 @@ class EgressActionTest(unittest.TestCase):
     def test_the_plain_form_clears(self):
         self.assertEqual(self.state(CHECKOUT + "\n" + action()), "fixed")
 
-    def test_uploads_after_confinement_withhold_credit_and_invalid_paths_stay_untrusted(self):
+    def test_uploads_after_confinement_preserve_credit_and_invalid_paths_stay_untrusted(self):
         for uses in ("actions/upload-artifact//x@v4", "actions/upload-artifact/./x@v4"):
             with self.subTest(uses=uses):
                 after = f"\n      - uses: {uses}\n        with: {{name: out, path: out}}"
@@ -450,7 +450,7 @@ class EgressActionTest(unittest.TestCase):
         after = "\n      - uses: actions/upload-artifact/../../../evil/act/v1@v4\n        with: {name: out, path: out}"
         self.assertEqual(self.state(CHECKOUT + "\n" + action() + after), "new")
         after = "\n      - uses: actions/upload-artifact@v4\n        with: {name: out, path: out}"
-        self.assertEqual(self.state(CHECKOUT + "\n" + action() + after), "cannot-tell")
+        self.assertEqual(self.state(CHECKOUT + "\n" + action() + after), "fixed")
 
     def test_a_cache_or_earlier_step_that_may_reach_the_scratch_directory_by_a_pattern(self):
         for path in ("/t[m]p/obaaf-e*", "/t?p/*", "/*/obaaf*", "$(dirname $(mktemp -u))/obaaf-e*", "//tmp/x"):

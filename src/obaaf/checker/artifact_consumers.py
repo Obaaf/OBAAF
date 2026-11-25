@@ -44,9 +44,13 @@ def _source_matches(workflow: Workflow, job: Job, download: Step, source: Upload
     if "run-id" in given:
         trigger = workflow.triggers.get("workflow_run")
         names = trigger.get("workflows") if isinstance(trigger, dict) else None
-        return (bool(given.get("github-token")) and re.fullmatch(r"\s*\$\{\{\s*github\.event\.workflow_run\.id\s*\}\}\s*", str(given["run-id"]))
-                is not None and isinstance(source.workflow_name, str)
-                and source.workflow_name in ([names] if isinstance(names, str) else names if isinstance(names, list) else []))
+        if isinstance(names, str):
+            names = [names]
+        triggering_run = re.fullmatch(
+            r"\s*\$\{\{\s*github\.event\.workflow_run\.id\s*\}\}\s*", str(given["run-id"])
+        )
+        return bool(given.get("github-token") and triggering_run and isinstance(names, list)
+                    and source.workflow_name in names)
     return source.workflow == workflow.path and source.job != job.id
 
 
@@ -107,6 +111,8 @@ def _executed_paths(step: Step, job: Job, workflow: Workflow):
 
 
 def consumers(workflow: Workflow, job: Job, sources):
+    if not sources:
+        return
     for index, download in enumerate(job.steps):
         if download.clean_action != "actions/download-artifact":
             continue

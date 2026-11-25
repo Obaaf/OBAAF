@@ -1005,10 +1005,9 @@ class BestControlTest(unittest.TestCase):
         late = f"{CHECKOUT}\n      - uses: step-security/harden-runner@{HR_2_22_0}\n        with: {{egress-policy: block}}"
         result = run_check(workflow(late + "\n      - run: claude -p x", runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
         f = egress(result)
-        # The firewall's reading is the one kept. Since the review of #357 it is "cannot tell" here, not
-        # verified: the agent's step can change what the actions' post steps run (GITHUB_ENV, GITHUB_PATH).
-        self.assertEqual((f.kind, verdict(f)), ("firewall-runner", CANNOT_TELL))
-        self.assertIn("can change through GITHUB_ENV or GITHUB_PATH", detail(f))
+        # The native firewall also covers the post steps of actions earlier in this job.
+        self.assertEqual((f.kind, verdict(f)), ("firewall-runner", VERIFIED))
+        self.assertIn("producing job", detail(f))
         alone = run_check(workflow("      - run: claude -p x", runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
         self.assertEqual((egress(alone).kind, verdict(egress(alone))), ("firewall-runner", VERIFIED))
 

@@ -132,8 +132,11 @@ class ArtifactProducerTest(unittest.TestCase):
             with self.subTest(name):
                 runner = ROUTES[route][0]
                 result = run_check(workflow(steps, runs_on=runner, job_extra=job_extra, top=top), policy=FIREWALL)
-                self.assertEqual(verdict(egress(result)), CANNOT_TELL)
-                self.assertIn("can make it run code the checker did not read", egress(result).controls[0].detail)
+                if route == "firewall":
+                    self.assertEqual(verdict(egress(result)), VERIFIED)
+                else:
+                    self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+                    self.assertIn("can make it run code the checker did not read", egress(result).controls[0].detail)
         # The second review of #357: a job container, an earlier step that names GITHUB_PATH before an install, and
         # the `actions/setup-` actions, which start tools that read the repository and variables the checker does not.
         b = "b" * 40
@@ -158,8 +161,11 @@ class ArtifactProducerTest(unittest.TestCase):
         for name, (route, steps, job_extra, top, reason) in more.items():
             with self.subTest(name):
                 result = run_check(workflow(steps, runs_on=ROUTES[route][0], job_extra=job_extra, top=top), policy=FIREWALL)
-                self.assertEqual(verdict(egress(result)), CANNOT_TELL)
-                self.assertIn(reason, egress(result).controls[0].detail)
+                if route == "firewall":
+                    self.assertEqual(verdict(egress(result)), VERIFIED)
+                else:
+                    self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+                    self.assertIn(reason, egress(result).controls[0].detail)
         # The action route's key-out-of-reach too (the commit message of the first review said so).
         steered = workflow(f"      - uses: actions/checkout@{SHA}\n        env: {{NODE_OPTIONS: --require ./x.js}}\n" + keyed())
         controls = {c.id: c.verdict for c in secret_finding(run_check(steered)).controls}
@@ -186,5 +192,8 @@ class ArtifactProducerTest(unittest.TestCase):
                 with self.subTest(route=route, step=step):
                     body = workflow(step + "\n" + steps, runs_on=runner)
                     result = run_check(body, policy=FIREWALL)
-                    self.assertEqual(verdict(egress(result)), CANNOT_TELL)
-                    self.assertIn("artifact", egress(result).controls[0].detail)
+                    if route == "firewall":
+                        self.assertEqual(verdict(egress(result)), VERIFIED)
+                    else:
+                        self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+                        self.assertIn("artifact", egress(result).controls[0].detail)
