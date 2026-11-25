@@ -1,0 +1,149 @@
+name: Validate flagship PR 362
+
+on:
+  push:
+    branches: [lead/validate-362-3565c51]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        test: [suite, comparisons]
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 3565c51d50a8ce61f3ba7c49c0688536fa049b68
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Prepare the checker and Git-free temporary storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 3565c51d50a8ce61f3ba7c49c0688536fa049b68
+          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Run the full acceptance suite and repository checks
+        if: matrix.test == 'suite'
+        run: |
+          set -euo pipefail
+
+          obaaf docs build --check
+          python -m unittest discover -s tests > "$RUNNER_TEMP/tests.log" 2>&1 || { tail -100 "$RUNNER_TEMP/tests.log"; exit 1; }
+          grep -E '^(Ran [0-9]+ tests|OK)' "$RUNNER_TEMP/tests.log"
+          obaaf catalog > /dev/null
+          obaaf docs build --check
+          python site/build.py --output "$RUNNER_TEMP/resource-site"
+          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
+      - name: Compare text, JSON, SARIF and summary on both repositories
+        if: matrix.test == 'comparisons'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/base-src"
+          git archive 4b963f57e96785c452150f02bca6a01db57f4638 src | tar -x -C "$RUNNER_TEMP/base-src"
+          git init -q "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout init --no-cone
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout set --no-cone '/*' '!/bugs/' '!/fresh-*/'
+          git -C "$RUNNER_TEMP/expectrail" fetch -q --filter=blob:none --depth=1 https://github.com/Expectrail/Expectrail.git de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          git -C "$RUNNER_TEMP/expectrail" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/expectrail" rev-parse HEAD)" = de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          cd "$RUNNER_TEMP"
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          candidate = Path(os.environ["GITHUB_WORKSPACE"])
+          sources = [temp / "base-src/src", candidate / "src"]
+          for path, level, expected in [(candidate, "medium", 0), (temp / "expectrail", "low", 1)]:
+              extra = ["--no-fixes"] if level == "low" else []
+              for mode in [["--format", "text"], ["--format", "json"], ["--format", "sarif"], ["--summary"]]:
+                  observations = []
+                  for src in sources:
+                      env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
+                      module = subprocess.check_output(
+                          [sys.executable, "-c", "import obaaf.cli; print(obaaf.cli.__file__)"],
+                          env=env, text=True,
+                      ).strip()
+                      assert Path(module).resolve().is_relative_to(src.resolve())
+                      argv = ["obaaf", "check", str(path), "--baseline", str(path / ".github/obaaf-baseline.json"),
+                              "--fail-on", level, *extra, *mode]
+                      run = subprocess.run(argv, env=env, capture_output=True)
+                      observations.append((run.returncode, run.stdout, run.stderr))
+                  if observations[0] != observations[1]:
+                      assert mode == ["--format", "sarif"], (level, mode, "outputs differ")
+                      before, after = observations
+                      assert (before[0], before[2]) == (after[0], after[2])
+                      original, revised = json.loads(before[1]), json.loads(after[1])
+                      changed = []
+                      for left, right in zip(original["runs"], revised["runs"]):
+                          descriptors = right["tool"]["driver"]["rules"]
+                          for old, new in zip(left["tool"]["driver"]["rules"], descriptors):
+                              assert old["id"] == new["id"]
+                              if old != new and old["id"] in ("OBAAF-GHA-020", "OBAAF-GHA-005"):
+                                  for field in ("fullDescription", "help", "shortDescription"):
+                                      if field in old and field in new and old[field] != new[field]:
+                                          changed.append((old["id"], field))
+                                          old[field] = new[field]
+                      assert changed and original == revised, (level, mode, "SARIF results or other metadata differ")
+                      print("Only documented rule text changed:", changed)
+
+                  assert observations[0][0] == expected, (level, mode, observations[0][0])
+                  print(f"Matched {path.name} {' '.join(mode)} exit={expected}", flush=True)
+          PY
+
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+          
+          root = Path(os.environ["RUNNER_TEMP"])
+          exp = root / "expectrail"
+          probe = """
+          import json
+          import sys
+          from pathlib import Path
+          import yaml
+          from obaaf import checker
+          from obaaf.init import _proposal
+          from obaaf.checker import CONFIG_LOCATIONS
+          root = Path(sys.argv[1])
+          outputs, notes = _proposal(root, [])
+          lanes = yaml.safe_load(outputs[CONFIG_LOCATIONS[0]])["lanes"]
+          inferred = [f"{path}#{job}" for path, job, lane, reason in checker.lanes(root, checker.Config(), platform="github") if lane == "agent"]
+          provider = [line.split(": ", 1)[0] for line in notes if ": " in line and "references " in line]
+          print(json.dumps([lanes, inferred, provider]))
+          """
+          rows = []
+          for src in [root / "base-src/src", Path(os.environ["GITHUB_WORKSPACE"]) / "src"]:
+              env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
+              rows.append(json.loads(subprocess.check_output([sys.executable, "-c", probe, str(exp)], env=env)))
+          prior, inferred, _ = rows[0]
+          current, current_inferred, provider = rows[1]
+          removed = set(prior) - set(current)
+          retained = set(prior) & set(current)
+          expected = {job for job, lane in prior.items() if lane == "agent" and job in inferred}
+          print("Prior declarations:", len(prior), "removed:", len(removed), "retained:", len(retained))
+          print("Retained provider-key jobs:", len(retained & set(provider)))
+          assert set(inferred) == set(current_inferred)
+          assert removed == expected and removed
+          assert retained and retained & set(provider)
+          assert current == {job: lane for job, lane in prior.items() if job not in expected}
+          PY
