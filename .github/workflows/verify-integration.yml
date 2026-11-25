@@ -1,0 +1,51 @@
+name: Verify individual integration trees
+on:
+  push:
+    branches: [lead/validate-patch-73ce746]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 73ce746b4728a6b5f5404883397e0f801f06b2f3
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare isolated Git integration
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 73ce746b4728a6b5f5404883397e0f801f06b2f3
+          worktemp="$(mktemp -d "$RUNNER_TEMP/proof.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+      - name: Resolve PR 368 against flagship
+        run: |
+          set -euo pipefail
+          worktemp="$TMPDIR"
+          if ! git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-ff --no-edit 7dc914bb457f5a042585c4c1ec8fafa5d1c89137; then
+            test "$(git diff --name-only --diff-filter=U)" = CHANGELOG.md
+            git show :1:CHANGELOG.md > "$worktemp/base-log"
+            git show :2:CHANGELOG.md > "$worktemp/ours-log"
+            git show :3:CHANGELOG.md > "$worktemp/theirs-log"
+            python - "$worktemp" <<'PY'
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          base, ours, theirs = [(root / (name + "-log")).read_bytes() for name in ("base", "ours", "theirs")]
+          heading = b"### Save a proven fix as a patch\n"
+          assert theirs.count(heading) == 1 and heading not in ours
+          start = theirs.index(heading)
+          end = theirs.index(b"\n### ", start + len(heading)) + 1
+          assert theirs[:start] + theirs[end:] == base
+          marker = b"## [Unreleased]\n\n"
+          assert ours.count(marker) == 1
+          Path("CHANGELOG.md").write_bytes(ours.replace(marker, marker + theirs[start:end], 1))
+          PY
+            git add CHANGELOG.md
+            git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' commit --no-edit
+          fi
+          git diff --check 73ce746b4728a6b5f5404883397e0f801f06b2f3 HEAD
+          echo "PR 368 integrated tree $(git rev-parse HEAD^{tree})"
