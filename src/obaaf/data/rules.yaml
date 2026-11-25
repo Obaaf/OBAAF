@@ -205,7 +205,7 @@ rules:
       beside it whose script, `env` values or inputs name `GITHUB_ENV`, `exportVariable` or the runner's `_runner_file_commands` folder or whose
       words may leave a process running, a parallel step,
       and service containers given volumes or options; and, since decision D-133, a possible artifact
-      upload anywhere in the job, steps after it included, as OBAAF-GHA-020 reads it. Since those steps run no shell, look nothing up
+      upload anywhere in the job, steps after it included. This key control keeps its own upload check. Since those steps run no shell, look nothing up
       through the `PATH` and empty the loader's variables (slice 2c.9), bash's, Python's, the `PATH`'s and
       the loader's variables and a write to `GITHUB_PATH` no longer count as reasons of this control's own
       (slice 2c.10b), though such a variable or step can make a step a possible upload; since the action
@@ -752,7 +752,7 @@ rules:
       the whole job from outside the runner; and OBAAF's egress action (`actions/egress`) at a commit
       OBAAF lists as released, with a plain allow-list with no public suffix at or under a name, the
       agent as its command (no other step and no `env` of the job is given a credential, and the job
-      cannot request OIDC tokens) and no step after it.
+      cannot request OIDC tokens) and no later step other than a recognised upload.
       A recognised artifact upload does not alone change the producing job's egress verdict.
       OBAAF-GHA-027 reports visible execution of the download on the consuming job. Other steps
       whose local behaviour is unread still withhold credit for OBAAF's action, and a possible upload still
@@ -791,7 +791,7 @@ rules:
       repository or a local action the checker cannot read through (named in a note); code an earlier action
       runs in its post step; an upload the agent's own command makes (with `sudo`, for one; not tested),
       transfers through caches or job outputs, variables other programs read for their own settings,
-      and what another job or repository does with an artifact;
+      and consumers beyond the visible downloads and execution paths that OBAAF-GHA-027 reads;
       whether a pinned commit of upload-artifact is on its repository's own branches; and whether a
       runner with the firewall's label has the firewall, which the label is taken to mean.
     fix: >-
