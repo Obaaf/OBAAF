@@ -348,11 +348,18 @@ class JenkinsReleaseTemplatesTest(unittest.TestCase):
             self.assertEqual([(f.rule, f.line, f.message) for f in result.active()], [], name)
             self.assertNotIn("fail", {row["status"] for row in result.coverage}, name)
 
-    def test_publish_template_has_verified_release_coverage(self):
+    def test_publish_template_is_cannot_tell_only_for_its_path_change(self):
+        # Both checks run under withEnv(["PATH+OBAAF=..."]), with a `command -v` step that fails the build when the
+        # shell does not find the virtual environment's `obaaf`. The checker does not read that step, and a PATH change
+        # around a check can make its shell run another program, so the three rules cannot tell (the review of #365).
+        # Every reason they give is that change: nothing else in the template keeps them from passing.
         result = check(TEMPLATES / "obaaf-release-publish.Jenkinsfile")
-        statuses = {row["rule"]: row["status"] for row in result.coverage}
+        rows = {row["rule"]: row for row in result.coverage}
         for rule in ("OBAAF-JEN-010", "OBAAF-JEN-011", "OBAAF-JEN-012"):
-            self.assertEqual(statuses[rule], "pass", rule)
+            self.assertEqual(rows[rule]["status"], "unknown", rule)
+            self.assertTrue(rows[rule]["reasons"], rule)
+            for reason in rows[rule]["reasons"]:
+                self.assertIn("PATH+OBAAF is set around the step", reason, rule)
 
     def test_publish_template_verifies_and_approves_before_it_uploads(self):
         text = (TEMPLATES / "obaaf-release-publish.Jenkinsfile").read_text()

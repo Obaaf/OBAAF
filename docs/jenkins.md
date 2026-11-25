@@ -199,6 +199,22 @@ To clear it, publish in a later stage or in `post { success }`, and put each che
 with literal arguments and nothing that ignores its failure. The limits are listed in
 [bypass-attempts.md](bypass-attempts.md#2d2o-a-publish-after-a-failed-or-skipped-check).
 
+**A check under a variable that changes what its shell runs** (OBAAF-JEN-010, 011 and 012; decision D-135). A
+check does not clear any of the three rules when its shell may run another program than the one it names: when a
+`withEnv` entry or an `environment { }` block around the step, or a script anywhere in the file (`env.PATH = ...`,
+`env['PATH'] = ...`, `env.setProperty(...)`, through `this.env` or an alias of `env` too), sets `PATH`
+(`PATH+NAME` included: Jenkins puts the value in front of `PATH`), `HOME`, `ENV`, `SHELLOPTS`, `PS4`, `GCONV_PATH`
+or a name beginning `BASH`, `LD_`, `DYLD_` or `PYTHON` (`PYTHONUNBUFFERED` and the other variables that load
+nothing excepted), in any letter case, or a name the checker cannot read (a computed entry, a list held in a
+variable). These are the names the GitHub Actions rules read since slice 2d.13. Such a check is "cannot tell", and
+the reason names the variable and its line; a check whose failure the step already ignores stays a finding, and a
+`--pre-approval` check stays a medium OBAAF-JEN-012. A variable set around another step changes nothing. Not read:
+what the agent's own environment holds (the controller's node properties, `tools { }`, a container's image), and a
+step that checks which program the shell finds (`command -v obaaf`). Before the review of #365 only an `export`
+inside the check's own script stopped the reader, so `withEnv(["PATH+X=${env.WORKSPACE}/tools"])` around
+`obaaf verify release` cleared all three rules whatever `tools` held. OBAAF's own publish template is "cannot tell"
+under all three for this reason (below).
+
 **Credentials.** `withCredentials` with every binding type, `environment` `credentials()`,
 `sshagent`, `withSonarQubeEnv`, `docker.withRegistry` (also with a computed ID),
 `configFileProvider`, `wrap` with a credential or Vault wrapper class, wrapper steps that supply
@@ -528,6 +544,10 @@ Both verification steps use `--revision-file release-sha.txt`. Set `OBAAF_REVISI
 OBAAF commit that supports this option. Each step checks that the shell resolves `obaaf` to the
 executable installed from that commit in the job’s virtual environment. The publish pipeline disables
 Declarative stage restarts. A fresh publish run must start from the tag build and collect a new approval.
+OBAAF's own rules cannot tell about this template under OBAAF-JEN-010, 011 and 012: both checks run under
+`withEnv(["PATH+OBAAF=..."])`, a `PATH` change can make a check's shell run another program, and the checker does
+not read the `command -v` step that rules that out here (decision D-135). Jenkins coverage is advisory, so this
+changes no exit status.
 
 At the end, the verifier checks the same facts again from the controller's JSON for both builds,
 which the publish job fetches with a read-only API token:

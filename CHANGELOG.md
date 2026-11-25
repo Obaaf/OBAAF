@@ -4,6 +4,14 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Jenkins checks under a changed `PATH`
+
+From the review of #365; decision D-135. **A check before a Jenkins publish no longer clears OBAAF-JEN-010, 011 or 012 when a variable around it can change the program its shell runs, so a Jenkinsfile that passed can get "cannot tell".** The shell reader stopped at an `export` inside the check's own script, but a `withEnv` entry, an `environment { }` block or `env.PATH = ...` in a script changed nothing: `withEnv(["PATH+X=${env.WORKSPACE}/tools"])` around `obaaf verify release` cleared all three rules whatever `tools` held. The names are those the GitHub Actions rules read since slice 2d.13 (`PATH`, `HOME`, `ENV`, `SHELLOPTS`, `PS4`, `GCONV_PATH`, and names beginning `BASH`, `LD_`, `DYLD_` or `PYTHON` other than those that load nothing), in any letter case, and any name the checker cannot read. A check whose failure the step ignores stays a finding. Jenkins coverage is advisory, so no exit status changes.
+
+### Jenkins publish template
+
+`templates/jenkins/obaaf-release-publish.Jenkinsfile` (#344, #365) now verifies the approval in a stage of its own before the stage that binds the upload credential, disables Declarative stage restarts (`disableRestartFromStage()`) so a restarted run cannot start at the upload, runs both checks under `withEnv(["PATH+OBAAF=..."])` after a step that fails unless the shell finds the `obaaf` the job installed, and passes the tag's commit with the new `obaaf verify release --revision-file FILE`, which reads one full lower-case commit ID and refuses anything else. OBAAF's own rules still cannot tell about it under OBAAF-JEN-010, 011 and 012, because of the `PATH` change (above). Only the stage-restart option was run on a Jenkins controller.
+
 ### Preview missing ignore owners
 
 The full report, summary and JSON to-do list give a scoped `obaaf fix --owner OWNER` preview command for ignore entries missing their owner, after a check of the whole repository on every platform with no scan errors, a baseline in the current format, and a configuration, baseline and settings snapshot inside the repository (a link from inside to a file outside is not yet caught, #369); otherwise they say which of these to settle first. Replace `OWNER` with the person or team responsible for these entries: the preview writes that owner into every ignore entry missing one, proposes removing the baseline and ignore entries that match no finding, and lists every finding you would accept. A baseline entry missing its owner still needs review by hand.

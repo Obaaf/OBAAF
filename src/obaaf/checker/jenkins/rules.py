@@ -37,7 +37,7 @@ from obaaf.checker.jenkins.parser import (
     Str,
     callee_name, path_of,
 )
-from obaaf.checker.rules import Finding
+from obaaf.checker.rules import Finding, steers
 from obaaf.checker.workflow import _script_tokens, _strip_comment, binding_commands, declared_lane
 
 RULES = ("OBAAF-JEN-001", "OBAAF-JEN-002", "OBAAF-JEN-003", "OBAAF-JEN-004", "OBAAF-JEN-005", "OBAAF-JEN-006",
@@ -3335,7 +3335,9 @@ class JenkinsRules:
                          "by which reference, is not known")
         fetches = [f for f in fetches if f[1] != "fixed"]
         checks = [(i, self._fetch_check(i)) for i in self.infos]
-        checks = sorted(((i, kind) for i, kind in checks if kind and not i.ctx.deferred), key=lambda c: c[0].index)
+        # A check whose shell may run another program than the one it names counts as neither (the review of #365)
+        checks = sorted(((i, "steered" if self._steered(i) else kind) for i, kind in checks
+                         if kind and not i.ctx.deferred), key=lambda c: c[0].index)
         keys: dict[int, frozenset] = {}
 
         def guards(info: Info) -> frozenset:
@@ -3362,13 +3364,13 @@ class JenkinsRules:
         # stop it, worked out once: comparing every copy with every step of its stage took 11.7 seconds on 744
         # bytes of nested helpers. A check counts as `gates` says, except that a condition the copy runs under
         # may also skip the check: when it does not hold, nothing was copied.
-        memo: dict[tuple, tuple[int, int]] = {}
+        memo: dict[tuple, tuple[int, int, int]] = {}
 
-        def latest(publish: Info, copy_guards: frozenset) -> tuple[int, int]:
+        def latest(publish: Info, copy_guards: frozenset) -> tuple[int, int, int]:
             key = (publish.index, copy_guards)
             found = memo.get(key)
             if found is None:
-                full = digest = -1
+                full = digest = steered = -1
                 allowed = guards(publish) | copy_guards
                 for check, kind in checks:
                     if check.index >= publish.index:
@@ -3379,9 +3381,11 @@ class JenkinsRules:
                         continue
                     if kind == "full":
                         full = check.index
+                    elif kind == "steered":
+                        steered = check.index
                     else:
                         digest = check.index
-                found = memo[key] = (full, digest)
+                found = memo[key] = (full, digest, steered)
             return found
 
         for info, kind, what in fetches:
@@ -3397,28 +3401,41 @@ class JenkinsRules:
             def repeated(p: Info) -> bool:
                 return bool(again) and bool(again & (set(p.ctx.repeats) | guards(p)))
             later = [p for p in publishes if p.index > info.index or concurrent(info.ctx, p.ctx) or repeated(p)]
-            unchecked, digest_only = [], []
+            unchecked, digest_only, steered_only = [], [], []
             for publish in later:
                 if publish.ctx.post in FAILURE_PATHS or publish.index < info.index or concurrent(info.ctx, publish.ctx):
                     # a publish in a failure path runs when the check failed; one before the copy in the same retry
                     # block runs after the copy of the try before; one beside the copy is checked by nothing after it
                     unchecked.append(publish)
                     continue
-                full, digest = latest(publish, fixed_guards(info))
+                full, digest, steered = latest(publish, fixed_guards(info))
                 if full > info.index and not self._beside(info, full):
                     continue
-                if digest > info.index and not self._beside(info, digest):
+                if steered > info.index and not self._beside(info, steered):
+                    steered_only.append((publish, steered))
+                elif digest > info.index and not self._beside(info, digest):
                     digest_only.append(publish)
                 else:
                     unchecked.append(publish)
             if kind == "unknown":
-                if unchecked or digest_only:
+                if steered_only and not unchecked and not digest_only:
+                    check = self.infos[steered_only[0][1]]
+                    self.unknown("OBAAF-JEN-010", info.line,
+                                 f"the copy at line {info.line} copies artifacts from {what}, which the file does not "
+                                 f"fix; the check at line {check.line} runs before the publish, but "
+                                 f"{self._steered(check)}")
+                elif unchecked or digest_only or steered_only:
                     self.unknown("OBAAF-JEN-010", info.line,
                                  f"the copy at line {info.line} copies artifacts from {what}, which the file does not "
                                  "fix, and the pipeline publishes after it")
                 continue
             if not unchecked:
-                if digest_only:
+                if steered_only:
+                    check = self.infos[steered_only[0][1]]
+                    self.unknown("OBAAF-JEN-010", info.line,
+                                 f"the copy at line {info.line} copies artifacts from {what}; the check at line "
+                                 f"{check.line} runs before the publish, but {self._steered(check)}")
+                elif digest_only:
                     self.unknown("OBAAF-JEN-010", info.line,
                                  f"the copy at line {info.line} copies artifacts from {what}; a digest check runs before "
                                  "the publish, but whether its digests come from somewhere other than the build it "
@@ -3466,6 +3483,31 @@ class JenkinsRules:
                         kind = "digest"
         self._script_cache[("fetch-check", id(info.use.call))] = (info.use.call, kind)
         return kind
+
+    def _steered(self, info: Info) -> str | None:
+        """Why a check step's shell may run another program than the one it names, or None (the review of pull request
+        #365, for #344): a variable that `steers` counts (`PATH`, bash's, the loader's, Python's and the others the
+        GitHub rules read since slice 2d.13), or one whose name the checker cannot read, set by a `withEnv` entry or an
+        `environment { }` block around the step (`PATH+NAME` is `PATH`: Jenkins puts the value in front of it), or by a
+        script anywhere in the file (`env.PATH = ...` holds for every later step, wherever it is). Before the review
+        only an `export` inside the step's own script stopped the reader, so `withEnv(["PATH+X=${env.WORKSPACE}/x"])`
+        around `obaaf verify release` counted the check, whatever `x` held. What an agent's or a tool's own setup puts
+        in the environment (the controller's node properties, `tools { }`, a container's image) is not read."""
+        for name, line in info.ctx.env_names:
+            if name == "?":
+                return (f"a withEnv entry or environment block at line {line}, around the step, sets a variable whose "
+                        "name the checker cannot read, which may change the program the step's shell runs")
+            if steers(name.split("+", 1)[0]):
+                return (f"{name} is set around the step (line {line}), which can change the program the step's shell "
+                        "runs")
+        for name, line in self.p.env_scripted:
+            if name == "?":
+                return (f"line {line} sets a variable in the build's environment whose name the checker cannot read, "
+                        "which may change the program the step's shell runs")
+            if steers(name.split("+", 1)[0]):
+                return (f"line {line} sets {name} in the build's environment, which can change the program the step's "
+                        "shell runs")
+        return None
 
     @staticmethod
     def _status_stops(info: Info) -> bool:
@@ -4258,6 +4300,10 @@ class JenkinsRules:
         self.applicable.add("OBAAF-JEN-011")
         called = {id(i.use.call) for i in self.infos if not i.ctx.deferred}
         checks = [(i, *r) for i in self.infos if (r := self._failure_check(i))]
+        # A check whose shell may run another program than the one it names may not stop anything (the review of #365);
+        # one whose failure the step already ignores stays a finding.
+        checks = [(i, "unread", steered) if kind == "stops" and (steered := self._steered(i)) else (i, kind, why)
+                  for i, kind, why in checks]
         for info in publishes:
             if info.ctx.post not in FAILURE_PATHS:
                 continue
@@ -4362,7 +4408,10 @@ class JenkinsRules:
         if not publishes:
             return
         self.applicable.add("OBAAF-JEN-012")
-        checks = [(i, kind) for i in self.infos if (kind := self._provenance_kind(i))]
+        # A full check whose shell may run another program than the one it names does not count (the review of #365).
+        # A provenance check only is left as it is: whatever it runs, the approvals are not checked.
+        checks = [(i, "steered" if kind == "full" and self._steered(i) else kind)
+                  for i in self.infos if (kind := self._provenance_kind(i))]
         called = {id(i.use.call) for i, _k in checks if not i.ctx.deferred}
         # A check read only where a closure or an uncalled method is written may run through a call the checker does
         # not follow (`parallel(verify: verify)`, a method pointer) or never: cannot tell for every publish. One that
@@ -4408,10 +4457,13 @@ class JenkinsRules:
             kinds = {k for k, _c in found}
             if "full" in kinds:
                 continue
-            if "unread" in kinds or loose is not None:
-                check = max((c for k, c in found if k == "unread"), key=lambda c: c.index, default=loose)
+            if "unread" in kinds or "steered" in kinds or loose is not None:
+                check, kind = max(((c, k) for k, c in found if k in ("unread", "steered")), key=lambda ck: ck[0].index,
+                                  default=(loose, "unread"))
                 where = (f"is in {check.ctx.deferred} and is not seen called"
                          if check.ctx.deferred else
+                         f"may not run the program it names: {self._steered(check)}"
+                         if kind == "steered" else
                          "is written in a form the checker does not read: Groovy puts text into the script, "
                          "returnStatus is computed, the command is named by a path or is not on a line of its own, "
                          "its arguments hold a shell expansion, a line before it is one the shell reader cannot vouch "

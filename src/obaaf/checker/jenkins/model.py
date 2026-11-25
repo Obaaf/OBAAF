@@ -123,6 +123,11 @@ class Ctx:
     # Flagship slice 2d.2n: the stage path whose Declarative post block the step is in (() for the pipeline's own), or
     # None outside one. A Scripted stage may be named "post always", so the stage path alone does not say it.
     post_owner: tuple | None = None
+    # The review of pull request #365 (#344): ((name, line), ...) for every variable a `withEnv` entry or an
+    # `environment { }` block around the step sets, outermost first, as written (`PATH+OBAAF` included); the name
+    # is "?" where the checker cannot read it (a computed entry, a list held in a variable). A check's shell may run
+    # another `obaaf` when one of them is `PATH` or another name `steers` counts.
+    env_names: tuple = ()
 
 
 @dataclass
@@ -236,6 +241,10 @@ class Pipeline:
     # Names set in the environment by the file (env.X =, env['X'] =, withEnv, environment {}, webhook variables):
     # what bat's %NAME% expands (flagship slice 2d.2).
     env_set: set = field(default_factory=set)
+    # The review of pull request #365 (#344): (name, line) for every variable a script sets in the build's
+    # environment (`env.X =`, `env['X'] =`, `env.setProperty('X', ...)`, through an alias of `env` too), which holds
+    # for every step after it wherever it is; the name is "?" where it is computed.
+    env_scripted: list = field(default_factory=list)
     # The implicit `it` of a closure an iteration method calls: what each closure body's `it` holds, by its id, and
     # what it held where each step was recorded (flagship slice 2d.2, from its first review).
     it_values: dict = field(default_factory=dict)
@@ -478,6 +487,30 @@ def shell_script(call: Call):
                     return value
             return None
     return node
+
+
+def with_env_names(call: Call) -> list:
+    """(name, line) for each entry of `withEnv([...])`, as Jenkins reads an entry: the text before its first `=`, so
+    `PATH+OBAAF` for `PATH+OBAAF=...` (the review of pull request #365). The name is "?" for an entry the checker
+    cannot read: one not written as a string or as a string joined with `+`, one whose name holds an interpolation or
+    has no `=`, or a list held in a variable or built by code."""
+    out = []
+    args = list(call.args) + [value for _key, value in call.named]
+    for arg in args:
+        if not isinstance(arg, ListLit):
+            out.append(("?", getattr(arg, "line", 0) or call.line))
+            continue
+        for item in arg.items:
+            line = getattr(item, "line", 0) or call.line
+            head = item
+            while isinstance(head, Binary) and head.op == "+":
+                head = head.left
+            if not isinstance(head, Str):
+                out.append(("?", line))
+                continue
+            name, eq, _ = head.text().partition("=")
+            out.append((name.strip() if eq and name.strip() and "${" not in name else "?", line))
+    return out
 
 
 def all_strings(node):
@@ -1870,6 +1903,15 @@ class Builder:
                 # runs; the checker reads lanes from environment blocks and withEnv only (2d.2a left this).
                 self.p.unread_lanes.append(("jenkins-scripted", target[4:], literal(stmt.value), stmt.line,
                                             " > ".join(ctx.stage)))
+            if target and path_of(stmt.target):
+                # The review of pull request #365: `env.PATH = ...` (also through `this.`, `script.` or an alias of
+                # `env`) holds for every later step, wherever it is.
+                scoped = target
+                for prefix in ("this.", "script.", "binding.", "steps."):
+                    scoped = scoped.removeprefix(prefix)
+                base, _, rest = scoped.partition(".")
+                if rest and (base == "env" or base in self.p.env_aliases):
+                    self.p.env_scripted.append((rest if "${" not in rest and "." not in rest else "?", stmt.line))
             if target:
                 self.p.local_names.add(target.split(".")[0])
                 if path_of(stmt.target) and "." in target and not target.startswith("env.") and \
@@ -1906,6 +1948,7 @@ class Builder:
                         seen = self.p.literal_values.get(stmt.target.index.name)
                         if seen and len(seen) == 1 and stmt.target.index.name not in self.p.nonliteral_names:
                             key = next(iter(seen))
+                    self.p.env_scripted.append((key if key is not None else "?", stmt.line))   # review of #365
                     if key is not None:
                         # env['T'] = x (2d.2): T holds x for OBAAF-JEN-009; OBAAF-JEN-013 reads `env` as before.
                         self.p.env_set.add(key)
@@ -2579,6 +2622,7 @@ class Builder:
             if name in ("retry", "waitUntil"):
                 inner = replace(inner, repeats=inner.repeats + (f"{name} {call.line}",))
             if name == "withEnv":
+                inner = replace(inner, env_names=inner.env_names + tuple(with_env_names(call)))
                 for arg in call.args:
                     for s in all_strings(arg):
                         var, sep, val = s.text().partition("=")
@@ -2665,6 +2709,8 @@ class Builder:
                                          self.p.env_aliases):
                 if len(call.args) >= 2:
                     key = literal(call.args[0])
+                    if full.startswith("env.") or target in self.p.env_aliases:
+                        self.p.env_scripted.append((key if key is not None else "?", call.line))   # review of #365
                     if key is not None:
                         if full.startswith("env.") or target in self.p.env_aliases:
                             self.p.env_set.add(key)
@@ -2928,10 +2974,14 @@ class Builder:
             return ctx
         new: list[Binding] = []
         lane, lane_line, lanes = ctx.lane, ctx.lane_line, ctx.lanes
+        names: list = []
         for stmt in env.closure.stmts:
             if not isinstance(stmt, Assign):
+                if not (isinstance(stmt, ExprStmt) and isinstance(stmt.expr, Str)):
+                    names.append(("?", getattr(stmt, "line", env.line)))   # not an assignment the checker reads
                 continue
             var = path_of(stmt.target) or ""
+            names.append((var or "?", stmt.line))
             value = stmt.value
             if isinstance(value, Call) and callee_name(value) == "credentials":
                 cid = literal(first_arg(value)) or "?"
@@ -2950,7 +3000,8 @@ class Builder:
                 self.p.env_values[var] = value
             self.p.env_set.add(var)
             self.track_value(var, value)
-        return replace(ctx, creds=ctx.creds + tuple(new), lane=lane, lane_line=lane_line, lanes=lanes)
+        return replace(ctx, creds=ctx.creds + tuple(new), lane=lane, lane_line=lane_line, lanes=lanes,
+                       env_names=ctx.env_names + tuple(names))
 
     def stage_list(self, block: Block | None, ctx: Ctx, parallel: int | None = None) -> None:
         """Stages in order; with `parallel` (the line of a parallel block), each stage is a branch that
