@@ -39,6 +39,16 @@ class FixCliTest(unittest.TestCase):
         partial = next(row for row in json.loads(data)["todo"] if row["id"] == owner["id"])
         self.assertIsNone(partial["command"])
         self.assertIn("whole repository", partial["nextAction"])
+        with TempDir() as external:
+            config = external / "policy.yml"
+            config.write_text(source)
+            code, data, err = run_cli("check", self.root, "--config", config, "--fail-on", "never",
+                                      "--format", "json")
+            self.assertEqual(code, 0, err)
+            outside = next(row for row in json.loads(data)["todo"] if row["id"] == owner["id"])
+            self.assertIsNone(outside["command"])
+            self.assertIn("--config", outside["nextAction"])
+            self.assertIn("inside the repository", outside["nextAction"])
         words = shlex.split(command)
         self.assertEqual(words.pop(0), "obaaf")
         self.assertIn("--config=" + str(self.config), words)

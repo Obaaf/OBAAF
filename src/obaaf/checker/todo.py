@@ -84,6 +84,23 @@ def tightening_prerequisite(result: CheckResult) -> str:
     return " ".join(steps) + removal
 
 
+def owner_preview_prerequisite(result: CheckResult) -> str:
+    if result.errors:
+        return "Resolve the scan errors before previewing an owner for ignore entries."
+    if not result.whole_repository:
+        return "Check the whole repository on every platform before previewing an owner for ignore entries."
+    for flag, value in (("--config", result.config.path), ("--baseline", result.baseline_path),
+                        ("--settings", result.settings_path)):
+        if value:
+            try:
+                root = fix_input_root(Path(result.checked or "."))
+                fix_input_relative(value, root, settings=flag == "--settings")
+            except (OSError, RuntimeError, ValueError):
+                return (f"Rerun the check with {flag} pointing to a reviewable file inside the repository "
+                        "and outside .git before previewing an owner for ignore entries.")
+    return ""
+
+
 @dataclass
 class _Group:
     cause: Cause
@@ -93,7 +110,7 @@ class _Group:
     ownerless_ignores: int = 0
     pin_packages: Counter = field(default_factory=Counter)
 
-    def as_dict(self, result: CheckResult, prerequisites: str) -> dict:
+    def as_dict(self, result: CheckResult, prerequisites: str, owner_prerequisite: str) -> dict:
         item = {
             "id": self.cause.id,
             "kind": self.kind,
@@ -107,11 +124,8 @@ class _Group:
         if self.ownerless_ignores:
             manual = (" Review missing owners in baseline entries by hand."
                       if self.ownerless_ignores < item["count"] else "")
-            if result.errors:
-                action = "Resolve the scan errors before previewing an owner for ignore entries."
-            elif not result.whole_repository:
-                action = "Check the whole repository on every platform before previewing an owner for ignore entries."
-            else:
+            action = owner_prerequisite
+            if not action:
                 command = tightening_command(result, ["--owner", "OWNER"])
                 action = ("Review each risk. Replace OWNER with its responsible owner to preview the ignore changes. "
                           "The preview lists every finding you would accept.")
@@ -177,6 +191,8 @@ def todo(result: CheckResult, catalog: Catalog) -> list[dict]:
         if cause.id == "agent-tool-version" and finding.pin_candidate:
             group.pin_packages[finding.pin_candidate] += 1
 
+    owners = groups.get("acceptance-owner-missing")
+    owner_prerequisite = owner_preview_prerequisite(result) if owners and owners.ownerless_ignores else ""
     pins = groups.get("agent-tool-version")
     has_tightening = "checkout-credentials" in groups or (pins and pins.pin_packages)
     prerequisites = tightening_prerequisite(result) if has_tightening else ""
@@ -191,9 +207,9 @@ def todo(result: CheckResult, catalog: Catalog) -> list[dict]:
     def priority(group: _Group) -> tuple:
         has_preview = group.cause.id == "checkout-credentials" or bool(group.pin_packages)
         actionable = not result.errors and (group.cause.id == "acceptance-old-baseline"
-                                            or (group.ownerless_ignores and result.whole_repository)
+                                            or (group.ownerless_ignores and not owner_prerequisite)
                                             or (has_preview and not prerequisites))
         highest = next((i for i, level in enumerate(_LEVELS) if group.severity[level]), len(_LEVELS))
         return (not actionable, highest, -group.severity.total(), group.cause.id)
 
-    return [group.as_dict(result, prerequisites) for group in sorted(groups.values(), key=priority)]
+    return [group.as_dict(result, prerequisites, owner_prerequisite) for group in sorted(groups.values(), key=priority)]
