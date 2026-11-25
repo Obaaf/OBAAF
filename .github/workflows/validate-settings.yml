@@ -1,0 +1,221 @@
+name: Validate revised settings workflow and patch compatibility
+
+on:
+  push:
+    branches: [lead/validate-settings-caa3db4]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    env:
+      CHECK_HEAD: ${{ matrix.head }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        test: [suite, comparisons]
+        head: [caa3db45d11270429c01ad0c0964cc9d0d7f97cb]
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Prepare the checker and Git-free temporary storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ${{ matrix.head }}
+          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
+          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Run the full acceptance suite and repository checks
+        if: matrix.test == 'suite'
+        run: |
+          set -euo pipefail
+
+          obaaf docs build --check
+          python -m unittest discover -s tests > "$RUNNER_TEMP/tests.log" 2>&1 || { tail -100 "$RUNNER_TEMP/tests.log"; exit 1; }
+          grep -E '^(Ran [0-9]+ tests|OK)' "$RUNNER_TEMP/tests.log"
+          obaaf catalog > /dev/null
+          obaaf docs build --check
+          python site/build.py --output "$RUNNER_TEMP/resource-site"
+          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
+      - name: Compare text, JSON, SARIF and summary on both repositories
+        if: matrix.test == 'comparisons'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/base-src"
+          git archive 9e29f29e9a782b51d18762d4269af86d4654594a src | tar -x -C "$RUNNER_TEMP/base-src"
+          git init -q "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout init --no-cone
+          git -C "$RUNNER_TEMP/expectrail" sparse-checkout set --no-cone '/*' '!/bugs/' '!/fresh-*/'
+          git -C "$RUNNER_TEMP/expectrail" fetch -q --filter=blob:none --depth=1 https://github.com/Expectrail/Expectrail.git de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          git -C "$RUNNER_TEMP/expectrail" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/expectrail" rev-parse HEAD)" = de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          cd "$RUNNER_TEMP"
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          candidate = Path(os.environ["GITHUB_WORKSPACE"])
+          sources = [temp / "base-src/src", candidate / "src"]
+          differences = []
+          for path, level, expected in [(candidate, "medium", 0), (temp / "expectrail", "low", 1)]:
+              extra = ["--no-fixes"] if level == "low" else []
+              for mode in [["--format", "text"], ["--format", "json"], ["--format", "sarif"], ["--summary"]]:
+                  observations = []
+                  for src in sources:
+                      env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
+                      module = subprocess.check_output(
+                          [sys.executable, "-c", "import obaaf.cli; print(obaaf.cli.__file__)"],
+                          env=env, text=True,
+                      ).strip()
+                      assert Path(module).resolve().is_relative_to(src.resolve())
+                      argv = ["obaaf", "check", str(path), "--baseline", str(path / ".github/obaaf-baseline.json"),
+                              "--fail-on", level, *extra, *mode]
+                      run = subprocess.run(argv, env=env, capture_output=True)
+                      observations.append((run.returncode, run.stdout, run.stderr))
+                  before, after = observations
+                  assert (before[0], before[2]) == (after[0], after[2])
+                  if before != after:
+                      assert before == after, (path.name, mode)
+                  if before[1] != after[1]:
+                      import difflib
+                      if mode == ["--format", "sarif"]:
+                          left, right = json.loads(before[1]), json.loads(after[1])
+                          for old_run, new_run in zip(left["runs"], right["runs"]):
+                              old_rules = old_run["tool"]["driver"]["rules"]
+                              new_rules = new_run["tool"]["driver"]["rules"]
+                              added = [rule for rule in new_rules if rule["id"] == "OBAAF-GHA-027"]
+                              assert len(added) <= 1
+                              new_rules[:] = [rule for rule in new_rules if rule not in added]
+                              for old_rule, new_rule in zip(old_rules, new_rules):
+                                  if old_rule["id"] == new_rule["id"] and old_rule["id"] in ("OBAAF-GHA-005","OBAAF-GHA-020"):
+                                      for field in ("fullDescription", "help", "shortDescription"):
+                                          if field in old_rule and field in new_rule:
+                                              old_rule[field] = new_rule[field]
+                          if left != right:
+                              print("SARIF finding delta; read the JSON comparison for rule and count.")
+                              differences.append((path.name, mode))
+                      elif mode == ["--format", "json"]:
+                          old_report, new_report = json.loads(before[1]), json.loads(after[1])
+                          print("Changed top-level report fields:", sorted(k for k in set(old_report)|set(new_report) if old_report.get(k) != new_report.get(k)))
+                          for side in (old_report, new_report):
+                              from collections import Counter
+                              print("Findings by rule:", sorted(Counter(item.get("rule") for item in side["findings"]).items()))
+                          differences.append((path.name, mode))
+                      else:
+                          print("Text delta; exact equality needs review.", path.name, mode)
+                          differences.append((path.name, mode))
+                  assert observations[0][0] == expected, (level, mode, observations[0][0])
+                  print(f"Compared {path.name} {' '.join(mode)} exit={expected}", flush=True)
+          assert not differences, differences
+          PY
+
+  combined:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 9e29f29e9a782b51d18762d4269af86d4654594a
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Build from the sdist and replay the public CLI patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          sandbox_dir="$(mktemp -d "$RUNNER_TEMP/obaaf-wheel.XXXXXX")"
+          export TMPDIR="$sandbox_dir/tmp"
+          mkdir "$TMPDIR"
+          if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          test "$(git rev-parse HEAD)" = 9e29f29e9a782b51d18762d4269af86d4654594a
+          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-edit --no-ff caa3db45d11270429c01ad0c0964cc9d0d7f97cb
+          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-edit --no-ff e186458064a30c5413d79bb314fc4c13ea101c84
+          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-edit --no-ff 7dc914bb457f5a042585c4c1ec8fafa5d1c89137
+          git rev-parse HEAD^{tree}
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt setuptools
+          python -c 'from setuptools.build_meta import build_sdist; import sys; build_sdist(sys.argv[1])' "$sandbox_dir"
+          python -m pip wheel --no-deps --no-build-isolation --wheel-dir "$sandbox_dir" "$sandbox_dir"/obaaf-*.tar.gz
+          python -m venv "$sandbox_dir/clean"
+          "$sandbox_dir/clean/bin/python" -m pip install --constraint actions/setup-obaaf/constraints.txt "$sandbox_dir"/obaaf-*.whl
+          cd "$sandbox_dir"
+          "$sandbox_dir/clean/bin/python" -I - <<'PY'
+          from importlib.resources import files
+          from pathlib import Path
+          import os
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          import obaaf
+          
+          assert Path(obaaf.__file__).resolve().is_relative_to(Path(sys.prefix))
+          cli = str(Path(sys.executable).with_name("obaaf"))
+          src = Path(os.environ["GITHUB_WORKSPACE"])
+          data = files("obaaf.data")
+          first = data.joinpath("init-gate-27b15c9.yaml").read_bytes()
+          assert first == (src/"tests/fixtures/init/gate-template-27b15c9.yaml").read_bytes()
+          current = data.joinpath("init-workflow.yaml").read_bytes()
+          old = (src/"tests/fixtures/init/report-only-3.3.yaml").read_bytes()
+          report = b'obaaf check source "${config[@]}" --fail-on never\n'
+          gate = b'gate_check .github/obaaf-baseline.json --fail-on medium\n'
+          workflow = Path(".github/workflows/obaaf-pipeline-check.yml")
+          def run(root, *args):
+              return subprocess.run(args, cwd=root, capture_output=True, check=True).stdout
+          landed = data.joinpath("init-gate-settings-8caddd6.yaml").read_bytes()
+          assert landed == (src/"tests/fixtures/init/gate-template-settings-8caddd6.yaml").read_bytes()
+          old_pin = re.search(rb"setup-obaaf@[0-9a-f]{40}", first).group()
+          current_pin = re.search(rb"setup-obaaf@[0-9a-f]{40}", current).group()
+          moved = first.replace(old_pin, current_pin)
+          for name, original, expected_source in [("first-gate-updated-pin", moved, moved), ("landed-settings", landed, landed), ("old-report", old, first), ("first-gate", first, first), ("settings", current, current)]:
+              for eol in (b"\n", b"\r\n"):
+                  with tempfile.TemporaryDirectory() as temp:
+                      root = Path(temp) / "example repository"
+                      (root/workflow.parent).mkdir(parents=True)
+                      run(root, "git", "init", "-q")
+                      run(root, "git", "config", "core.autocrlf", "false")
+                      before = original.replace(b"\n", eol)
+                      (root/workflow).write_bytes(before)
+                      run(root, "git", "add", ".")
+                      patch = str(Path(temp) / "review.patch")
+                      run(root, cli, "fix", ".", "--gate", "medium", "--patch", patch)
+                      assert (root/workflow).read_bytes() == before
+                      run(root, "git", "apply", "--check", patch)
+                      run(root, "git", "apply", patch)
+                      after = (root/workflow).read_bytes()
+                      assert expected_source.count(report) == 1
+                      assert after == expected_source.replace(report, gate).replace(b"\n", eol)
+                      assert re.findall(rb"setup-obaaf@[0-9a-f]{40}", after) == re.findall(rb"setup-obaaf@[0-9a-f]{40}", before)
+                      assert run(root, "git", "diff", "--name-only", "-z") == workflow.as_posix().encode() + b"\x00"
+                      print(name, "CRLF" if eol == b"\r\n" else "LF", "preserved original checker pin and exact expected workflow bytes")
+          PY
+      - name: Test the integrated product
+        run: |
+          set -euo pipefail
+          export TMPDIR="$(mktemp -d "$RUNNER_TEMP/obaaf-suite.XXXXXX")"
+          if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+          python -m unittest discover -s tests > "$TMPDIR/suite.log" 2>&1 || { tail -100 "$TMPDIR/suite.log"; exit 1; }
+          grep -E '^(Ran [0-9]+ tests|OK)' "$TMPDIR/suite.log"
+          obaaf catalog > /dev/null
+          obaaf docs build --check
+          python site/build.py --output "$TMPDIR/site"
+          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
