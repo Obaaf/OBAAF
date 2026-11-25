@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import shlex
+import unicodedata
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -96,6 +97,56 @@ def action_name(uses: str) -> str:
                 parts.append(part)
         action = "/".join(parts)
     return action
+
+
+def respelled_reference(uses) -> str | None:
+    """Why GitHub may take a `uses:` for another action or workflow than the checker reads it as, or None
+    (flagship slice 2d.15, issue #245). The checker reads another repository's `owner/repo[/path]` as
+    written, split on `/`, in any letter case (`action_name`), so `openai//codex-action`,
+    `/openai/codex-action` and `openai\\codex-action` named no agent action and the job got no agent
+    rule. Whether GitHub refuses such a value or runs the action without the extra characters (the runner
+    may split on `/` and `\\` and drop empty parts) is not established, and neither is whether it trims
+    space round the value. So a value with space or a line break at either end, and another repository's
+    reference whose part before the first `@` has a backslash, a `/` at its start or end, two `/` together,
+    or a space or control character, is one the checker cannot place. A local `./`, `$/` or `.\\` path and
+    a `docker://` image are not read here."""
+    if not isinstance(uses, str):
+        return None
+    if uses != uses.strip():
+        return "space or a line break at its start or end"
+    if is_local_reference(uses) or uses.startswith(".\\") or uses.lower().startswith("docker://"):
+        return None
+    name = uses.split("@", 1)[0]
+    if "\\" in name:
+        return "a backslash in the name before its @"
+    if name.startswith("/"):
+        return "a / at its start"
+    if "//" in name:
+        return "two / together in the name before its @"
+    if name.endswith("/"):
+        return "a / at its end, before its @"
+    if any(char.isspace() or unicodedata.category(char)[0] == "C" for char in name):
+        return "a space or control character in the name before its @"
+    return None
+
+
+def respelled_problem(uses, what: str) -> str | None:
+    """The problem a respelled `uses:` (`respelled_reference`) is, after the place that names its step or
+    job: what was written, why, and what GitHub may run instead (flagship slice 2d.15)."""
+    why = respelled_reference(uses)
+    if why is None:
+        return None
+    return (f"has uses written as '{one_line(uses, 120)}', with {why}. GitHub may refuse it or read it as "
+            f"'{one_line(reference_as_runner_may_read(uses), 120)}', so the checker cannot tell which {what}")
+
+
+def reference_as_runner_may_read(uses: str) -> str:
+    """What a respelled `uses:` would name if GitHub split it on `/` and `\\`, dropped the empty parts and
+    the space round each, as the checker shows it beside the error (flagship slice 2d.15). Shown only;
+    nothing is matched against it."""
+    name, at, ref = uses.strip().partition("@")
+    parts = [part.strip() for part in re.split(r"[/\\]", name)]
+    return "/".join(part for part in parts if part) + (at + ref.strip() if at else "")
 
 
 def names_action(action: str, prefix: str) -> bool:
@@ -3242,6 +3293,9 @@ def parse(path: str, text: str) -> Workflow:
         if uses is not None and not isinstance(uses, str):
             workflow.problems.append(f"job '{one_line(shown_id, 60)}' has uses written as {shown_value(uses)}, which is "
                                      "not text, so the checker cannot tell which workflow it calls")
+        problem = respelled_problem(uses, "workflow it calls")
+        if problem:
+            workflow.problems.append(f"job '{one_line(shown_id, 60)}' {problem}")
         job = Job(id=shown_id, raw=job_raw, line=getattr(job_raw, "line", 0) or jobs.line_of(job_id), workflow=workflow)
         steps = job_raw.get("steps")
         if isinstance(steps, list):
@@ -3291,6 +3345,9 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
             # a number of thousands of digits ended the run with a traceback before).
             workflow.problems.append(f"job '{job.id}', step {number} has uses written as {shown_value(uses)}, which "
                                      "is not text, so the checker cannot tell which action it runs")
+        problem = respelled_problem(uses, "action it runs")
+        if problem:
+            workflow.problems.append(f"job '{job.id}', step {number} {problem}")
     for number, step_raw in enumerate(steps, start=1):
         if not isinstance(step_raw, dict):
             workflow.problems.append(f"job '{job.id}', step {number} is not a mapping, so the checker cannot "

@@ -1152,6 +1152,13 @@ def _read_local_action(root: Path, folder: str) -> tuple[list, str | None]:
             odd = "nesting too deep to read"
         if odd:
             raise _ActionFileError(f"{name} contains a value the checker does not read ({odd})")
+        # A step's `uses` the checker cannot place, as in a workflow (flagship slice 2d.15, #245).
+        runs = raw.get("runs")
+        steps = runs.get("steps") if isinstance(runs, dict) else None
+        for number, step in enumerate(steps if isinstance(steps, list) else (), start=1):
+            problem = wf_mod.respelled_problem(step.get("uses") if isinstance(step, dict) else None, "action it runs")
+            if problem:
+                raise _ActionFileError(f"{name}: step {number} {problem}")
         found.append(raw)
     if not found:
         return [], "the repository has no action.yml or action.yaml there, so an earlier step may make it"

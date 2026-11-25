@@ -1,0 +1,214 @@
+"""Flagship slice 2d.15 (#148, #245): a runner label or an action reference written so that the checker
+reads less than GitHub may run.
+
+#148. Two checks of OBAAF's egress action (the runner it was tested on, for OBAAF-GHA-020 and for
+OBAAF-GHA-005's `key-out-of-reach`), the runner's default shell (whether a check stops the job) and the
+runner of `npm publish --provenance` compared a job's labels after `strip()`. So `"ubuntu-24.04\\n"` or
+`" ubuntu-latest"` was taken for the GitHub-hosted runner it names, where OBAAF-GHA-013's hosted list,
+which has never trimmed a label, says it cannot name it (the native firewall's half was fixed in slice
+2d.9). Whether GitHub trims a label is not established: if it does not, the job never starts; if it
+does, the label is the runner. Either way the checker no longer reads such a label more generously
+than OBAAF-GHA-013 does.
+
+#245. A remote `uses:` was split on `/` as written, so `openai//codex-action@...`,
+`/openai/codex-action@...` and `openai\\codex-action@...` were not matched to the agent action, and the
+job got no agent rule at all. Whether GitHub refuses such a value or runs the action without the extra
+characters (the runner may split on `/` and `\\` and drop empty parts) is not established, so the
+checker cannot tell which action such a step runs: it is now an error of the file, as a `uses:` that
+is not text is (slice 2d.2f), in a workflow's steps, a job's call and a local composite action's steps.
+"""
+
+import unittest
+
+from helpers import TempDir, run_cli
+
+from obaaf import checker
+from obaaf.checker import workflow as wf_mod
+from obaaf.checker.rules import CANNOT_TELL, VERIFIED
+
+from test_egress_recognised import (CHECKOUT, REVIEWED_PIN, action, egress, key_control, keyed, run_check,
+                                    verdict, workflow)
+from test_npm_provenance import found as provenance_findings
+from test_npm_provenance import workflow as provenance_workflow
+from test_release_effect_bypasses import UPLOAD, VERIFY, kinds, release, run
+from test_release_effect_bypasses import check as release_check
+
+SHA = "1" * 40
+# Labels written with space or a line break round them, as a double-quoted YAML value keeps them.
+PADDED = ('"ubuntu-24.04\\n"', '" ubuntu-24.04"', '"ubuntu-24.04 "', '"\\tubuntu-24.04"')
+
+
+class RunnerLabelTest(unittest.TestCase):
+    """#148: the egress action's tested runner, the default shell and npm's provenance runner."""
+
+    def test_the_egress_action_on_a_padded_label_is_cannot_tell(self):
+        plain = egress(run_check(workflow(CHECKOUT + "\n" + action(ref=REVIEWED_PIN)), cat=checker.load()))
+        self.assertEqual(verdict(plain), VERIFIED)     # the neighbour that must stay verified
+        for runs_on in PADDED:
+            with self.subTest(runs_on=runs_on):
+                result = run_check(workflow(CHECKOUT + "\n" + action(ref=REVIEWED_PIN), runs_on=runs_on),
+                                   cat=checker.load())
+                f = egress(result)
+                self.assertEqual(verdict(f), CANNOT_TELL)
+                self.assertIn("tested only on GitHub-hosted ubuntu-24.04 runners", f.controls[0].detail)
+                # OBAAF-GHA-013 reads the same label as one it cannot name, as before.
+                self.assertIn("OBAAF-GHA-013", {x.rule for x in result.findings})
+
+    def test_key_out_of_reach_on_a_padded_label_is_cannot_tell(self):
+        plain = key_control(run_check(workflow(CHECKOUT + "\n" + keyed(ref=REVIEWED_PIN)), cat=checker.load()))
+        self.assertEqual(plain.verdict, VERIFIED)
+        for runs_on in PADDED:
+            with self.subTest(runs_on=runs_on):
+                control = key_control(run_check(workflow(CHECKOUT + "\n" + keyed(ref=REVIEWED_PIN), runs_on=runs_on),
+                                                cat=checker.load()))
+                self.assertEqual(control.verdict, CANNOT_TELL)
+                self.assertIn("tested only on GitHub-hosted ubuntu-24.04 runners", control.detail)
+
+    def test_a_padded_hosted_label_gives_no_default_shell(self):
+        """The default shell is bash with `-e` only on a runner the checker can show is Linux or macOS:
+        on Windows it is PowerShell, where a failing check does not stop the step."""
+        with TempDir() as tmp:
+            plain = release(run(VERIFY, "Verify") + UPLOAD)
+            self.assertEqual(kinds(release_check(tmp, plain), "OBAAF-GHA-016"), [])
+            for label in ('" ubuntu-latest"', '"ubuntu-latest\\n"', '[self-hosted, " linux"]'):
+                with self.subTest(label=label):
+                    text = plain.replace("runs-on: ubuntu-latest", f"runs-on: {label}")
+                    self.assertEqual(kinds(release_check(tmp, text), "OBAAF-GHA-016"), [("high", "cannot-tell")])
+
+    def test_npm_provenance_on_a_padded_label_is_not_credited(self):
+        self.assertEqual(provenance_findings(provenance_workflow()), [])
+        for runs_on in ('" ubuntu-latest"', '"ubuntu-latest "', '"ubuntu-latest\\n"'):
+            with self.subTest(runs_on=runs_on):
+                self.assertEqual(len(provenance_findings(provenance_workflow(runs_on=runs_on))), 1)
+
+    def test_the_label_in_another_letter_case_is_still_the_runner(self):
+        """Only the trimming goes: GitHub's labels are read in any letter case, as OBAAF-GHA-013 reads them."""
+        f = egress(run_check(workflow(CHECKOUT + "\n" + action(ref=REVIEWED_PIN), runs_on="Ubuntu-24.04"),
+                             cat=checker.load()))
+        self.assertEqual(verdict(f), VERIFIED)
+        self.assertEqual(provenance_findings(provenance_workflow(runs_on="Ubuntu-Latest")), [])
+
+
+def check_files(files):
+    with TempDir() as tmp:
+        for name, body in files.items():
+            path = tmp / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+        (tmp / ".github" / "CODEOWNERS").write_text("* @example/maintainers\n", encoding="utf-8")
+        return checker.check(tmp)
+
+
+def step_workflow(uses, extra=""):
+    return ("on: pull_request\npermissions: {contents: read}\njobs:\n  review:\n    runs-on: ubuntu-latest\n"
+            f"    steps:\n      - uses: {uses}\n{extra}")
+
+
+RESPELLED = {
+    "two slashes": f"openai//codex-action@{SHA}",
+    "a leading slash": f"/openai/codex-action@{SHA}",
+    "a backslash": f"openai\\codex-action@{SHA}",
+    "a slash at the end of the name": f"openai/codex-action/@{SHA}",
+    "space at the start": f'" openai/codex-action@{SHA}"',
+    "space at the end": f'"openai/codex-action@{SHA} "',
+    "a line break at the end": f'"openai/codex-action@{SHA}\\n"',
+    "a space in the name": f'"openai/ codex-action@{SHA}"',
+    "a tab before the @": f'"openai/codex-action\\t@{SHA}"',
+}
+
+
+class ActionReferenceTest(unittest.TestCase):
+    """#245: a `uses:` the checker would not match to the action it may name is an error of its file."""
+
+    def test_the_plain_form_is_an_agent_job_with_no_error(self):
+        result = check_files({".github/workflows/r.yml": step_workflow(f"openai/codex-action@{SHA}")})
+        self.assertEqual(result.errors, [])
+        self.assertIn("OBAAF-GHA-020", {f.rule for f in result.findings})     # an agent job
+
+    def test_each_respelling_of_an_agent_action_is_an_error(self):
+        for label, uses in RESPELLED.items():
+            with self.subTest(label):
+                result = check_files({".github/workflows/r.yml": step_workflow(uses)})
+                self.assertEqual(len(result.errors), 1, result.errors)
+                error = result.errors[0]
+                self.assertIn(".github/workflows/r.yml: job 'review', step 1 has uses written as", error)
+                self.assertIn("cannot tell which action it runs", error)
+                self.assertIn("openai/codex-action", error)
+
+    def test_a_respelled_checkout_is_an_error_too(self):
+        """The issue asks for the same on an action that is not an agent's: the check of what a job
+        checks out reads `actions/checkout` by its name."""
+        for uses in (f"actions//checkout@{SHA}", f"actions\\checkout@{SHA}", f"/actions/checkout@{SHA}"):
+            with self.subTest(uses=uses):
+                result = check_files({".github/workflows/r.yml": step_workflow(uses)})
+                self.assertEqual(len(result.errors), 1, result.errors)
+                self.assertIn("actions/checkout", result.errors[0])
+
+    def test_the_error_fails_the_command(self):
+        with TempDir() as tmp:
+            target = tmp / ".github" / "workflows"
+            target.mkdir(parents=True)
+            (target / "r.yml").write_text(step_workflow(f"openai//codex-action@{SHA}"), encoding="utf-8")
+            code, out, err = run_cli("check", str(tmp))
+        self.assertNotEqual(code, 0, out + err)
+        self.assertIn("cannot tell which action it runs", out + err)
+
+    def test_forms_that_are_read_as_before_are_not_errors(self):
+        for uses in (f"actions/checkout@{SHA}", f"Actions/Checkout@{SHA}", f"actions/cache/save@{SHA}",
+                     "docker://alpine:3.20", "./local-action", "$/local-action", f"actions/checkout@{SHA[:7]}",
+                     f"actions/cache/save/../restore@{SHA}", "actions/checkout"):
+            with self.subTest(uses=uses):
+                files = {".github/workflows/r.yml": step_workflow(uses)}
+                if "local-action" in uses:
+                    files["local-action/action.yml"] = "runs:\n  using: composite\n  steps:\n    - run: echo hi\n      shell: bash\n"
+                result = check_files(files)
+                self.assertEqual([e for e in result.errors if "has uses written as" in e], [])
+
+    def test_steps_in_a_parallel_group_are_read(self):
+        text = ("on: pull_request\npermissions: {contents: read}\njobs:\n  review:\n    runs-on: ubuntu-latest\n"
+                f"    steps:\n      - parallel:\n          - uses: openai//codex-action@{SHA}\n          - run: echo\n")
+        result = check_files({".github/workflows/r.yml": text})
+        self.assertEqual(len([e for e in result.errors if "has uses written as" in e]), 1, result.errors)
+
+    def test_a_respelled_call_of_a_reusable_workflow_is_an_error(self):
+        for uses in (f"openai//codex-action/.github/workflows/x.yml@{SHA}",
+                     f"openai\\codex-action/.github/workflows/x.yml@{SHA}",
+                     f'" openai/codex-action/.github/workflows/x.yml@{SHA}"'):
+            with self.subTest(uses=uses):
+                text = (f"on: pull_request\npermissions: {{contents: read}}\njobs:\n  call:\n    uses: {uses}\n")
+                result = check_files({".github/workflows/r.yml": text})
+                self.assertEqual(len(result.errors), 1, result.errors)
+                self.assertIn("job 'call' has uses written as", result.errors[0])
+                self.assertIn("cannot tell which workflow it calls", result.errors[0])
+
+    def test_a_respelled_step_in_a_local_composite_action_is_an_error(self):
+        action_file = ("runs:\n  using: composite\n  steps:\n"
+                       f"    - uses: openai//codex-action@{SHA}\n")
+        text = ("on: pull_request\npermissions: {contents: read}\njobs:\n  review:\n    runs-on: ubuntu-latest\n"
+                f"    steps:\n      - uses: actions/checkout@{SHA}\n        with: {{persist-credentials: false}}\n"
+                "      - uses: ./.github/actions/review\n")
+        result = check_files({".github/workflows/r.yml": text, ".github/actions/review/action.yml": action_file})
+        errors = [e for e in result.errors if "has uses written as" in e]
+        self.assertEqual(len(errors), 1, result.errors)
+        self.assertIn(".github/actions/review/action.yml", errors[0])
+        self.assertIn("openai/codex-action", errors[0])
+
+    def test_the_reason_is_named(self):
+        cases = {
+            f"openai//codex-action@{SHA}": "two / together",
+            f"/openai/codex-action@{SHA}": "a / at its start",
+            f"openai\\codex-action@{SHA}": "a backslash",
+            f"openai/codex-action/@{SHA}": "a / at its end",
+            f" openai/codex-action@{SHA}": "space or a line break at its start or end",
+            f"openai/ codex-action@{SHA}": "a space or control character",
+        }
+        for uses, why in cases.items():
+            with self.subTest(uses=uses):
+                self.assertIn(why, wf_mod.respelled_reference(uses))
+        for uses in (f"openai/codex-action@{SHA}", "./x", "$/x", "docker://a//b", ".\\x", None, 5):
+            with self.subTest(uses=uses):
+                self.assertIsNone(wf_mod.respelled_reference(uses))
+
+
+if __name__ == "__main__":
+    unittest.main()
