@@ -200,14 +200,105 @@ class ActionReferenceTest(unittest.TestCase):
             f"openai\\codex-action@{SHA}": "a backslash",
             f"openai/codex-action/@{SHA}": "a / at its end",
             f" openai/codex-action@{SHA}": "space or a line break at its start or end",
-            f"openai/ codex-action@{SHA}": "a space or control character",
+            f"openai/ codex-action@{SHA}": "a character in its owner or repository name",
+            f"openai/codex-action/ sub@{SHA}": "space at the start or end of a part of its path",
+            f"openai/codex-action/s\u200bub@{SHA}": "a control or format character in its path",
+            f"openai/codex-action.git@{SHA}": "'.git' at the end of its repository name",
         }
         for uses, why in cases.items():
             with self.subTest(uses=uses):
                 self.assertIn(why, wf_mod.respelled_reference(uses))
-        for uses in (f"openai/codex-action@{SHA}", "./x", "$/x", "docker://a//b", ".\\x", None, 5):
+        for uses in (f"openai/codex-action@{SHA}", "./x", "$/x", "docker://a//b", ".\\x", None, 5,
+                     f"octo/repo/my action@{SHA}", f"octo/repo.js/.github/workflows/my workflow.yml@{SHA}",
+                     f"Octo-Org/repo_name.v2@{SHA}", "openai/codex-action"):
             with self.subTest(uses=uses):
                 self.assertIsNone(wf_mod.respelled_reference(uses))
+
+
+class RunnerSelectorTest(unittest.TestCase):
+    """Found by the review of 2d.15: OBAAF-GHA-013's runtime selector (`head.repo.full_name ==
+    github.repository && <self-hosted> || '<hosted>'`) took space out of the whole expression before it
+    read the hosted label, so `'ubuntu-latest '` was GitHub's ubuntu-latest and the finding informational."""
+
+    SELECTOR = ("on: pull_request\npermissions: {contents: read}\njobs:\n  build:\n"
+                "    runs-on: \"${{ github.event.pull_request.head.repo.full_name == github.repository && "
+                "'self-hosted' || %s }}\"\n    steps:\n      - run: make\n")
+
+    def severity(self, label):
+        result = check_files({".github/workflows/b.yml": self.SELECTOR % label})
+        (found,) = [f for f in result.findings if f.rule == "OBAAF-GHA-013"]
+        return found.severity
+
+    def test_the_plain_selector_is_still_informational(self):
+        self.assertEqual(self.severity("'ubuntu-latest'"), "info")
+        self.assertEqual(self.severity("'Ubuntu-Latest'"), "info")
+
+    def test_a_padded_label_in_the_selector_is_not_the_hosted_runner(self):
+        for label in ("'ubuntu-latest '", "' ubuntu-latest'", "'ubuntu-latest\\t'", "'ubuntu- latest'"):
+            with self.subTest(label=label):
+                self.assertNotEqual(self.severity(label), "info")
+
+
+class ReviewFindingsTest(unittest.TestCase):
+    """The rest of what the review of 2d.15 found."""
+
+    def errors(self, files):
+        return [e for e in check_files(files).errors if "uses written as" in e or "'parallel'" in e]
+
+    def test_names_github_does_not_have_are_errors(self):
+        for uses in (f"openai/codex%2Daction@{SHA}", f"openai%2Fcodex-action@{SHA}",
+                     f"openai/codex-actio\u0301n@{SHA}", f"opena\u0131/codex-action@{SHA}",
+                     f"openai/codex-action?@{SHA}", f"'openai/codex-action#@{SHA}'", f"openai/codex-action.git@{SHA}",
+                     f"openai/codex-action.GIT@{SHA}"):
+            with self.subTest(uses=uses):
+                errors = self.errors({".github/workflows/r.yml": step_workflow(uses)})
+                self.assertEqual(len(errors), 1, errors)
+
+    def test_space_inside_a_part_of_the_path_is_read_as_written(self):
+        self.assertEqual(self.errors({".github/workflows/r.yml": step_workflow(f"octo/repo/my action@{SHA}")}), [])
+        text = ("on: push\npermissions: {}\njobs:\n  call:\n"
+                f"    uses: octo/repo/.github/workflows/my workflow.yml@{SHA}\n")
+        self.assertEqual(self.errors({".github/workflows/r.yml": text}), [])
+
+    def test_a_step_with_parallel_and_uses_is_an_error(self):
+        text = ("on: pull_request\npermissions: {contents: read}\njobs:\n  review:\n    runs-on: ubuntu-latest\n"
+                f"    steps:\n      - uses: openai/codex-action@{SHA}\n        parallel:\n          - run: echo\n")
+        errors = self.errors({".github/workflows/r.yml": text})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("has 'parallel' and also 'run' or 'uses'", errors[0])
+
+    def test_a_parallel_group_inside_another_is_an_error(self):
+        text = ("on: pull_request\npermissions: {contents: read}\njobs:\n  review:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - parallel:\n          - parallel:\n"
+                f"              - uses: openai/codex-action@{SHA}\n          - run: echo\n")
+        errors = self.errors({".github/workflows/r.yml": text})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("a 'parallel' group inside a 'parallel' group", errors[0])
+
+    def composite(self, action_file):
+        text = ("on: pull_request\npermissions: {contents: read}\njobs:\n  review:\n    runs-on: ubuntu-latest\n"
+                f"    steps:\n      - uses: actions/checkout@{SHA}\n        with: {{persist-credentials: false}}\n"
+                "      - uses: ./.github/actions/review\n")
+        return check_files({".github/workflows/r.yml": text, ".github/actions/review/action.yml": action_file}).errors
+
+    def test_the_composite_error_is_whole(self):
+        errors = self.composite(f"runs:\n  using: composite\n  steps:\n    - uses: openai//codex-action@{SHA}\n")
+        error = next(e for e in errors if "uses written as" in e)
+        self.assertNotIn("characters)", error)          # not cut short
+        self.assertIn(f"read it as 'openai/codex-action@{SHA}'", error)
+        self.assertEqual(error.count("so the checker cannot tell"), 1, error)
+
+    def test_a_composite_step_whose_uses_is_not_text_is_an_error(self):
+        errors = self.composite("runs:\n  using: composite\n  steps:\n    - uses: [1, 2]\n")
+        self.assertTrue(any("which is not text" in e for e in errors), errors)
+
+    def test_a_node_action_with_stray_steps_is_not_read_for_them(self):
+        errors = self.composite(f"runs:\n  using: node20\n  main: index.js\n  steps:\n    - uses: ' openai/codex-action@{SHA}'\n")
+        self.assertEqual([e for e in errors if "uses written as" in e], [])
+
+    def test_an_image_is_shown_as_written(self):
+        problem = wf_mod.respelled_problem("docker://alpine@sha256:" + "a" * 64 + " ", "action it runs")
+        self.assertIn("read it as 'docker://alpine@sha256:", problem)
 
 
 if __name__ == "__main__":

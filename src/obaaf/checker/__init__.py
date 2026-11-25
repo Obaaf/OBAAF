@@ -1152,11 +1152,17 @@ def _read_local_action(root: Path, folder: str) -> tuple[list, str | None]:
             odd = "nesting too deep to read"
         if odd:
             raise _ActionFileError(f"{name} contains a value the checker does not read ({odd})")
-        # A step's `uses` the checker cannot place, as in a workflow (flagship slice 2d.15, #245).
+        # A composite step's `uses` the checker cannot place, as in a workflow (flagship slice 2d.15, #245):
+        # space round it, a respelled reference, or a value that is not text.
         runs = raw.get("runs")
-        steps = runs.get("steps") if isinstance(runs, dict) else None
+        using = runs.get("using") if isinstance(runs, dict) else None
+        steps = runs.get("steps") if isinstance(using, str) and using.strip().lower() == "composite" else None
         for number, step in enumerate(steps if isinstance(steps, list) else (), start=1):
-            problem = wf_mod.respelled_problem(step.get("uses") if isinstance(step, dict) else None, "action it runs")
+            uses = step.get("uses") if isinstance(step, dict) else None
+            if uses is not None and not isinstance(uses, str):
+                raise _ActionFileError(f"{name}: step {number} has uses written as {wf_mod.shown_value(uses)}, "
+                                       "which is not text")
+            problem = wf_mod.respelled_problem(uses, None)
             if problem:
                 raise _ActionFileError(f"{name}: step {number} {problem}")
         found.append(raw)
@@ -1687,7 +1693,7 @@ def _apply_local_action_detection(workflow, root: Path | None, actions: "wf_mod.
                 reading = _agent_in_local_action(root, step.uses, actions, commands, cache=cache, given=step.with_,
                                                  given_env=step.env)
             except _ActionFileError as exc:
-                errors.append(f"{where} {wf_mod.one_line(str(exc), 300)}, so the checker cannot tell whether an "
+                errors.append(f"{where} {wf_mod.one_line(str(exc), 500)}, so the checker cannot tell whether an "
                               "agent runs in it")
                 continue
             except _ReadingsExceeded:
@@ -2096,7 +2102,7 @@ def _job_local_steps(workflow, job, root: Path, unread: list, errors: list, stat
             inner = _local_steps(root, step.uses, step.with_, step.env, step.raw, step.name, step, 0,
                                  frozenset(), state, found)
         except _ActionFileError as exc:
-            said = f"{where} {wf_mod.one_line(str(exc), 300)}"
+            said = f"{where} {wf_mod.one_line(str(exc), 500)}"
             if not any(error.startswith(said) for error in errors):
                 errors.append(f"{said}, so the checker cannot read what its steps do")
             continue

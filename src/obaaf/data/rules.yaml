@@ -1122,9 +1122,9 @@ rules:
       `display_report` (its
       warning is about the agent's text in the step summary), a model key written into a workflow in clear
       (a secret-scanning tool's case), and `ACTIONS_STEP_DEBUG`, which turns on full output; an agent action
-      used inside another repository's composite action or reusable workflow; and a `uses:` with an empty
-      path segment, a leading `/` or a backslash, which the checker does not match to the action (since
-      slice 2d.15 such a `uses:` is an error of its file, #245).
+      used inside another repository's composite action or reusable workflow; and a `uses:` with two `/`
+      together, a leading `/` or a backslash, which the checker did not match to the action (since slice
+      2d.15 such a `uses:` is an error of its file, #245).
     fix: >-
       Remove the input or the option, so the tool uses its default, or set the value the documentation
       recommends: for `openai/codex-action`, `safety-strategy: drop-sudo` (the default) or

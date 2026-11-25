@@ -99,6 +99,10 @@ def action_name(uses: str) -> str:
     return action
 
 
+# An owner's or a repository's name on GitHub: ASCII letters, digits, `-`, `_` and `.` (flagship slice 2d.15).
+_OWNER_OR_REPO_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
+
+
 def respelled_reference(uses) -> str | None:
     """Why GitHub may take a `uses:` for another action or workflow than the checker reads it as, or None
     (flagship slice 2d.15, issue #245). The checker reads another repository's `owner/repo[/path]` as
@@ -106,10 +110,13 @@ def respelled_reference(uses) -> str | None:
     `/openai/codex-action` and `openai\\codex-action` named no agent action and the job got no agent
     rule. Whether GitHub refuses such a value or runs the action without the extra characters (the runner
     may split on `/` and `\\` and drop empty parts) is not established, and neither is whether it trims
-    space round the value. So a value with space or a line break at either end, and another repository's
-    reference whose part before the first `@` has a backslash, a `/` at its start or end, two `/` together,
-    or a space or control character, is one the checker cannot place. A local `./`, `$/` or `.\\` path and
-    a `docker://` image are not read here."""
+    space round the value or a part, decodes `%2F` or drops `.git`. So these are values the checker
+    cannot place: space or a line break at either end of the value; and in another repository's reference,
+    before the first `@`, a backslash, a `/` at its start or end, two `/` together, an owner or repository
+    name with a character GitHub's names do not have (anything but ASCII letters, digits, `-`, `_` and `.`)
+    or ending `.git`, and a part of the path with space at its start or end or a control or format
+    character in it. Space inside a part of the path (`owner/repo/my action`) is read as written. A local
+    `./`, `$/` or `.\\` path and a `docker://` image are not read here beyond space at either end."""
     if not isinstance(uses, str):
         return None
     if uses != uses.strip():
@@ -125,26 +132,41 @@ def respelled_reference(uses) -> str | None:
         return "two / together in the name before its @"
     if name.endswith("/"):
         return "a / at its end, before its @"
-    if any(char.isspace() or unicodedata.category(char)[0] == "C" for char in name):
-        return "a space or control character in the name before its @"
+    parts = name.split("/")
+    for part in parts[:2]:
+        if not _OWNER_OR_REPO_RE.match(part):
+            return ("a character in its owner or repository name that GitHub's names do not have (they hold "
+                    "only ASCII letters, digits, '-', '_' and '.')")
+    if len(parts) > 1 and parts[1].lower().endswith(".git"):
+        return "'.git' at the end of its repository name"
+    for part in parts[2:]:
+        if part != part.strip():
+            return "space at the start or end of a part of its path"
+        if any(unicodedata.category(char)[0] == "C" for char in part):
+            return "a control or format character in its path"
     return None
 
 
-def respelled_problem(uses, what: str) -> str | None:
+def respelled_problem(uses, what: str | None) -> str | None:
     """The problem a respelled `uses:` (`respelled_reference`) is, after the place that names its step or
-    job: what was written, why, and what GitHub may run instead (flagship slice 2d.15)."""
+    job: what was written, why, and what GitHub may run instead (flagship slice 2d.15). With `what`, it
+    ends by saying the checker cannot tell which `what`; without, the caller says what follows."""
     why = respelled_reference(uses)
     if why is None:
         return None
-    return (f"has uses written as '{one_line(uses, 120)}', with {why}. GitHub may refuse it or read it as "
-            f"'{one_line(reference_as_runner_may_read(uses), 120)}', so the checker cannot tell which {what}")
+    text = (f"has uses written as '{one_line(uses, 120)}', with {why}. GitHub may refuse it or read it as "
+            f"'{one_line(reference_as_runner_may_read(uses), 120)}'")
+    return f"{text}, so the checker cannot tell which {what}" if what else text
 
 
 def reference_as_runner_may_read(uses: str) -> str:
     """What a respelled `uses:` would name if GitHub split it on `/` and `\\`, dropped the empty parts and
-    the space round each, as the checker shows it beside the error (flagship slice 2d.15). Shown only;
-    nothing is matched against it."""
-    name, at, ref = uses.strip().partition("@")
+    the space round each, as the checker shows it beside the error (flagship slice 2d.15). A local path or
+    an image is shown without the space round it. Shown only; nothing is matched against it."""
+    text = uses.strip()
+    if is_local_reference(text) or text.startswith(".\\") or text.lower().startswith("docker://"):
+        return text
+    name, at, ref = text.partition("@")
     parts = [part.strip() for part in re.split(r"[/\\]", name)]
     return "/".join(part for part in parts if part) + (at + ref.strip() if at else "")
 
@@ -2431,7 +2453,13 @@ class Job:
         found = expr_mod.bodies(text)
         if len(found) != 1 or text != expr_mod.OPEN + found[0] + "}}":
             return False
-        body = re.sub(r"\s+", "", found[0].replace('"', "'"))
+        quoted = found[0].replace('"', "'")
+        # Space is taken out between the expression's words only: a label with space in it or round it
+        # (`'ubuntu-latest '`) is not the hosted label it would become without it (flagship slice 2d.15, #148,
+        # found by its review). Any quoted value with space in it makes the form one the checker does not read.
+        if any(re.search(r"\s", text) for text in re.findall(r"'([^']*)'", quoted)):
+            return False
+        body = re.sub(r"\s+", "", quoted)
         head = r"github\.event\.pull_request\.head\.repo"
         hosted = r"'([a-z0-9.-]+)'"
         value = r"(?:'[^']*'|[a-z0-9_.()\[\]',-]+)"
@@ -3360,8 +3388,16 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
             if not isinstance(inner, list):
                 workflow.problems.append(f"job '{job.id}', step {number}: 'parallel' is not a list of steps")
                 continue
+            if {"run", "uses"} & set(step_raw):
+                # Which of the two GitHub runs is not established, and the outer one was never read (found by
+                # the review of flagship slice 2d.15).
+                workflow.problems.append(f"job '{job.id}', step {number} has 'parallel' and also 'run' or 'uses', "
+                                         "so the checker cannot tell what the step runs")
             for sub in inner:
                 if isinstance(sub, dict):
+                    if "parallel" in sub:
+                        workflow.problems.append(f"job '{job.id}', step {number} has a 'parallel' group inside a "
+                                                 "'parallel' group, whose steps the checker does not read")
                     inputs_checked(sub, number)
                     job.steps.append(Step(index=len(job.steps), raw=sub, line=getattr(sub, "line", line),
                                           group=groups, background=True))
