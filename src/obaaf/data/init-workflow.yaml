@@ -45,15 +45,17 @@ jobs:
           set -euo pipefail
           config=()
           tree=source
+          where='the pushed commit'
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
             tree=policy
+            where='the target commit'
             if [[ ! -d policy/.git ]]; then
               echo "The target commit checkout is missing." >&2
               exit 1
             fi
             parent_mode=$(git -C policy ls-tree --format='%(objectmode)' HEAD -- .github)
             if [[ -n "$parent_mode" && "$parent_mode" != 040000 ]]; then
-              echo 'The target branch .github policy directory must be a directory.' >&2
+              echo 'On the target commit, .github must be a directory, not a link or a submodule.' >&2
               exit 1
             fi
             policy="$RUNNER_TEMP/obaaf-policy.yml"
@@ -75,11 +77,11 @@ jobs:
             snapshot=.github/obaaf-settings.json
             mode=$(git -C "$tree" --literal-pathspecs ls-tree --format='%(objectmode)' HEAD -- "$snapshot")
             if [[ "$mode" != 100644 && "$mode" != 100755 ]]; then
-              echo "The selected settings snapshot must be a committed regular file in $tree." >&2
+              echo "OBAAF_USE_SETTINGS is true, so .github/obaaf-settings.json must be a regular file committed in $where." >&2
               exit 1
             fi
             if [[ -L source/.github || ! -d source/.github ]]; then
-              echo 'The settings snapshot must be under the source checkout’s .github directory.' >&2
+              echo 'OBAAF_USE_SETTINGS is true, so the checked-out .github must be a directory, not a link.' >&2
               exit 1
             fi
             # Keep the policy path for CODEOWNERS. A PR cannot supply the snapshot bytes.
