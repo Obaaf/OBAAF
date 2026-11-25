@@ -1,0 +1,170 @@
+name: OBAAF pipeline check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install the pinned checker
+        uses: Obaaf/OBAAF/actions/setup-obaaf@8caddd6f06c50b9266d8116fd672f39b55770477
+
+      - name: Check out the repository to inspect
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: source
+          persist-credentials: false
+
+      - name: Read pull request policy from the target commit
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: policy
+          persist-credentials: false
+          sparse-checkout: |
+            /.github/obaaf.yml
+            /.github/obaaf.yaml
+            /obaaf.yml
+            /.github/obaaf-baseline.json
+            /.github/obaaf-settings.json
+          sparse-checkout-cone-mode: false
+
+      - name: Report findings
+        env:
+          USE_SETTINGS: ${{ vars.OBAAF_USE_SETTINGS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          config=()
+          tree=source
+          where='the pushed commit'
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            tree=policy
+            where='the target commit'
+            if [[ ! -d policy/.git ]]; then
+              echo "The target commit checkout is missing." >&2
+              exit 1
+            fi
+            parent_mode=$(git -C policy ls-tree --format='%(objectmode)' HEAD -- .github)
+            if [[ -n "$parent_mode" && "$parent_mode" != 040000 ]]; then
+              echo 'On the target commit, .github must be a directory, not a link or a submodule.' >&2
+              exit 1
+            fi
+            policy="$RUNNER_TEMP/obaaf-policy.yml"
+            echo '{}' > "$policy"
+            for name in .github/obaaf.yml .github/obaaf.yaml obaaf.yml; do
+              mode=$(git -C policy --literal-pathspecs ls-tree --format='%(objectmode)' HEAD -- "$name")
+              if [[ -L policy/.github || ( -n "$mode" && "$mode" != 100644 && "$mode" != 100755 ) ]]; then
+                echo 'The target branch checker configuration must be a regular file.' >&2
+                exit 1
+              fi
+              if [[ -n "$mode" ]]; then
+                git -C policy cat-file blob "HEAD:$name" > "$policy"
+                break
+              fi
+            done
+            config=(--config "$policy")
+          fi
+          if [[ "${USE_SETTINGS:-}" == true ]]; then
+            snapshot=.github/obaaf-settings.json
+            mode=$(git -C "$tree" --literal-pathspecs ls-tree --format='%(objectmode)' HEAD -- "$snapshot")
+            if [[ "$mode" != 100644 && "$mode" != 100755 ]]; then
+              echo "OBAAF_USE_SETTINGS is true, so .github/obaaf-settings.json must be a regular file committed in $where." >&2
+              exit 1
+            fi
+            if [[ -L source/.github || ! -d source/.github ]]; then
+              echo 'OBAAF_USE_SETTINGS is true, so the checked-out .github must be a directory, not a link.' >&2
+              exit 1
+            fi
+            # Keep the policy path for CODEOWNERS. A PR cannot supply the snapshot bytes.
+            staged=$(mktemp source/.github/.obaaf-settings-XXXXXX)
+            trap 'rm -f -- "$staged"' EXIT
+            git -C "$tree" cat-file blob "HEAD:$snapshot" > "$staged"
+            mv -T -- "$staged" "source/$snapshot"
+            config+=(--settings "source/$snapshot")
+          fi
+          # Used only after a team explicitly enables its gate.
+          gate_check() {
+            local path=$1
+            shift
+            local parent mode oid repo record
+            local -A blobs=()
+            local baseline=()
+            parent=$(dirname -- "$path")
+            while [[ "$parent" != . ]]; do
+              if [[ -L "$tree/$parent" || -L "source/$parent" ]]; then
+                echo "The baseline path must stay inside its checkout." >&2
+                return 1
+              fi
+              parent=$(dirname -- "$parent")
+            done
+            for repo in source "$tree"; do
+              record=$(git -C "$repo" --literal-pathspecs ls-tree --format='%(objectmode) %(objectname)' HEAD -- "$path")
+              read -r mode oid <<< "$record"
+              if [[ -n "$mode" && "$mode" != 100644 && "$mode" != 100755 ]]; then
+                echo "The gate baseline must be a regular file." >&2
+                return 1
+              fi
+              blobs[$repo]=$oid
+              if [[ "$tree" == source ]]; then break; fi
+            done
+            if [[ "$tree" == policy ]]; then
+              python -I - "$path" "${blobs[policy]}" "${blobs[source]}" <<'PY'
+          import json
+          import subprocess
+          import sys
+          from collections import Counter
+          from pathlib import Path
+          from tempfile import NamedTemporaryFile, TemporaryDirectory
+
+          from obaaf.checker import baseline
+
+          path, target_oid, source_oid = sys.argv[1:]
+
+          def committed(repo, oid, scratch):
+              if not oid:
+                  return None
+              snapshot = scratch / repo
+              with snapshot.open("wb") as stream:
+                  subprocess.run(["git", "-C", repo, "cat-file", "blob", oid], stdout=stream, check=True)
+              return baseline.load(snapshot)
+
+          def key(entry):
+              return json.dumps(entry, sort_keys=True, separators=(",", ":"))
+
+          with TemporaryDirectory() as scratch:
+              target = committed("policy", target_oid, Path(scratch))
+              source = committed("source", source_oid, Path(scratch))
+          if target is not None and source is not None:
+              counts = Counter(key(entry) for entry in source.entries if source.format == target.format)
+              kept = []
+              for entry in target.entries:
+                  identity = key(entry)
+                  if counts[identity]:
+                      kept.append(entry)
+                      counts[identity] -= 1
+              # The checker looks up CODEOWNERS at this path. Replace the directory
+              # entry atomically without writing through a link in the checkout.
+              output = Path("source") / path
+              with NamedTemporaryFile("w", dir=output.parent, delete=False, encoding="utf-8") as staged:
+                  json.dump({"format": target.format, "findings": kept}, staged, indent=2)
+                  staged.write("\n")
+              Path(staged.name).replace(output)
+          PY
+              if [[ -n "${blobs[source]}" && -n "${blobs[policy]}" ]]; then
+                baseline=(--baseline "source/$path")
+              fi
+            elif [[ -n "${blobs[source]}" ]]; then
+              baseline=(--baseline "source/$path")
+            fi
+            obaaf check source "${config[@]}" "${baseline[@]}" "$@"
+          }
+          obaaf check source "${config[@]}" --fail-on never
