@@ -260,6 +260,8 @@ class ActionReferenceTest(unittest.TestCase):
             f" openai/codex-action@{SHA}": "space or a line break at its start",
             "./local-action ": "space or a line break at its end, which a folder's name may hold",
             "$/x\n": "space or a line break at its end",
+            "openai/codex-action ": "in the name the checker matches",
+            "openai/codex-action\n": "in the name the checker matches",
             f"openai/ codex-action@{SHA}": "a character in its owner or repository name",
             f"openai/codex-action/ sub@{SHA}": "space at the start or end of a part of its path",
             f"openai/codex-action/s\u200bub@{SHA}": "control or format character in its path",

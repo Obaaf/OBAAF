@@ -130,6 +130,9 @@ def respelled_reference(uses) -> str | None:
     if uses != uses.rstrip():
         if local:
             return "space or a line break at its end, which a folder's name may hold"
+        if "@" not in uses and not uses.lower().startswith("docker://"):
+            # With no `@ref`, the space is in the name the checker matches (found by the review's seventh pass).
+            return "space or a line break at its end, in the name the checker matches"
         # Space after another repository's reference or an image leaves the name the checker matches as it
         # is, and GitHub either trims it or refuses the value. A block scalar's last line break is one
         # (zizmor's test data, `unpinned-uses/issue-1543-repro.yml`, which the parity test reads).
