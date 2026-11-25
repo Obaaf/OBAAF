@@ -46,7 +46,12 @@ def _replace_run(text, node, action, inputs):
     if node.flow_style:
         fields = ", ".join(f"{k}: {v}" for k, v in encoded.items())
         return text[:start] + f"uses: {action}, with: {{{fields}, " + text[start:end] + "}" + text[end:]
-    newline = "\r\n" if "\r\n" in text else "\n"
+    # The ending of the run key's own line, so the inserted lines end as the step's do.
+    line_end = text.find("\n", start)
+    if line_end < 0:
+        newline = "\r\n" if "\r\n" in text else "\n"
+    else:
+        newline = "\r\n" if text[line_end - 1:line_end] == "\r" else "\n"
     indent = " " * key.start_mark.column
     fields = [f"uses: {action}", indent + "with:"]
     fields.extend(f"{indent}  {k}: {v}" for k, v in encoded.items())
@@ -65,9 +70,10 @@ def _job_text(text, name):
     end = value.end_mark.index
     if jobs.flow_style:
         return text[start:end]
-    # Only indentation may stand before the job's key on its line. After an explicit
-    # `? jobs` key the line begins `: `, and the preview would not be the job (review of #363).
-    if text[start - key.start_mark.column:start].strip(" "):
+    # Only indentation, or the `?` of an explicit key, may stand before the job's key on its line.
+    # After an explicit `? jobs` key the line begins `: `, and the preview would not be the job
+    # (review of #363).
+    if text[start - key.start_mark.column:start].strip(" ") not in ("", "?"):
         raise ValueError("the job's key does not start its line; review this job by hand")
     start -= key.start_mark.column
     if value.flow_style:

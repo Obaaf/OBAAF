@@ -170,6 +170,20 @@ class EgressDraftTests(unittest.TestCase):
                 self.assertEqual((code, out), (2, ""))
                 self.assertIn("review this job by hand", err)
                 self.assertNotIn("<unicode string>", err)
+        # An explicit key for the job itself still starts its line, and is drafted.
+        with TempDir() as root:
+            path = self.workflow(root)
+            path.write_text(WORKFLOW.replace("  review:\n    runs-on", "  ? review\n  : runs-on") + STEP)
+            code, out, err = self.draft(root)
+            self.assertEqual((code, err), (0, ""))
+            self.assertIn("\n  ? review\n  : runs-on: ubuntu-24.04\n", out)
+        # The inserted lines end as the step's own line does, not as another line of the file.
+        with TempDir() as root:
+            path = self.workflow(root)
+            path.write_bytes(("# header\r\n" + WORKFLOW + STEP).encode())
+            code, out, err = self.draft(root)
+            self.assertEqual((code, err), (0, ""))
+            self.assertNotIn("\r", out[out.index("  review:"):])
         with TempDir() as root:
             self.workflow(root, "      - name: Review\n        run: |+\n          echo a\n\n          claude -p review\n\n"
                                 "        env: {}\n")
