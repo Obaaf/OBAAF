@@ -3487,27 +3487,84 @@ class JenkinsRules:
     def _steered(self, info: Info) -> str | None:
         """Why a check step's shell may run another program than the one it names, or None (the review of pull request
         #365, for #344): a variable that `steers` counts (`PATH`, bash's, the loader's, Python's and the others the
-        GitHub rules read since slice 2d.13), or one whose name the checker cannot read, set by a `withEnv` entry or an
-        `environment { }` block around the step (`PATH+NAME` is `PATH`: Jenkins puts the value in front of it), or by a
-        script anywhere in the file (`env.PATH = ...` holds for every later step, wherever it is). Before the review
-        only an `export` inside the step's own script stopped the reader, so `withEnv(["PATH+X=${env.WORKSPACE}/x"])`
-        around `obaaf verify release` counted the check, whatever `x` held. What an agent's or a tool's own setup puts
-        in the environment (the controller's node properties, `tools { }`, a container's image) is not read."""
+        GitHub rules read since slice 2d.13), or one whose name the checker cannot read, set by a `withEnv` entry, an
+        `environment { }` block or a matrix axis around the step (`PATH+NAME` is `PATH`: Jenkins puts the value in front
+        of it), or named as a credential binding's variable around it; or set by a script anywhere in the file
+        (`env.PATH = ...` holds for every later step, wherever it is), or a place the file names withEnv that the checker
+        did not read (`_file_steering`). Before the review only an `export` inside the step's own script stopped the
+        reader, so `withEnv(["PATH+X=${env.WORKSPACE}/x"])` around `obaaf verify release` counted the check, whatever
+        `x` held. What an agent's or a tool's own setup puts in the environment (the controller's node properties,
+        `tools { }`, a container's image or its `-e` options, a pod template's `envVars`) is not read."""
         for name, line in info.ctx.env_names:
             if name == "?":
-                return (f"a withEnv entry or environment block at line {line}, around the step, sets a variable whose "
-                        "name the checker cannot read, which may change the program the step's shell runs")
+                return (f"a withEnv entry, environment block or matrix axis at line {line}, around the step, sets a "
+                        "variable whose name the checker cannot read, which may change the program the step's shell "
+                        "runs")
             if steers(name.split("+", 1)[0]):
                 return (f"{name} is set around the step (line {line}), which can change the program the step's shell "
                         "runs")
-        for name, line in self.p.env_scripted:
+        for binding in info.ctx.creds:
+            for name in (*binding.variables, *binding.paths):
+                if isinstance(name, str) and (name == "?" or steers(name)):
+                    return (f"{binding.how} at line {binding.line} puts a credential in {name} around the step, which "
+                            "can change the program the step's shell runs")
+        return self._file_steering()
+
+    # A write to the build's `env` in the file's text, wherever it is (a `when { expression { } }`, a GString, a method
+    # a directive calls): a property or index assigned (compound operators too, not `==` or `=~`), or a method that
+    # sets or may set a variable. The receiver is `env` after anything (`this.env`, `script.env`, `s.env`) or
+    # `getProperty('env')`.
+    _ENV_RECEIVER = r"""(?:\benv\b|\bgetProperty\s*\(\s*['"]env['"]\s*\))\s*"""
+    _ASSIGN_OP = r"""\s*(?:\*\*|<<|>>>|>>|\?:|[-+*/%&|^])?=(?![=~])"""
+    _ENV_WRITE = re.compile(
+        _ENV_RECEIVER + r"""(?:\??\.\s*(?P<prop>[A-Za-z_]\w*)|\??\.\s*(?P<quoted>'[^'\n]*'|"[^"\n]*")|"""
+        r"""\[(?P<index>[^\]\n]*)\])""" + _ASSIGN_OP
+        + r"""|""" + _ENV_RECEIVER + r"""\??\.\s*(?P<method>setProperty|put|putAt|putAll|overrideAll|override|"""
+        r"""with|invokeMethod|metaClass|setVariable)\b(?P<args>\s*\(\s*(?:'[A-Za-z_]\w*'|"[A-Za-z_]\w*"))?""")
+    _PLAIN_KEY = re.compile(r"""\s*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)")\s*""")
+
+    def _file_steering(self) -> str | None:
+        """The part of `_steered` that is the same for every step of the file, worked out once."""
+        cached = self._script_cache.get(("file-steering",))
+        if cached is not None:
+            return cached[0]
+        reason = None
+        writes = list(self.p.env_scripted)
+        source = self.p.source or ""
+        for m in self._ENV_WRITE.finditer(source):
+            line = source.count("\n", 0, m.start()) + 1
+            if m.group("prop"):
+                writes.append((m.group("prop"), line))
+            elif m.group("index") is not None:
+                key = self._PLAIN_KEY.fullmatch(m.group("index"))
+                writes.append(((key.group(1) or key.group(2)) if key else "?", line))
+            elif m.group("method") in ("setProperty", "put", "putAt") and m.group("args"):
+                writes.append((m.group("args").split("(", 1)[1].strip().strip("'\""), line))
+            else:
+                writes.append(("?", line))       # a quoted or computed property, putAll, with, invokeMethod, ...
+        for name, line in sorted(writes, key=lambda w: w[1]):
             if name == "?":
-                return (f"line {line} sets a variable in the build's environment whose name the checker cannot read, "
-                        "which may change the program the step's shell runs")
+                reason = (f"line {line} sets a variable in the build's environment whose name the checker cannot read, "
+                          "which may change the program the step's shell runs")
+                break
             if steers(name.split("+", 1)[0]):
-                return (f"line {line} sets {name} in the build's environment, which can change the program the step's "
-                        "shell runs")
-        return None
+                reason = (f"line {line} sets {name} in the build's environment, which can change the program the step's "
+                          "shell runs")
+                break
+        if reason is None and self.p.tree is not None:
+            def names_with_env(n) -> bool:
+                if isinstance(n, (Name, Prop)):
+                    return n.name == "withEnv"
+                if isinstance(n, Str):
+                    return n.text() == "withEnv"
+                return False
+            read = self.p.with_env_read
+            lines = [n.line for n in find_nodes(self.p.tree, names_with_env) if id(n) not in read and n.line]
+            if lines:
+                reason = (f"line {min(lines)} names withEnv in a form the checker does not read (a method pointer, a "
+                          "quoted name, options { withEnv(...) }), so what it sets around which steps is not known")
+        self._script_cache[("file-steering",)] = (reason,)
+        return reason
 
     @staticmethod
     def _status_stops(info: Info) -> bool:

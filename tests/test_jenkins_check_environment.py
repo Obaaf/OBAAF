@@ -8,6 +8,7 @@ since slice 2d.13 (`obaaf.checker.rules.steers`). Each case is a Jenkinsfile and
 "pass", "unknown" (cannot tell) or "finding-high" / "finding-medium".
 """
 import textwrap
+import time
 import unittest
 
 from obaaf.catalog import load
@@ -88,6 +89,54 @@ CASES = [
     ("script env computed name", pipeline(PLAIN, build="script { def n = 'PATH'; env.\"${n}\" = '/opt/tools' }"), U),
     ("script env[n] computed", pipeline(PLAIN, build="script { def n = sh(script: 'cat n', returnStdout: true); env[n] = '/x' }"), U),
     ("script env.FOO =", pipeline(PLAIN, build="script { env.FOO = 'bar' }"), P),
+    # From the review's attack on the first version of this change (each was a pass there):
+    # Groovy reads \0 to \377 as an octal escape, so '\120ATH' is PATH.
+    ("withEnv octal escape", pipeline(wrapped('["\\120ATH+X=${env.WORKSPACE}/tools"]')), U),
+    ("script env['\\120ATH'] =", pipeline(PLAIN, build="script { env['\\120ATH'] = '/x' }"), U),
+    ("script env.'\\120ATH' =", pipeline(PLAIN, build="script { env.'\\120ATH' = '/x' }"), U),
+    # env reached through the script object or a variable holding it
+    ("script this.env.setProperty", pipeline(PLAIN, build="script { this.env.setProperty('PATH', '/x') }"), U),
+    ("steps.env['PATH'] =", pipeline(PLAIN, build="script { steps.env['PATH'] = '/x' }"), U),
+    ("def s = this; s.env.PATH =", pipeline(PLAIN, build="script { def s = this; s.env.PATH = '/x' }"), U),
+    ("a method given this sets script.env", "def setup(script) { script.env['PATH'] = '/tmp/x:' + script.env.PATH }\n"
+     + pipeline(PLAIN, build="script { setup(this) }"), U),
+    ("getProperty('env').PATH =", pipeline(PLAIN, build="script { getProperty('env').PATH = '/x' }"), U),
+    ("env.with { }", pipeline(PLAIN, build="script { env.with { PATH = '/x' } }"), U),
+    # withEnv reached other than by a call the walker reads
+    ("s.withEnv with s = this", pipeline("script { def s = this; s.withEnv(['PATH+X=/opt/tools']) { " + PLAIN + " } }"),
+     U),
+    ("a method pointer to withEnv", pipeline("script { def we = this.&withEnv; we(['PATH+X=/opt/tools']) { " + PLAIN
+                                             + " } }"), U),
+    ("a quoted withEnv", pipeline("script { 'withEnv'(['PATH+X=/opt/tools']) { " + PLAIN + " } }"), U),
+    ("options { withEnv }", pipeline(PLAIN, top="options { withEnv(['PATH+X=/x']) }"), U),
+    # Groovy the walker does not walk
+    ("env.PATH = in a when expression", pipeline(PLAIN).replace(
+        "stage('Fetch') {", "stage('Prep') {\n      when { expression { env.PATH = \"${env.WORKSPACE}/t:${env.PATH}\"; "
+        "return true } }\n      steps { sh 'true' }\n    }\n    stage('Fetch') {"), U),
+    ("env.PATH = in a method an environment value calls", "def setUp() { env.PATH = '/x'; 'a' }\n"
+     + pipeline(PLAIN, top="environment { FOO = setUp() }"), U),
+    ("env.PATH = inside a GString", pipeline(PLAIN, build="echo \"${env.PATH = '/tmp/x:' + env.PATH}\""), U),
+    ("env.PATH = in a for loop's start", pipeline(PLAIN, build="script { for (env.PATH = '/tmp/x'; false; ) {} }"), U),
+    # Variables set around the step by a matrix axis or a credential binding
+    ("a matrix axis named PATH", textwrap.dedent("""\
+        pipeline {
+          agent any
+          stages {
+            stage('Fetch') { steps { copyArtifacts(projectName: 'build', selector: lastSuccessful(), filter: 'dist/**') } }
+            stage('Verify') {
+              matrix {
+                axes { axis { name 'PATH'; values '/tmp/x' } }
+                stages { stage('cell') { steps { %s } } }
+              }
+            }
+            stage('Publish') { steps { sh './scripts/publish.sh dist' } }
+          }
+        }
+        """) % PLAIN, U),
+    ("a credential bound to LD_PRELOAD", pipeline(
+        "withCredentials([file(credentialsId: 'x', variable: 'LD_PRELOAD')]) { " + PLAIN + " }"), U),
+    # Reading env is not writing it
+    ("env.PATH compared", pipeline(PLAIN, build="script { if (env.PATH == '/x' || env.PATH =~ /y/) { echo 'z' } }"), P),
     # A failure the step ignores stays a finding whatever runs: OBAAF-JEN-011 reports it, and OBAAF-JEN-010 and 012
     # see no check, as before the review.
     ("withEnv PATH, failure ignored", pipeline(
@@ -114,6 +163,16 @@ def verdicts(text: str) -> tuple:
 
 
 class CheckEnvironmentTest(unittest.TestCase):
+    def test_many_assignments_and_checks_are_read_once(self):
+        # The first version read the file's assignments again for every check: 2,000 of each took 4.2 s here and
+        # 6,300 took 27 (1.2 and 3.4 now).
+        body = "\n".join(f"env.V{i} = '1'" for i in range(2000))
+        checks = "\n".join(PLAIN for _ in range(2000))
+        text = pipeline(checks, build="script {\n" + body + "\n}")
+        started = time.monotonic()
+        self.assertEqual(verdicts(text), P)
+        self.assertLess(time.monotonic() - started, 3)
+
     def test_every_case(self):
         for name, text, expected in CASES:
             with self.subTest(case=name):
@@ -124,7 +183,7 @@ class CheckEnvironmentTest(unittest.TestCase):
         rows = {row["rule"]: row for row in jenkins.coverage(result, result.findings)}
         for rule in RULES:
             with self.subTest(rule=rule):
-                self.assertTrue(any("LD_PRELOAD is set around the step" in r for r in rows[rule]["reasons"]),
+                self.assertTrue(any("LD_PRELOAD is set around the step (line 14)" in r for r in rows[rule]["reasons"]),
                                 rows[rule]["reasons"])
 
 

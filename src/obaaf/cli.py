@@ -672,6 +672,8 @@ def cmd_verify_release(args) -> int:
         policy = Policy.load(args.policy)
         source_revision = args.source_revision
         if args.revision_file is not None:
+            if not args.revision_file:
+                raise ValueError("--revision-file: no file named")
             with Path(args.revision_file).open("rb") as fh:
                 raw = fh.read(67)
             if not re.fullmatch(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})(?:\r?\n)?", raw):
@@ -1131,10 +1133,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip the approvals check, to show the result to the approver before they approve")
     x.add_argument("--repo-dir", help="git checkout with history, to read agent records from")
     x.add_argument("--range", help="git range to check for agent commits (default: from the policy's "
-                                   "agents.since to --source-revision)")
+                                   "agents.since to --source-revision or --revision-file)")
     revision = x.add_mutually_exclusive_group()
     revision.add_argument("--source-revision", help="the commit being released")
-    revision.add_argument("--revision-file", help="read the release commit ID from this file (for example, git rev-parse output)")
+    revision.add_argument("--revision-file",
+                          help="read the commit being released from this file: one full lower-case commit ID (40 or "
+                               "64 hex digits) and at most one line ending, as `git rev-parse` prints it")
     x.add_argument("--format", choices=("text", "json"), default="text")
     x.add_argument("--output", "-o")
     x.set_defaults(func=cmd_verify_release)

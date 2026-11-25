@@ -245,6 +245,7 @@ class Pipeline:
     # environment (`env.X =`, `env['X'] =`, `env.setProperty('X', ...)`, through an alias of `env` too), which holds
     # for every step after it wherever it is; the name is "?" where it is computed.
     env_scripted: list = field(default_factory=list)
+    with_env_read: set = field(default_factory=set)     # ids of the callees of the withEnv calls the walker read
     # The implicit `it` of a closure an iteration method calls: what each closure body's `it` holds, by its id, and
     # what it held where each step was recorded (flagship slice 2d.2, from its first review).
     it_values: dict = field(default_factory=dict)
@@ -510,6 +511,23 @@ def with_env_names(call: Call) -> list:
                 continue
             name, eq, _ = head.text().partition("=")
             out.append((name.strip() if eq and name.strip() and "${" not in name else "?", line))
+    return out
+
+
+def matrix_axis_names(axes: list) -> list:
+    """(name, line) for each `axis { name 'X' ... }` of a Declarative matrix's `axes` blocks; "?" for one whose name is
+    not a literal (the review of pull request #365)."""
+    out = []
+    for block in axes:
+        for stmt in (block.closure.stmts if isinstance(block, Call) and block.closure is not None else ()):
+            axis = stmt.expr if isinstance(stmt, ExprStmt) else None
+            if not (isinstance(axis, Call) and callee_name(axis) == "axis" and axis.closure is not None):
+                out.append(("?", getattr(stmt, "line", 0) or block.line))
+                continue
+            for inner in axis.closure.stmts:
+                e = inner.expr if isinstance(inner, ExprStmt) else None
+                if isinstance(e, Call) and callee_name(e) == "name":
+                    out.append((literal(first_arg(e)) or "?", e.line))
     return out
 
 
@@ -2621,8 +2639,13 @@ class Builder:
                 inner = replace(inner, guards=inner.guards + (f"loop {call.line}{KEY_SEP}loop {self.site(ctx, call)}",))
             if name in ("retry", "waitUntil"):
                 inner = replace(inner, repeats=inner.repeats + (f"{name} {call.line}",))
-            if name == "withEnv":
+            if name.rsplit(".", 1)[-1] == "withEnv":
+                # The review of #365: `withEnv`, `this.withEnv`, `steps.withEnv` or any receiver's (`s.withEnv` with
+                # `s = this`); the callee is recorded so that OBAAF-JEN-010 to 012 can tell any other place the file
+                # names withEnv (a method pointer, a quoted name, `options { withEnv(...) }`), which is not read.
+                self.p.with_env_read.add(id(call.callee))
                 inner = replace(inner, env_names=inner.env_names + tuple(with_env_names(call)))
+            if name == "withEnv":
                 for arg in call.args:
                     for s in all_strings(arg):
                         var, sep, val = s.text().partition("=")
@@ -3042,6 +3065,8 @@ class Builder:
         for m in secs.get("matrix", []):
             msecs = self.sections(m.closure) if m.closure else {}
             mctx = self.apply_common(msecs, sctx, origin=f"stage '{name}' matrix")
+            # The review of #365: each axis sets its name in the environment of every cell, as `environment` does.
+            mctx = replace(mctx, env_names=mctx.env_names + tuple(matrix_axis_names(msecs.get("axes", []))))
             for st in msecs.get("stages", []):
                 self.stage_list(st.closure, mctx)
             for post in msecs.get("post", []):

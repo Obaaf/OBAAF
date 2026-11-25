@@ -196,6 +196,9 @@ class JenkinsReleaseLaneTest(unittest.TestCase):
             self.assertIn("expected one full lowercase Git commit ID", err)
         revision_file.unlink()
         self.assertEqual(run_cli(*args, "--revision-file", revision_file)[0], 2)
+        code, _, err = run_cli(*args, "--revision-file", "")
+        self.assertEqual(code, 2)
+        self.assertIn("--revision-file: no file named", err)
         self.assertEqual(run_cli(*args, "--revision-file", revision_file, "--source-revision", self.rev)[0], 2)
 
     def test_records_name_the_jenkins_build_and_say_it_is_self_reported(self):

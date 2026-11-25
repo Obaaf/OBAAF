@@ -98,6 +98,7 @@ pipeline {
           sh '''
             set -eu
             export PATH="$WORKSPACE/.obaaf-venv/bin:$PATH"
+            test "$(command -v obaaf)" = "$WORKSPACE/.obaaf-venv/bin/obaaf"   # the records are made by the job's checker
             rev="$(cat release-sha.txt)"
             origin="$(git remote get-url origin)"
             obaaf attest slsa --artifact dist --builder-id "$JOB_URL" \
