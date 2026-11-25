@@ -1,0 +1,47 @@
+name: Expectrail named egress step evidence
+on:
+  push:
+    branches: [validation/egress-selected-step-fde021a]
+permissions:
+  contents: read
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: fde021a8d7b59308d782d6c660f7b3d991ebab21
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+      - name: Preview the pinned Expectrail workflow as data
+        shell: python
+        run: |
+          import hashlib
+          import os
+          import subprocess
+          import urllib.request
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "adopter"
+          path = root / ".github/workflows/byo-smoke.yml"
+          path.parent.mkdir(parents=True)
+          url = "https://raw.githubusercontent.com/Expectrail/Expectrail/de1ddd65cbad237d2ca32eed4c62b13ba645a6d3/.github/workflows/byo-smoke.yml"
+          original = urllib.request.urlopen(url, timeout=30).read()
+          path.write_bytes(original)
+          args = ["obaaf", "fix", "egress", "--job", "byo-smoke", "--step", "One live call per configured provider"]
+          draft = subprocess.run(args + ["."], cwd=root, capture_output=True, check=True).stdout
+          order = subprocess.run(args + ["--brief", "."], cwd=root, capture_output=True, check=True).stdout
+          job = original.split(b"jobs:\n", 1)[1]
+          raw_prefix, script = job.rsplit(b"        run: |\n", 1)
+          checked = (raw_prefix + b"        uses: Obaaf/OBAAF/actions/egress@80db1e68769165c9ecf24e553254fa35d6e168d5\n")
+          assert checked in draft, "source prefix or released pin differs"
+          expected_command = b"          run: |\n" + b"".join(b"  " + line for line in script.splitlines(keepends=True))
+          assert draft.endswith(expected_command), "original command text differs"
+          assert b"Step number = 4" in order and b"python -m agents.byo_smoke" not in order
+          assert path.read_bytes() == original
+          print("Expectrail de1ddd65 .github/workflows/byo-smoke.yml, job byo-smoke, step 4: One live call per configured provider")
+          print("Draft and brief exit 0. Matched original job prefix, surrounding comments, action pin and command text.")
+          print("Workflow SHA-256 before and after:", hashlib.sha256(original).hexdigest())
