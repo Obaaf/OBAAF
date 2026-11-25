@@ -3082,7 +3082,7 @@ Stated limits: the agent's own environment (`tools { }`, a container's image or 
 parameter or local named `env`, a copy from `env.getEnvironment()`, a comment or string showing a write, and names
 such as `PYTHON_VERSION`.
 
-**Second attack pass** (the same sub-agent, about 265 attempts on `9f9ffee`). The four classes were fixed (all 39
+**Second attack pass** (the same sub-agent, about 265 attempts on `9f9ffee`). The four classes were fixed (the attacker's 39
 cases `unknown`), but the second version found writes to `env` in Groovy the walker does not walk with a scan of the
 file's text, and that scan was got past with an alias of `env`, a comment between `env` and the name, `(env)`, a
 `\u0050` escape, a triple-quoted or quoted name, `this."env"`, a multiple assignment, a computed setter name, a
@@ -3092,6 +3092,17 @@ parsed file, and of every `${...}` parsed as statements; a call or pointer whose
 the parser could not read near `env`, are "cannot tell". The same pass found the lexer change correct: colour codes
 give the verdicts they gave, `'\174\174 true'` and `'\046'`, which passed, now give their findings, and slashy
 strings are not decoded.
+
+**Third attack pass** (the same sub-agent, about 360 attempts on `6007f19`). All earlier cases were `unknown` and
+the slow inputs took under a quarter of a second. It got past the node reading with `env` reached as a value:
+through a ternary, `?:`, `as`, a method's or closure's result, a closure whose `delegate` is `env` (the usual
+Jenkins configuration idiom), a script property (`this.e = env`); and with Groovy the parser keeps no node for (a
+method's parameter default, a switch case label). Now any use of `env` other than a read, a write or a method call
+on it counts as a name the checker cannot read, and those texts, a loop's header and a postfix `++` are searched.
+Code from outside the file that runs in a `when` expression (`load`, a shared-library step) is not read by any rule
+there, before or after this change (#370). The claims reviewer's third pass found that writes inside a `${...}` were
+reported with the interpolation's own line numbers and that an unreadable statement there was looked for in the
+file's first lines; both are fixed, and a loop bounded by an `env` value no longer counts.
 
 **Claims review** (a second Opus 5.5 sub-agent): the template is "cannot tell" for its `PATH` change only (replacing
 both `withEnv` calls with `dir('.')` gives three passes); a check under such a variable before a publish in a later

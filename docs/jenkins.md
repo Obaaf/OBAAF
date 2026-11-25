@@ -204,11 +204,14 @@ check does not clear any of the three rules when its shell may run another progr
 so when a variable `steers` counts is set around the step, by a `withEnv` entry (through any receiver: `withEnv`,
 `this.withEnv`, `steps.withEnv`, `s.withEnv`), an `environment { }` block, a matrix axis or a credential binding's
 variable, or anywhere in the file by a write to the build's `env`: `env.X = ...` (compound operators too),
-`env['X'] = ...`, `env.setProperty(...)`, `put`, `putAt`, or any other method of `env` that does not only read it
-(`with { }`, `identity { }`, `putAll`, a method pointer such as `env.&setProperty`), through `this.env`,
-`script.env`, `steps.env`, any `x.env`, `getProperty('env')`, `this['env']` or a variable the file assigns one of
-them, wherever it is written: every statement of the parsed file is read for this, and every `${...}` of its strings
-as statements, whether the walker reaches it or not (a `when { expression { } }`, a method a directive calls). The names are `PATH` (`PATH+NAME` included:
+`env['X'] = ...`, `env.X++`, `env.setProperty(...)`, `put`, `putAt`, or any other method of `env` that does not
+only read it (`with { }`, `identity { }`, `putAll`, a method pointer such as `env.&setProperty`), through
+`this.env`, `script.env`, `steps.env`, any `x.env`, `getProperty('env')`, `getAt('env')` or `this['env']`, wherever
+it is written: every node of the parsed file is read for this, and every `${...}` of its strings as statements,
+whether the walker reaches it or not (a `when { expression { } }`, a method a directive calls), and so is the text
+the parser keeps no node for (a loop's header, a method's parameter defaults, a switch's case labels). `env` used
+as a value, which the checker does not follow (given to a variable, as a closure's `delegate`, to a method or a
+list, in a ternary, returned), counts as a name it cannot read. The names are `PATH` (`PATH+NAME` included:
 Jenkins puts the value in front of `PATH`), `HOME`, `ENV`, `SHELLOPTS`, `PS4`, `PROMPT_COMMAND`, `EXECIGNORE`,
 `GCONV_PATH`, `ACTIONS_ALLOW_UNSECURE_COMMANDS` and those beginning `BASH`, `LD_`, `DYLD_` or `PYTHON` (six of
 Python's that load nothing, such as `PYTHONUNBUFFERED`, excepted), in any letter case, with Groovy's `\uXXXX` and
@@ -224,10 +227,13 @@ and skips the stage before the post block runs. A variable
 set around another step changes nothing; a write to `env` counts for every step of the file, whatever its place.
 Not read: what the agent's own environment holds (the controller's node properties, `tools { }`, a container's
 image, `docker.image(...).inside('-e ...')`, a pod template's `envVars`), `env` handed on through a list or a map
-(`[env].each { it.PATH = ... }`, `[env]*.setProperty(...)`), and a step that checks which program the shell finds
+(`[env].each { it.PATH = ... }` counts, since `env` is a value there), and a step that checks which program the shell finds
 (`command -v obaaf`). Some safe files get "cannot tell": a parameter or local variable named `env`, a copy from
-`env.getEnvironment()`, `env.metaClass` read, a harmless `withEnv` in a `when` expression, a statement the parser
-cannot read near a mention of `env`, and names such as `PYTHON_VERSION` that the prefix rule counts. Before the
+`env.getEnvironment()`, `env` given to a variable only to read it (`def e = env; echo e.X`), `env.metaClass` read,
+a harmless `withEnv` in a `when` expression, a statement the parser cannot read near a mention of `env`, and names
+such as `PYTHON_VERSION` that the prefix rule counts. Not read either: code from outside the file that runs where
+the walker does not reach (`load` or a shared-library step in a `when` expression), which the other rules do not
+read there either (#370). Before the
 review of #365 only an `export` inside the check's own script stopped the reader, so
 `withEnv(["PATH+X=${env.WORKSPACE}/tools"])` around `obaaf verify release` cleared all three rules whatever `tools`
 held. OBAAF's own publish template is "cannot tell" under all three for this reason (below).

@@ -34,7 +34,7 @@ from obaaf.checker.jenkins.model import (
 )
 from obaaf.checker.jenkins.parser import (
     Assign, Binary, Call, ClassDef, Closure, Decl, Import, Index, ListLit, Loop, MapLit, MethodDef, Name, Num, Opaque,
-    Prop, Str,
+    Prop, Str, Switch, Unary,
     callee_name, path_of,
 )
 from obaaf.checker.rules import Finding, steers
@@ -3515,115 +3515,149 @@ class JenkinsRules:
 
     # Methods of `env` that only read it; any other method called on it, or named without a call (a method pointer,
     # `env.&setProperty`), may set a variable (`setProperty`, `put`, `with { }`, `identity { }`, `invokeMethod`).
-    _ENV_READS = frozenset({"getEnvironment", "getProperty", "get", "getAt", "containsKey", "keySet", "entrySet",
-                            "values", "toString", "hashCode", "isEmpty", "size", "equals"})
+    _ENV_READS = frozenset({"getEnvironment", "getOverriddenEnvironment", "getProperty", "getProperties", "get",
+                            "getAt", "containsKey", "keySet", "entrySet", "values", "toString", "hashCode", "isEmpty",
+                            "size", "equals"})
     _ENV_SETTERS = frozenset({"setProperty", "put", "putAt"})
+    _IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+    # In text the parser keeps no node for (a loop's header, a method's parameters and their defaults, a switch's case
+    # labels): `env` used as a value (not followed by `.`, `?.` or `[`), written to, incremented, or with a method
+    # that may set a variable named. Bounded, and run only on those short texts.
+    _ENV_TEXT_RISK = re.compile(
+        r"""\benv\b(?!\s*(?:\?\.|\.|\[))"""
+        r"""|\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\*\*|<<|>>>|>>|\?:|[-+*/%&|^])?=(?![=~])"""
+        r"""|\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\+\+|--)|(?:\+\+|--)\s*\benv\b"""
+        r"""|\benv\b\s*\??\.\s*&?\s*(?:setProperty|put|putAt|putAll|with|identity|tap|invokeMethod|metaClass|"""
+        r"""setMetaClass|overrideAll|override)\b""")
+
+    _ENV_POSTFIX = re.compile(r"""\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\+\+|--)""")
 
     def _tree_env_writes(self) -> list:
         """(name, line) for every write to the build's `env` anywhere in the parsed file, and in every `${...}` of its
-        strings, whether or not the walker reads that place (a `when { expression { } }`, a method a directive calls,
-        a GString): an assignment to a property or an index of `env`, a setter called on it, and "?" for what may set
-        one whose name is not read (another method of `env`, a method pointer to one, a computed property or key, a
-        call or method pointer whose name is computed, `invokeMethod`, a statement the parser could not read that
-        names `env`). `env` is `env` after any receiver (`this.env`, `s.env`), `getProperty('env')`, `this['env']`,
-        or a variable the file assigns one of them anywhere; a name a computed `getProperty` or property gives is
-        taken for `env`. Not followed: `env` in a list or map, or given to a closure's parameter."""
+        strings (parsed as statements), whether or not the walker reads that place (a `when { expression { } }`, a
+        method a directive calls, a GString). `env` is the name `env`, any `x.env`, `getProperty('env')`,
+        `getAt('env')` or `this['env']`; a computed one (`getProperty(n)`, `this."${n}"`, `this[n]`) may be. Each use
+        of it is one of: a property or index read, which is safe; a property or index assigned or incremented, a
+        setter with a literal name, which gives that name; or anything else, which gives "?": another method called
+        on it or named (a pointer), a computed name written to, and `env` used as a value (given to a variable, a
+        closure's delegate, a method, a list, a ternary, returned), which the checker does not follow. So are a call
+        or pointer whose name is computed, `invokeMethod`, a statement the parser could not read that names `env`
+        near it, and the same uses in the text the parser keeps no node for (`_ENV_TEXT_RISK`)."""
         import time as _time
         from obaaf.checker.jenkins.parser import parse as parse_groovy
         tree = self.p.tree
         if tree is None:
             return []
+        lines = (self.p.source or "").split("\n")
         writes = []
-        nodes, seen_exprs, pending = [], set(), [tree]
-        while pending and len(nodes) < 2_000_000:
-            for n in find_nodes(pending.pop(), lambda _n: True):
-                nodes.append(n)
+        script_names = {"this", "script", "steps", "binding"} | self.p.script_vars
+        parents: dict = {}
+        entries = []               # (node, the line to report, the interpolation's text or None)
+        roots = [(tree, None, None)]
+        seen_exprs: set = set()
+        while roots and len(entries) < 2_000_000:
+            root, outer, own = roots.pop()
+            stack = [root]
+            while stack and len(entries) < 2_000_000:
+                n = stack.pop()
+                if n is None:
+                    continue
+                entries.append((n, outer or getattr(n, "line", 0), own))
+                for c in children(n):
+                    if c is not None:
+                        parents[id(c)] = n
+                        stack.append(c)
                 if isinstance(n, Str) and n.interpolated:
+                    here = outer or getattr(n, "line", 0)
                     for text in n.exprs:
-                        if text in seen_exprs or not re.search(r"\benv\b|[(&\"']|this|script|steps", text):
+                        if text in seen_exprs or not re.search(r"\benv\b|[(&\"'?]|this|script|steps|binding", text):
                             continue
                         seen_exprs.add(text)
-                        # `${env.PATH = ...}`: an interpolation is read as statements, so an assignment in it is one
                         try:
                             sub = parse_groovy(text.strip().removeprefix("->"), deadline=_time.monotonic() + 1.0)
                         except Exception:              # noqa: BLE001 - a text the parser refuses is not read
                             sub = None
                         if sub is None or sub.error or sub.tree is None:
                             if re.search(r"\benv\b", text):
-                                writes.append(("?", getattr(n, "line", 0)))
+                                writes.append(("?", here))
                         else:
-                            pending.append(sub.tree)
-        aliases: set = set()
+                            roots.append((sub.tree, here, text))
 
-        script_names = {"this", "script", "steps", "binding"} | self.p.script_vars
-
-        def env_like(n, surely: bool = False) -> bool:
-            """Whether `n` is the build's `env`; with `surely`, only when its name says so (a computed name is taken
-            for `env` where it is written to, not where a method is called on it)."""
+        def env_ref(n) -> bool:
             if isinstance(n, Name):
-                return n.name == "env" or n.name in aliases
+                return n.name == "env"
             if isinstance(n, Prop):
-                return n.name == "env" or (not surely and "${" in n.name and path_of(n.target) in script_names)
-            if isinstance(n, Call) and (path_of(n.callee) or "").rsplit(".", 1)[-1] == "getProperty":
+                return n.name == "env" or ("${" in n.name and path_of(n.target) in script_names)
+            if isinstance(n, Call) and (path_of(n.callee) or "").rsplit(".", 1)[-1] in ("getProperty", "getAt"):
+                receiver = n.callee.target if isinstance(n.callee, Prop) else None
                 key = literal(n.args[0]) if n.args else None
-                return key == "env" or (not surely and key is None)
+                return (receiver is None or path_of(receiver) in script_names) and (key is None or key == "env")
             if isinstance(n, Index) and path_of(n.target) in script_names:
                 key = literal(n.index)
-                return key == "env" or (not surely and key is None)
+                return key is None or key == "env"
             return False
 
-        for _round in range(3):                       # def e = env; def f = e: aliases of aliases
-            before = len(aliases)
-            for n in nodes:
-                if isinstance(n, Decl) and n.value is not None and env_like(n.value):
-                    aliases.add(n.name)
-                elif isinstance(n, Assign) and isinstance(n.target, Name) and env_like(n.value):
-                    aliases.add(n.target.name)
-            if len(aliases) == before:
-                break
-        used = {id(n.callee) for n in nodes if isinstance(n, Call)} | {id(n.target) for n in nodes if isinstance(n, Assign)}
-        lines = (self.p.source or "").split("\n")
+        postfix_lines: dict = {}
 
-        def mentions_env(first: int, last: int) -> bool:
-            return bool(re.search(r"\benv\b", "\n".join(lines[max(first - 1, 0):max(last, first)])))
+        def postfix(line: int, own) -> bool:
+            key = own if own is not None else line
+            if key not in postfix_lines:
+                text = own if own is not None else (lines[line - 1] if 0 < line <= len(lines) else "")
+                postfix_lines[key] = bool(self._ENV_POSTFIX.search(text))
+            return postfix_lines[key]
 
-        for n in nodes:
-            line = getattr(n, "line", 0)
-            if isinstance(n, Assign):
-                t = n.target
-                if isinstance(t, Prop) and env_like(t.target):
-                    writes.append((t.name if re.fullmatch(r"[A-Za-z_]\w*", t.name) else "?", line))
-                elif isinstance(t, Index) and env_like(t.target):
-                    key = literal(t.index)
-                    writes.append((key if key and re.fullmatch(r"[A-Za-z_]\w*", key) else "?", line))
+        def risky_text(text: str) -> bool:
+            return bool(self._ENV_TEXT_RISK.search(text))
+
+        def text_of(first: int, last: int, own) -> str:
+            return own if own is not None else "\n".join(lines[max(first - 1, 0):max(last, first)])
+
+        for n, line, own in entries:
+            parent = parents.get(id(n))
+            if env_ref(n):
+                if isinstance(parent, (Prop, Index)) and parent.target is n:
+                    use = parent
+                    above = parents.get(id(use))
+                    name = (use.name if isinstance(use, Prop) else literal(use.index)) or "?"
+                    plain = isinstance(name, str) and bool(self._IDENTIFIER.fullmatch(name))
+                    if isinstance(above, Assign) and above.target is use:
+                        writes.append((name if plain else "?", line))
+                    elif isinstance(above, Unary) and above.op in ("++", "--"):
+                        writes.append(("?", line))
+                    elif isinstance(above, Call) and above.callee is use and isinstance(use, Prop):
+                        if use.name in self._ENV_SETTERS:
+                            key = literal(above.args[0]) if len(above.args) >= 2 else None
+                            writes.append((key if key and self._IDENTIFIER.fullmatch(key) else "?", line))
+                        elif use.name not in self._ENV_READS:
+                            writes.append(("?", line))
+                    elif isinstance(use, Prop) and use.name in self._ENV_SETTERS | {
+                            "with", "identity", "tap", "putAll", "invokeMethod", "metaClass", "setMetaClass",
+                            "overrideAll", "override"}:
+                        writes.append(("?", line))     # env.&setProperty, env.metaClass
+                    elif postfix(line, own):
+                        writes.append(("?", line))     # env.PATH++: the parser keeps no node for a postfix operator
+                else:
+                    writes.append(("?", line))         # env as a value: an alias, a delegate, an argument, a result
             elif isinstance(n, Call):
                 callee = n.callee
-                if isinstance(callee, Str) and callee.interpolated:
-                    writes.append(("?", line))         # "$m"(...): a method whose name is computed
-                elif isinstance(callee, Prop) and "${" in callee.name:
-                    writes.append(("?", line))         # this."$m"(...)
+                if (isinstance(callee, Str) and callee.interpolated) or (isinstance(callee, Prop) and "${" in callee.name
+                                                                          and not env_ref(callee)):
+                    writes.append(("?", line))         # "$m"(...), x."$m"(...): a method whose name is computed
                 elif (path_of(callee) or "").rsplit(".", 1)[-1] == "invokeMethod":
                     writes.append(("?", line))
-                elif isinstance(callee, Prop) and env_like(callee.target, surely=True):
-                    if callee.name in self._ENV_SETTERS:
-                        key = literal(n.args[0]) if len(n.args) >= 2 else None
-                        writes.append((key if key and re.fullmatch(r"[A-Za-z_]\w*", key) else "?", line))
-                    elif callee.name not in self._ENV_READS:
-                        writes.append(("?", line))
-            elif isinstance(n, Prop) and id(n) not in used:
-                if env_like(n.target, surely=True) and n.name in (
-                        self._ENV_SETTERS | {"with", "identity", "tap", "putAll", "invokeMethod", "metaClass",
-                                             "setMetaClass", "overrideAll", "override"}):
-                    writes.append(("?", line))         # env.&setProperty, env.metaClass
-                elif "${" in n.name and path_of(n.target) in script_names:
-                    writes.append(("?", line))         # this.&"$m": a pointer to a method whose name is computed
-            elif isinstance(n, Opaque) and line and mentions_env(line, line + 10):
+            elif isinstance(n, Opaque) and line and (re.search(r"\benv\b", own) if own is not None
+                                                     else re.search(r"\benv\b", text_of(line, line + 10, None))):
                 # (env.PATH, env.X) = [...], foo(env.PATH = 'x'): a statement the parser could not read, from its first
                 # line and the ten after it, which may hold the rest of it
                 writes.append(("?", line))
-            elif isinstance(n, Loop) and line and mentions_env(line, getattr(n.body, "line", line)) and re.search(
-                    r"(?<![=!<>])=(?![=~])", "\n".join(lines[line - 1:getattr(n.body, "line", line)])):
-                writes.append(("?", line))             # for (env.PATH = '/x'; ...): the header keeps no assignment
+            elif isinstance(n, (Loop, MethodDef)) and line and risky_text(
+                    text_of(line, getattr(n.body, "line", line), own)):
+                writes.append(("?", line))             # a loop's header, a method's parameter defaults
+            elif isinstance(n, Switch) and line and any(
+                    risky_text(text_of(getattr(case, "line", line), (case.stmts[0].line if getattr(case, "stmts", None)
+                                                                     else getattr(case, "line", line)), own))
+                    for case in n.cases):
+                writes.append(("?", line))             # case { env.PATH = '/x'; true }: a case label
         return writes
 
     def _file_steering(self) -> str | None:

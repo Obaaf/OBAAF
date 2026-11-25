@@ -143,7 +143,8 @@ CASES = [
         "withCredentials([file(credentialsId: 'x', variable: 'LD_PRELOAD')]) { " + PLAIN + " }"), U),
     # Reading env is not writing it
     ("env.PATH compared", pipeline(PLAIN, build="script { if (env.PATH == '/x' || env.PATH =~ /y/) { echo 'z' } }"), P),
-    # From the second attack pass (each was a pass at 9f9ffee): Groovy the walker does not walk is read node by node.
+    # From the second attack pass on 9f9ffee (most passed there): Groovy the walker does not walk is read node by
+    # node.
     ("an alias of env in a when expression", in_when("def e = env; e.PATH = \"${env.WORKSPACE}/t:${env.PATH}\""), U),
     ("an alias defined outside, used in a when expression", "def e = env\n" + in_when("e['PATH'] = '/x'"), U),
     ("a comment between env and the name", in_when("env/**/.PATH = '/x'"), U),
@@ -171,6 +172,26 @@ CASES = [
     ("a method on a computed parameter", pipeline(PLAIN, build="script { def k = 'X'; echo params.\"${k}\".trim() }"),
      P),
     ("reading env in a when expression", in_when("env.BRANCH_NAME.startsWith('release/')"), P),
+    # From the third attack pass (each was a pass at 6007f19): env used as a value is not followed, so it counts.
+    ("an alias through a ternary", in_when("def e = true ? env : null; e.PATH = '/x'"), U),
+    ("an alias through ?: and as", pipeline(PLAIN, build="script { (env ?: null).PATH = '/x'; (env as Object).X = 1 }"),
+     U),
+    ("a method that returns env", "def g() { env }\n" + pipeline(PLAIN, build="script { g().PATH = '/x' }"), U),
+    ("a closure whose delegate is env", "def inEnv(Closure body) { body.resolveStrategy = Closure.DELEGATE_FIRST; "
+     "body.delegate = env; body() }\n" + pipeline(PLAIN, build="script { inEnv { PATH = '/x' } }"), U),
+    ("a script property holding env", in_when("this.e = env; this.e.PATH = '/x'"), U),
+    ("a method's default parameter", "def f(a = (env.PATH = '/tmp/x')) { a }\n"
+     + pipeline(PLAIN, build="script { f() }"), U),
+    ("a switch case closure", pipeline(PLAIN, build="script { switch (1) { case { env.PATH = '/tmp/x'; true }: break } }"),
+     U),
+    ("env.PATH++", pipeline(PLAIN, build="script { env.PATH++ }"), U),
+    ("an unreadable statement inside a GString in a method", "def m() {\n  echo 'x'\n}\n" + pipeline(PLAIN) + "\n" * 20
+     + "def late() { echo \"${(env.PATH, env.X) = ['/x', 'y']}\" }\n", U),
+    # Ordinary reads stay passes
+    ("a loop bounded by an env value", pipeline(PLAIN, build="script { for (int i = 0; i < env.N.toInteger(); i++) "
+                                                             "{ echo 'x' } }"), P),
+    ("env.getOverriddenEnvironment()", pipeline(PLAIN, build="script { echo env.getOverriddenEnvironment().toString() }"),
+     P),
     # A failure the step ignores stays a finding whatever runs: OBAAF-JEN-011 reports it, and OBAAF-JEN-010 and 012
     # see no check, as before the review.
     ("withEnv PATH, failure ignored", pipeline(
@@ -220,6 +241,14 @@ class CheckEnvironmentTest(unittest.TestCase):
         for name, text, expected in CASES:
             with self.subTest(case=name):
                 self.assertEqual(verdicts(text), expected)
+
+    def test_a_write_in_a_gstring_names_the_string_s_line(self):
+        text = pipeline(PLAIN, build="echo \"${env.PATH = '/tmp/x:' + env.PATH}\"")
+        line = text.split("\n").index(next(x for x in text.split("\n") if "echo \"${env.PATH" in x)) + 1
+        result = jenkins.analyze("Jenkinsfile", text.encode(), load(), None)
+        rows = {row["rule"]: row for row in jenkins.coverage(result, result.findings)}
+        self.assertTrue(any(f"line {line} sets PATH" in r for r in rows["OBAAF-JEN-012"]["reasons"]),
+                        rows["OBAAF-JEN-012"]["reasons"])
 
     def test_the_reason_names_the_variable_and_its_line(self):
         result = jenkins.analyze("Jenkinsfile", pipeline(wrapped("['LD_PRELOAD=./evil.so']")).encode(), load(), None)
