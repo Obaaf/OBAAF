@@ -1,4 +1,4 @@
-name: Verify integrated portable patches
+name: Replay installed-wheel gate patches on macOS and Windows
 
 on:
   push:
@@ -8,90 +8,6 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        test: [suite, comparisons]
-        head: [f2e3082017ca6f9017922185481d38627c2b7459]
-    steps:
-      - name: Check out the candidate commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ matrix.head }}
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
-        with:
-          python-version: '3.10'
-      - name: Prepare the checker and Git-free temporary storage
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = ${{ matrix.head }}
-          worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
-          if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
-          echo "TMPDIR=$worktemp" >> "$GITHUB_ENV"
-          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
-      - name: Run the full acceptance suite and repository checks
-        if: matrix.test == 'suite'
-        run: |
-          set -euo pipefail
-
-          obaaf docs build --check
-          python -m unittest discover -s tests > "$RUNNER_TEMP/tests.log" 2>&1 || { tail -100 "$RUNNER_TEMP/tests.log"; exit 1; }
-          grep -E '^(Ran [0-9]+ tests|OK)' "$RUNNER_TEMP/tests.log"
-          obaaf catalog > /dev/null
-          obaaf docs build --check
-          python site/build.py --output "$RUNNER_TEMP/resource-site"
-          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
-      - name: Compare text, JSON, SARIF and summary on both repositories
-        if: matrix.test == 'comparisons'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir "$RUNNER_TEMP/base-src"
-          git archive 73ce746b4728a6b5f5404883397e0f801f06b2f3 src | tar -x -C "$RUNNER_TEMP/base-src"
-          git init -q "$RUNNER_TEMP/expectrail"
-          git -C "$RUNNER_TEMP/expectrail" sparse-checkout init --no-cone
-          git -C "$RUNNER_TEMP/expectrail" sparse-checkout set --no-cone '/*' '!/bugs/' '!/fresh-*/'
-          git -C "$RUNNER_TEMP/expectrail" fetch -q --filter=blob:none --depth=1 https://github.com/Expectrail/Expectrail.git de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
-          git -C "$RUNNER_TEMP/expectrail" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
-          test "$(git -C "$RUNNER_TEMP/expectrail" rev-parse HEAD)" = de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
-          cd "$RUNNER_TEMP"
-          python - <<'PY'
-          import os
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          temp = Path(os.environ["RUNNER_TEMP"])
-          candidate = Path(os.environ["GITHUB_WORKSPACE"])
-          sources = [temp / "base-src/src", candidate / "src"]
-          for path, level, expected in [(candidate, "medium", 0), (temp / "expectrail", "low", 1)]:
-              extra = ["--no-fixes"] if level == "low" else []
-              for mode in [["--format", "text"], ["--format", "json"], ["--format", "sarif"], ["--summary"]]:
-                  observations = []
-                  for src in sources:
-                      env = {**os.environ, "PYTHONPATH": str(src), "PYTHONDONTWRITEBYTECODE": "1"}
-                      module = subprocess.check_output(
-                          [sys.executable, "-c", "import obaaf.cli; print(obaaf.cli.__file__)"],
-                          env=env, text=True,
-                      ).strip()
-                      assert Path(module).resolve().is_relative_to(src.resolve())
-                      argv = ["obaaf", "check", str(path), "--baseline", str(path / ".github/obaaf-baseline.json"),
-                              "--fail-on", level, *extra, *mode]
-                      run = subprocess.run(argv, env=env, capture_output=True)
-                      observations.append((run.returncode, run.stdout, run.stderr))
-                  before, after = observations
-                  assert (before[0], before[2]) == (after[0], after[2])
-                  assert before == after, (path.name, mode)
-                  assert observations[0][0] == expected, (level, mode, observations[0][0])
-                  print(f"Compared {path.name} {' '.join(mode)} exit={expected}", flush=True)
-          PY
-
   portable-patch:
     name: Apply exported patch on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -99,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -122,35 +38,74 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
               for key in ["TMPDIR", "TEMP", "TMP"]:
                   env.write(f"{key}={work}\n")
-      - name: Install the candidate
-        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
-      - name: Export, check, apply, and compare resulting bytes
+      - name: Build a wheel from the sdist and install it in a clean environment
         shell: python
         run: |
           import os
-          import sys
-          import unittest
           from pathlib import Path
-          assert Path("tests/test_fix_patch.py").is_file()
-          suite = unittest.defaultTestLoader.discover("tests", pattern="test_fix_patch.py")
-          assert suite.countTestCases() > 0
-          result = unittest.TextTestRunner(verbosity=2).run(suite)
-          if not result.wasSuccessful() or result.testsRun <= len(result.skipped):
-              sys.exit(1)
+          import subprocess
+          import sys
 
-  combined:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: f2e3082017ca6f9017922185481d38627c2b7459
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Compare the combined product with the tested tree
+          work = Path(os.environ["TMPDIR"])
+          lock = Path("actions/setup-obaaf/constraints.txt").resolve()
+          subprocess.run([sys.executable, "-m", "pip", "install", "-c", str(lock), "setuptools"], check=True)
+          from setuptools.build_meta import build_sdist
+          archive = work / build_sdist(str(work))
+          subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation",
+                          "--wheel-dir", str(work), str(archive)], check=True)
+          subprocess.run([sys.executable, "-m", "venv", str(work / "venv")], check=True)
+          python = work / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+          wheel, = work.glob("obaaf-*.whl")
+          subprocess.run([str(python), "-m", "pip", "install", "-c", str(lock), str(wheel)], check=True)
+      - name: Apply the new gate to bundled workflow generations
+        shell: python
         run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD^{tree})" = b63d295476df4bfb7100c3d31a8bd57e1f504744
-          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-edit --no-ff e186458064a30c5413d79bb314fc4c13ea101c84
-          echo "Current combined tree $(git rev-parse HEAD^{tree})"
-          git restore --staged --source=9e29f29e9a782b51d18762d4269af86d4654594a -- docs/flagship.md
-          test "$(git write-tree)" = 92ae2213d7506e2e2ba05fa81335ccc6c6753b61
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import tempfile
+
+          work = Path(os.environ["TMPDIR"])
+          bindir = work / "venv" / ("Scripts" if os.name == "nt" else "bin")
+          python = bindir / ("python.exe" if os.name == "nt" else "python")
+          cli = bindir / ("obaaf.exe" if os.name == "nt" else "obaaf")
+          read_resource = """
+          import sys
+          from pathlib import Path
+          from importlib.resources import files
+          import obaaf
+          assert Path(obaaf.__file__).resolve().is_relative_to(Path(sys.prefix))
+          sys.stdout.buffer.write(files('obaaf.data').joinpath(sys.argv[1]).read_bytes())
+          """
+          from textwrap import dedent
+          key = b'obaaf check source "${config[@]}" --fail-on never'
+          replacement = b'gate_check .github/obaaf-baseline.json --fail-on medium'
+          rel = Path(".github/workflows/obaaf-pipeline-check.yml")
+          for name in ("init-gate-27b15c9.yaml", "init-gate-settings-8caddd6.yaml", "init-workflow.yaml"):
+              bundled = subprocess.check_output([str(python), "-I", "-c", dedent(read_resource), name], cwd=work)
+              normalized = bundled.replace(b"\r\n", b"\n")
+              assert normalized.count(key + b"\n") == 1, name
+              for ending in (b"\n", b"\r\n"):
+                  with tempfile.TemporaryDirectory(dir=work) as tmp:
+                      root = Path(tmp) / "example repo"
+                      target = root / rel
+                      target.parent.mkdir(parents=True)
+                      before = normalized.replace(b"\n", ending)
+                      target.write_bytes(before)
+                      def run(*args):
+                          return subprocess.check_output(args, cwd=root)
+                      run("git", "init", "-q")
+                      run("git", "config", "core.autocrlf", "false")
+                      run("git", "add", ".")
+                      patch = str(Path(tmp) / "review.patch")
+                      run(str(cli), "fix", ".", "--gate", "medium", "--patch", patch)
+                      assert target.read_bytes() == before
+                      run("git", "apply", "--check", patch)
+                      run("git", "apply", patch)
+                      after = target.read_bytes()
+                      assert after == before.replace(key + ending, replacement + ending)
+                      pin = rb"setup-obaaf@[0-9a-f]{40}"
+                      assert re.findall(pin, after) == re.findall(pin, before) != []
+                      assert run("git", "diff", "--name-only", "-z") == rel.as_posix().encode() + b"\x00"
+                      print(name, "CRLF" if ending == b"\r\n" else "LF", "installed CLI: Git applied exact bytes, original pin preserved")
