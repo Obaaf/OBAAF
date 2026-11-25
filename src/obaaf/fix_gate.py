@@ -18,12 +18,12 @@ from obaaf.checker.workflow import one_line
 
 BASELINE = Path(".github/obaaf-baseline.json")
 REPORT = b'obaaf check source "${config[@]}" --fail-on never\n'
-# Both the pre-gate report and the first gate-capable template installed this checker. The digest is
-# that template as it landed on flagship with #293 (27b15c9, after ad03f16 changed its pull-request
-# policy step). A later change to the template other than its setup pin stops it matching, and then
-# earlier workflows are no longer recognised; the tests of earlier workflows fail (review-gpt #306).
+# Earlier generated workflows keep their installed checker when only the gate changes.
+FIRST_GATE = files("obaaf.data").joinpath("init-gate-27b15c9.yaml")
 ORIGINAL_SETUP = b"uses: Obaaf/OBAAF/actions/setup-obaaf@4e2ba222d31f9ce8e7e352f18e8f88c75aabcbd8"
 GATE_TEMPLATE_DIGEST = "ad3c9f980acc1003b31695d3f7fdbee488ec4ecf10fbe12ac7a8621ddbaa67cb"
+SETTINGS_SETUP = b"uses: Obaaf/OBAAF/actions/setup-obaaf@8caddd6f06c50b9266d8116fd672f39b55770477"
+SETTINGS_TEMPLATE_DIGEST = "64a82752ebcb8d8ba5e78cd54a2392af684d6b5c4bc2f8005733c31822ef0b48"
 LEGACY_DIGEST = "58b64917ab435b974f4d6defac5b9c6f2dab3c536097cdef8e7e8402f4977b5c"
 
 
@@ -39,13 +39,12 @@ def _candidate(original, path, level):
             return None
         original = original.replace(b"\r\n", b"\n")
     template = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
-    # Reconstruct the first gate-capable template only when the complete historical
-    # body matches its digest. Gate activation does not change the installed checker.
-    historical = re.sub(rb"uses: Obaaf/OBAAF/actions/setup-obaaf@[0-9a-f]{40}", ORIGINAL_SETUP, template)
-    templates = [template]
-    historical_known = sha256(historical).hexdigest() == GATE_TEMPLATE_DIGEST
-    if historical_known and historical != template:
-        templates.append(historical)
+    first = FIRST_GATE.read_bytes()
+    templates = [template, first]
+    # A future pin-only rotation can still recognise the complete settings template at its first pin.
+    settings = re.sub(rb"uses: Obaaf/OBAAF/actions/setup-obaaf@[0-9a-f]{40}", SETTINGS_SETUP, template)
+    if settings != template and sha256(settings).hexdigest() == SETTINGS_TEMPLATE_DIGEST:
+        templates.append(settings)
     names = tuple(init_scanners.SCANNERS)
     for count in range(len(names) + 1):
         for selected in combinations(names, count):
@@ -58,7 +57,7 @@ def _candidate(original, path, level):
                     continue
             body = original.removesuffix(tail)
             for source in templates:
-                legacy = historical_known and source == historical and sha256(body).hexdigest() == LEGACY_DIGEST
+                legacy = source == first and sha256(body).hexdigest() == LEGACY_DIGEST
                 if body == source or legacy or any(
                     body == _gate_workflow(source, path, old) for old in ("low", "medium", "high")
                 ):
