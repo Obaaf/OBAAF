@@ -37,6 +37,13 @@ class ArtifactProducerTest(unittest.TestCase):
                     egress_state = next(f.state for f in result.findings if f.rule == "OBAAF-GHA-020")
                     self.assertEqual(egress_state, "fixed")
 
+    def test_steered_upload_withholds_action_egress_credit(self):
+        runner, steps, _ = ROUTES["action"]
+        body = steps + "\n" + upload() + "\n        env: {OPENSSL_CONF: unused.cnf}"
+        result = run_check(workflow(body, runs_on=runner))
+        self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+        self.assertIn("can make it run code the checker did not read", egress(result).controls[0].detail)
+
     def test_only_the_job_that_could_run_downloaded_code_gets_the_finding(self):
         _, steps, _ = ROUTES["action"]
         producer = workflow(steps + "\n" + upload())
@@ -197,3 +204,4 @@ class ArtifactProducerTest(unittest.TestCase):
                     else:
                         self.assertEqual(verdict(egress(result)), CANNOT_TELL)
                         self.assertIn("artifact", egress(result).controls[0].detail)
+

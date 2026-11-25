@@ -22,6 +22,13 @@ from obaaf.init import WORKFLOW
 from obaaf.init_scanners import steps
 
 
+# The SHA-256 of each gate-capable template as it landed, and (in tests/fixtures/init) its bytes. They are
+# kept here, not beside the packaged copies in obaaf.fix_gate, so that a packaged copy edited on its own, or
+# with its digest, fails a test. A copy, its fixture and its digest edited together cannot be told apart.
+FIRST_GATE_DIGEST = "ad3c9f980acc1003b31695d3f7fdbee488ec4ecf10fbe12ac7a8621ddbaa67cb"  # 27b15c9, #293
+SETTINGS_GATE_DIGEST = "46cfc1864e30b4b386f0799e98e698809f6727aaac8de6404e5311c014d2b70a"  # review-gpt #367
+
+
 def previous_steps(names):
     """The scanner steps as init wrote them before #340: without `exec 2>&1`."""
     return steps(names).replace(b"          exec 2>&1\n", b"")
@@ -237,11 +244,12 @@ class GateTests(unittest.TestCase):
         # real first gate-capable template fell to manual guidance. This one uses the landed bytes.
         from hashlib import sha256
 
-        from obaaf.fix_gate import GATE_TEMPLATE_DIGEST, ORIGINAL_SETUP, REPORT
+        from obaaf.fix_gate import FIRST_GATE, ORIGINAL_SETUP, REPORT
         from obaaf.init_scanners import SCANNERS
 
         first = (Path(__file__).parent / "fixtures/init/gate-template-27b15c9.yaml").read_bytes()
-        self.assertEqual(sha256(first).hexdigest(), GATE_TEMPLATE_DIGEST)
+        self.assertEqual(sha256(first).hexdigest(), FIRST_GATE_DIGEST)
+        self.assertEqual(FIRST_GATE.read_bytes(), first)
         self.assertIn(ORIGINAL_SETUP, first)
         future = self.root.parent / "release"
         future.mkdir()
@@ -263,20 +271,116 @@ class GateTests(unittest.TestCase):
                         self.assertIn("Applied the displayed gate change", text)
                         self.assertEqual(self.workflow.read_bytes(), gated + tail)
 
+    def test_every_landed_template_is_packaged_as_it_landed(self):
+        from hashlib import sha256
+
+        from obaaf.fix_gate import LANDED, SETTINGS_GATE
+
+        self.assertEqual([sha256(landed.read_bytes()).hexdigest() for landed, _ in LANDED],
+                         [FIRST_GATE_DIGEST, SETTINGS_GATE_DIGEST])
+        fixtures = Path(__file__).parent / "fixtures/init"
+        self.assertEqual([landed.read_bytes() for landed, _ in LANDED],
+                         [(fixtures / name).read_bytes() for name in
+                          ("gate-template-27b15c9.yaml", "gate-template-settings-8caddd6.yaml")])
+        for landed, pin in LANDED:
+            self.assertEqual(landed.read_bytes().count(pin), 1)
+        # Until the template changes again, the settings template is the one init writes.
+        self.assertEqual(SETTINGS_GATE.read_bytes(),
+                         files("obaaf.data").joinpath("init-workflow.yaml").read_bytes(),
+                         "init-workflow.yaml changed: keep init-gate-settings-8caddd6.yaml, its fixture and its "
+                         "digest as they landed, and add the changed template to obaaf.fix_gate.LANDED as a new file")
+
+    def test_landed_templates_are_recognised_after_the_template_changes(self):
+        # review-gpt #367: a later edit of the template must not leave workflows installed from an earlier
+        # one to manual guidance, at the pin they were installed with or after the documented pin-only
+        # update to the current template's commit (docs/upgrading.md).
+        from obaaf.fix_gate import LANDED, REPORT
+        from obaaf.init_scanners import SCANNERS
+
+        future = self.root.parent / "release"
+        future.mkdir()
+        next_setup = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"f" * 40
+        current = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
+        source = b"uses: " + yaml.safe_load(current)["jobs"]["check"]["steps"][0]["uses"].encode()
+        later = current.replace(source, next_setup).replace(b"permissions:\n", b"# A later edit.\npermissions:\n", 1)
+        self.assertNotEqual(later, current.replace(source, next_setup))
+        (future / "init-workflow.yaml").write_bytes(later)
+        self.install()
+        for landed, pin in LANDED:
+            body = landed.read_bytes()
+            for label, setup in (("landed pin", pin), ("current pin", next_setup)):
+                installed = body.replace(pin, setup)
+                for before, after in ((installed, b"medium"), (installed.replace(REPORT, b"gate_check .github/obaaf-baseline.json --fail-on high\n"), b"medium")):
+                    for names in ((), tuple(SCANNERS)):
+                        with self.subTest(template=landed.name, pin=label, gated=before != installed, scanners=names):
+                            tail = steps(names)
+                            self.workflow.write_bytes(before + tail)
+                            commit(self.root)
+                            with patch("obaaf.fix_gate.files", return_value=future):
+                                code, text = self.gate("--apply")
+                            self.assertEqual(code, 0, text)
+                            self.assertIn("Applied the displayed gate change", text)
+                            gated = installed.replace(REPORT, b"gate_check .github/obaaf-baseline.json --fail-on " + after + b"\n")
+                            self.assertEqual(self.workflow.read_bytes(), gated + tail)
+                            self.assertIn(setup, self.workflow.read_bytes())
+
+    def test_first_gate_workflow_after_the_documented_pin_update(self):
+        # review-gpt #367: docs/upgrading.md tells a team to move a gate-capable workflow's pin to the commit
+        # in the current init template and keep the rest. The first template's body at that pin is still
+        # recognised now that the current template's body differs from it.
+        from obaaf.fix_gate import ORIGINAL_SETUP, REPORT
+
+        first = (Path(__file__).parent / "fixtures/init/gate-template-27b15c9.yaml").read_bytes()
+        current = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
+        source = b"uses: " + yaml.safe_load(current)["jobs"]["check"]["steps"][0]["uses"].encode()
+        self.assertNotEqual(first.replace(ORIGINAL_SETUP, source), current)
+        moved = first.replace(ORIGINAL_SETUP, source).replace(
+            REPORT, b"gate_check .github/obaaf-baseline.json --fail-on medium\n") + steps(["zizmor"])
+        self.install()
+        self.workflow.write_bytes(moved)
+        commit(self.root)
+        code, text = command("fix", self.root, "--gate", "high", "--apply")
+        self.assertEqual(code, 0, text)
+        self.assertIn("Applied the displayed gate change", text)
+        self.assertEqual(self.workflow.read_bytes(), moved.replace(b"--fail-on medium", b"--fail-on high"))
+
+    def test_gate_preview_says_its_count_does_not_read_the_snapshot(self):
+        # review-gpt #367: the preview cannot take --settings (D-112), while a run of the generated
+        # workflow with OBAAF_USE_SETTINGS reads .github/obaaf-settings.json, and its count can differ.
+        self.install()
+        commit(self.root)
+        note = "This count does not use .github/obaaf-settings.json."
+        status, preview = self.gate()
+        self.assertEqual(status, 0, preview)
+        self.assertNotIn(note, preview)
+        (self.root / ".github/obaaf-settings.json").write_text("{}\n")
+        commit(self.root)
+        status, preview = self.gate()
+        self.assertEqual(status, 0, preview)
+        self.assertIn(note, preview)
+        # The first template does not read the variable, so the note would mislead there.
+        first = (Path(__file__).parent / "fixtures/init/gate-template-27b15c9.yaml").read_bytes()
+        self.workflow.write_bytes(first)
+        commit(self.root)
+        status, preview = self.gate()
+        self.assertEqual(status, 0, preview)
+        self.assertIn("Gate preview at --fail-on medium", preview)
+        self.assertNotIn(note, preview)
+
     def test_crlf_threshold_change_after_a_pin_rotation_keeps_pin_and_endings(self):
         # review-gpt #306, as the queue asks: #306's historical-template search and #293's CRLF
         # handling together. A gate written with the original checker, in CRLF, changes threshold
         # under a newer template without taking the newer pin or losing its line endings.
-        from obaaf.fix_gate import ORIGINAL_SETUP
+        from obaaf.fix_gate import SETTINGS_SETUP
 
         self.install()
         current = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
         source = yaml.safe_load(current)["jobs"]["check"]["steps"][0]["uses"].encode()
-        historical = current.replace(b"uses: " + source, ORIGINAL_SETUP)
+        historical = current.replace(b"uses: " + source, SETTINGS_SETUP)
         future = self.root.parent / "release"
         future.mkdir()
         next_setup = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"d" * 40
-        (future / "init-workflow.yaml").write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
+        (future / "init-workflow.yaml").write_bytes(historical.replace(SETTINGS_SETUP, next_setup))
         tail = steps(["zizmor"])
         high = historical.replace(b'obaaf check source "${config[@]}" --fail-on never',
                                   b"gate_check .github/obaaf-baseline.json --fail-on high") + tail
@@ -288,7 +392,7 @@ class GateTests(unittest.TestCase):
         self.assertIn("Applied the displayed gate change", text)
         written = self.workflow.read_bytes()
         self.assertEqual(written, high.replace(b"--fail-on high", b"--fail-on medium").replace(b"\n", b"\r\n"))
-        self.assertIn(ORIGINAL_SETUP, written)
+        self.assertIn(SETTINGS_SETUP, written)
         self.assertNotIn(next_setup, written)
 
     def test_mixed_endings_and_custom_crlf_workflow_get_manual_guidance(self):
@@ -391,17 +495,17 @@ class GateTests(unittest.TestCase):
         self.assertTrue(self.workflow.read_bytes().endswith(tail))
 
     def test_gate_changes_after_a_setup_pin_rotation(self):
-        from obaaf.fix_gate import ORIGINAL_SETUP
+        from obaaf.fix_gate import SETTINGS_SETUP
         from obaaf.init_scanners import SCANNERS
 
         self.install()
         current = files("obaaf.data").joinpath("init-workflow.yaml").read_bytes()
         source = yaml.safe_load(current)["jobs"]["check"]["steps"][0]["uses"].encode()
-        historical = current.replace(b"uses: " + source, ORIGINAL_SETUP)
+        historical = current.replace(b"uses: " + source, SETTINGS_SETUP)
         future = self.root.parent / "release"
         future.mkdir()
         next_setup = b"uses: Obaaf/OBAAF/actions/setup-obaaf@" + b"c" * 40
-        (future / "init-workflow.yaml").write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
+        (future / "init-workflow.yaml").write_bytes(historical.replace(SETTINGS_SETUP, next_setup))
         legacy = (Path(__file__).parent / "fixtures/init/report-only-3.3.yaml").read_bytes()
         path = self.root / "policy files" / "accepted.json"
         path.parent.mkdir()
@@ -422,30 +526,136 @@ class GateTests(unittest.TestCase):
                                 code, text = self.gate("--baseline", path, "--apply")
                                 self.assertEqual(code, 0, text)
                                 self.assertIn("Applied the displayed gate change", text)
-                                self.assertEqual(self.workflow.read_bytes(), expected + tail)
+                                if label == "legacy report":
+                                    first = (Path(__file__).parent / "fixtures/init/gate-template-27b15c9.yaml").read_bytes()
+                                    first = first.replace(b"/.github/obaaf-baseline.json\n", b"/policy files/accepted.json\n")
+                                    expected_body = first.replace(b'obaaf check source "${config[@]}" --fail-on never',
+                                                                  b"gate_check 'policy files/accepted.json' --fail-on medium")
+                                else:
+                                    expected_body = expected
+                                self.assertEqual(self.workflow.read_bytes(), expected_body + tail)
                                 self.assertIn("already gates", self.gate("--baseline", path)[1])
-            self.workflow.write_bytes(historical.replace(ORIGINAL_SETUP, next_setup))
+            self.workflow.write_bytes(historical.replace(SETTINGS_SETUP, next_setup))
             commit(self.root)
             code, text = self.gate("--baseline", path, "--apply")
             self.assertEqual(code, 0, text)
-            self.assertEqual(self.workflow.read_bytes(), expected.replace(ORIGINAL_SETUP, next_setup))
+            self.assertEqual(self.workflow.read_bytes(), expected.replace(SETTINGS_SETUP, next_setup))
 
-            custom = historical.replace(ORIGINAL_SETUP, b"uses: team/custom-checker@v1")
+            custom = historical.replace(SETTINGS_SETUP, b"uses: team/custom-checker@v1")
             self.workflow.write_bytes(custom)
             code, text = self.gate("--baseline", path, "--apply")
             self.assertEqual(code, 0, text)
             self.assertIn("by hand", text)
             self.assertEqual(self.workflow.read_bytes(), custom)
 
-    def execute_ci(self, event):
+    def execute_ci(self, event, *, settings=False):
         work = self.root.parent
         temp = work / "temp"
         temp.mkdir(exist_ok=True)
-        path = os.pathsep.join((str(work), str(Path(sys.executable).parent), os.environ["PATH"]))
+        installed = os.environ.get("OBAAF_TEST_PINNED_CHECKER")
+        python_dir = Path(installed or sys.executable).parent
+        path = os.pathsep.join((str(work), str(python_dir), os.environ["PATH"]))
+        env = {**os.environ, "GITHUB_EVENT_NAME": event, "RUNNER_TEMP": str(temp),
+               "PATH": path, "USE_SETTINGS": "true" if settings else ""}
+        if installed:
+            env.pop("PYTHONPATH", None)
         script = yaml.safe_load(self.workflow.read_text())["jobs"]["check"]["steps"][3]["run"]
         return subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=work, text=True,
-                              capture_output=True, env={**os.environ, "GITHUB_EVENT_NAME": event,
-                              "RUNNER_TEMP": str(temp), "PATH": path})
+                              capture_output=True, env=env)
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("git"), "needs bash and Git")
+    def test_generated_ci_reads_opted_in_settings_from_the_event_commit(self):
+        from test_settings_audit import recording, take
+
+        self.install()
+        work = self.root.parent
+        policy = work / "policy"
+        folder = self.root / ".github"
+        (folder / "CODEOWNERS").write_text("* @example/build\n")
+        snapshot = folder / "obaaf-settings.json"
+        observed, _ = take(recording("admin-token"), token="dummy")
+        snapshot.write_text(json.dumps(observed))
+        target = snapshot.read_bytes()
+        commit(self.root)
+        subprocess.run(["git", "clone", "-q", str(self.root), str(policy)], check=True)
+        subprocess.run(["git", "-C", str(self.root), "remote", "add", "origin",
+                        "https://github.com/example-studio/game.git"], check=True)
+        # The hosted acceptance run supplies the executable installed by the generated setup action.
+        checker = work / "obaaf"
+        if installed := os.environ.get("OBAAF_TEST_PINNED_CHECKER"):
+            checker.symlink_to(Path(installed).resolve(strict=True))
+        else:
+            checker.write_text(f"#!{sys.executable}\nfrom obaaf.cli import main\nraise SystemExit(main())\n")
+            checker.chmod(0o755)
+        generated = yaml.safe_load(self.workflow.read_bytes())["jobs"]["check"]["steps"]
+        self.assertEqual(generated[3]["env"]["USE_SETTINGS"], "${{ vars.OBAAF_USE_SETTINGS }}")
+        self.assertEqual(generated[2]["with"]["ref"], "${{ github.event.pull_request.base.sha }}")
+        self.assertIn("/.github/obaaf-settings.json", generated[2]["with"]["sparse-checkout"].splitlines())
+
+        for gated in (False, True):
+            if gated:
+                status, out = self.gate("--apply")
+                self.assertEqual(status, 0, out)
+                commit(self.root)
+            # An invalid source snapshot proves which bytes the installed checker parses.
+            snapshot.write_text("{}")
+            commit(self.root)
+            off = self.execute_ci("push")
+            self.assertIn(off.returncode, (0, 1) if gated else (0,), off.stdout + off.stderr)
+            self.assertNotIn("error: --settings", off.stderr)
+            self.assertNotIn("Settings snapshot for", off.stderr)
+            pr = self.execute_ci("pull_request", settings=True)
+            self.assertIn(pr.returncode, (0, 1) if gated else (0,), pr.stdout + pr.stderr)
+            self.assertIn("What to do next", pr.stdout)
+            self.assertNotIn("error: --settings", pr.stderr)
+            # Each obaaf check the step runs (the report, or once gated the gate alone) read the target's.
+            self.assertEqual(pr.stderr.count(f"Settings snapshot for {observed['repository']}, taken "), 1,
+                             pr.stderr)
+            self.assertEqual(snapshot.read_bytes(), target)
+            push = self.execute_ci("push", settings=True)
+            self.assertEqual(push.returncode, 2, push.stdout + push.stderr)
+            self.assertIn("error: --settings", push.stderr)
+            snapshot.write_bytes(target)
+            commit(self.root)
+
+        (policy / ".github/obaaf-settings.json").unlink()
+        commit(policy)
+        missing = self.execute_ci("pull_request", settings=True)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("must be a regular file committed in the target commit", missing.stderr)
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("git"), "needs bash and Git")
+    def test_generated_ci_refuses_a_github_folder_it_cannot_read_as_one(self):
+        # review-gpt #367: neither guard had a test. The target's .github is read from Git, so a link or a
+        # submodule there fails every pull request run, with or without the settings opt-in; the checked-out
+        # .github must be a directory when the snapshot is written into it.
+        self.install()
+        work = self.root.parent
+        policy = work / "policy"
+        policy.mkdir()
+        (policy / "elsewhere").mkdir()
+        (policy / "elsewhere/obaaf.yml").write_text("{}\n")
+        (policy / ".github").symlink_to("elsewhere")
+        commit(policy)
+        commit(self.root)
+        stub = work / "obaaf"
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+        for settings in (False, True):
+            with self.subTest(settings=settings):
+                result = self.execute_ci("pull_request", settings=settings)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("On the target commit, .github must be a directory", result.stderr)
+        shutil.rmtree(policy)
+        subprocess.run(["git", "clone", "-q", str(self.root), str(policy)], check=True)
+        (policy / ".github/obaaf-settings.json").write_text("{}\n")
+        commit(policy)
+        shutil.move(self.root / ".github", work / "moved")
+        (self.root / ".github").symlink_to(work / "moved")
+        result = self.execute_ci("pull_request", settings=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("the checked-out .github must be a directory, not a link", result.stderr)
+        self.assertFalse((work / "moved/obaaf-settings.json").exists())
 
     @unittest.skipUnless(shutil.which("bash") and shutil.which("git"), "needs bash and Git")
     def test_actual_ci_script_limits_pr_acceptances_to_both_commits(self):

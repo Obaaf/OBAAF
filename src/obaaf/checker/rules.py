@@ -2565,8 +2565,13 @@ class WorkflowRules:
     # programs, run with the token that uploads artifacts; git's (identity names excepted) and
     # `XDG_CONFIG_HOME`, where git finds its global configuration, since actions/checkout runs git; and
     # `TAR_OPTIONS`, since actions/cache runs tar. What other programs read for their settings is not read.
+    # Slice 2c.13 (found by the review of #366, run `rosefinch`): OpenSSL's names too, any beginning `OPENSSL_`.
+    # Node.js initialises OpenSSL when it starts and loads the configuration `OPENSSL_CONF` names, and the
+    # modules or engines it names, into the action's process (the review's attacker reproduced a library's
+    # constructor running on Node.js 22). Slice 2c.11a found the same of the egress action's own Python, which
+    # drops them before it loads libcrypto; a JavaScript action does not.
     _UPLOAD_STEERING_NAMES = frozenset({"NODE_OPTIONS", "NODE_PATH", "XDG_CONFIG_HOME", "TAR_OPTIONS"})
-    _UPLOAD_STEERING_PREFIXES = ("GIT_",)
+    _UPLOAD_STEERING_PREFIXES = ("GIT_", "OPENSSL_")
     _UPLOAD_PLAIN_PREFIXES = ("GIT_AUTHOR_", "GIT_COMMITTER_")
 
     def _upload_env_steers(self, job: Job, step: Step) -> bool:
