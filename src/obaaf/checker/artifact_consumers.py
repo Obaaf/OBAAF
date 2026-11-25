@@ -282,6 +282,7 @@ class _Roots:
         self.exact: dict = {}
         self.above: dict = {}
         self.workspace = None
+        self.globs = 0
 
     def add(self, root: str) -> None:
         """Index one more folder, as the steps reach the download that wrote it."""
@@ -303,6 +304,9 @@ class _Roots:
         if path == ".":
             return self.workspace
         if _GLOB.search(path):
+            self.globs += 1
+            if self.globs * len(self.roots) > 200_000:
+                return self.roots[0]        # too many to compare: taken to meet (third review pass)
             return next((root for root in self.roots if _parts_meet(path, root)), None)
         hit = self.above.get(path)
         if hit is not None:
@@ -329,7 +333,7 @@ def _meets(word: str, directory: str | None, idx: "_Roots") -> str | None:
     if shown.count("/") > _MAX_PARTS:
         return idx.roots[0]                 # too deep to read part by part: taken to meet
     joined = _join(directory, shown)
-    if joined is None:
+    if joined is None or joined.count("/") > _MAX_PARTS:
         return idx.roots[0]                 # relative to a working directory the checker cannot read
     return idx.meets(shown) or (idx.meets(joined) if joined != shown else None)
 
@@ -343,7 +347,8 @@ def _working_directory(step: Step, job: Job, workflow: Workflow) -> str | None:
             directory = _text(run.get("working-directory")) or "."
     if step.raw.get("working-directory") is not None:
         directory = _text(step.raw.get("working-directory")) or "."
-    return _normal(directory)
+    shown = _normal(directory)
+    return None if shown is not None and shown.count("/") > _MAX_PARTS else shown
 
 
 def _env_texts(scope) -> list:
@@ -472,10 +477,6 @@ def _commands(script: str, _depth: int = 0):
                 ending = None
             continue
         line = _comment_free(line)
-        heredoc = _HEREDOC.search(line)
-        if heredoc:
-            ending = heredoc.group(2)
-            line = line[:heredoc.start()] + " " + line[heredoc.end():]
         try:
             lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
             lexer.whitespace_split = True
@@ -483,6 +484,14 @@ def _commands(script: str, _depth: int = 0):
             words = list(lexer)
         except ValueError:
             return None
+        # A here-document is the lexer's own `<<` token (not one in quotes, not `<<<`), and its delimiter
+        # the next word, a leading `-` (`<<-`) taken off (third review pass).
+        if "<<" in words:
+            at = words.index("<<")
+            if at + 1 >= len(words):
+                return None
+            ending = words[at + 1][1:] if words[at + 1].startswith("-") else words[at + 1]
+            words = words[:at] + words[at + 2:]
         for word in words + ["\n"]:
             if word in _COMMAND_BREAKS or (set(word) <= set("();<>|&") and word not in _REDIRECTS):
                 if current:
@@ -609,10 +618,8 @@ def _step_meets(step: Step, job: Job, workflow: Workflow, idx: "_Roots", job_tex
     hit = next((h for h in (_meets(word, directory, idx) for word in _words(step.run)) if h), None)
     names_root = hit is not None
     shell = _shell(step, job, workflow)
-    if shell not in (None, "bash", "sh") and not (isinstance(shell, str) and shell.split()[0] in ("bash", "sh")):
+    if shell not in (None, "bash", "sh") and not (isinstance(shell, str) and shell.split()[:1] in (["bash"], ["sh"])):
         return hit
-    if steered:
-        return hit                          # what it runs can be changed: naming the folder is enough
     commands = _commands(step.run)
     if commands is None:
         return hit
@@ -620,7 +627,8 @@ def _step_meets(step: Step, job: Job, workflow: Workflow, idx: "_Roots", job_tex
         found = _command_meets(words, directory, idx, names_root)
         if found:
             return found
-    return None
+    # Steered, naming the folder is enough, and the commands are read as well (third review pass).
+    return hit if steered else None
 
 
 def _shell(step: Step, job: Job, workflow: Workflow):
@@ -691,7 +699,6 @@ def _read_only(step: Step, job: Job, workflow: Workflow) -> bool:
     return True
 
 
-_HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 _RUNNER_FILES = re.compile(r"\$\{?(?:GITHUB_ENV|GITHUB_PATH)\b\}?")
 
 

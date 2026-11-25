@@ -164,6 +164,36 @@ class SecondPassTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 20)
 
 
+class ThirdPassTest(unittest.TestCase):
+    """The attacker's third pass (review of #366): a crash, two costs, and two readings that hid steps."""
+
+    def test_an_empty_shell_is_not_a_crash(self):
+        for extra in ("        shell: ''\n", "        shell: '   '\n"):
+            with self.subTest(extra=extra):
+                run_check(producer() + consumer(run("./result/run.sh", extra)))
+
+    def test_a_long_working_directory_or_many_globs_is_quick(self):
+        deep = "/".join(["d"] * 3000)
+        text = producer() + consumer(*[run("sh z") for _ in range(40)]).replace(
+            "  use:\n    needs: agent\n", f"  use:\n    needs: agent\n    defaults: {{run: {{working-directory: '{deep}'}}}}\n")
+        started = time.monotonic()
+        run_check(text)
+        self.assertLess(time.monotonic() - started, 20)
+
+    def test_a_quoted_here_document_marker_or_a_here_string_hides_nothing(self):
+        for script in ('echo "usage: cat <<EOF"\n          bash result/run.sh', "grep -q x <<<foo || true\n          bash result/run.sh"):
+            with self.subTest(script=script):
+                step = f"      - name: consume\n        run: |\n          {script}\n"
+                self.assertEqual(len(found(run_check(producer() + consumer(step)))), 1)
+
+    def test_a_steered_step_is_still_read_command_by_command(self):
+        writer = "      - run: echo BASH_ENV=x >> \"$GITHUB_ENV\"\n"
+        text = producer() + consumer(run("pytest"))
+        steered = text.replace("    steps:\n      - uses: actions/download-artifact",
+                               "    steps:\n" + writer + "      - uses: actions/download-artifact")
+        self.assertEqual(len(found(run_check(steered))), 1)
+
+
 class LayoutsTest(unittest.TestCase):
     def test_upload_paths_do_not_rule_files_out(self):
         several = "\n          name: report\n          path: |\n            a/x.sh\n            b/y.sh"
