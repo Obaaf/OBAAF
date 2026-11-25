@@ -3052,7 +3052,8 @@ class WorkflowRules:
         tell"; so are inputs that are not a mapping and a path that is not text. Leading `!`s and
         spaces are read past, as `actions/cache` reads them. Only the step with a post step is read:
         `actions/cache/save` saves when it runs, before the command, and `actions/cache/restore` saves
-        nothing. Not read: a relative path through a symbolic link that a checkout put in the workspace."""
+        nothing. Not read: a path into the workspace (relative, or absolute under `/home`) through a symbolic link
+        that a checkout put there, and links the runner image has under `/home`."""
         if not step.uses_action("actions/cache") or step.uses_action("actions/cache/save") \
                 or step.uses_action("actions/cache/restore"):
             return None
