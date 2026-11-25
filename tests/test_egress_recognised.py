@@ -23,13 +23,14 @@ from obaaf.checker.rules import CANNOT_TELL, NOT_MET, VERIFIED
 
 SHA = "b" * 40
 RELEASED = "c" * 40
+REVIEWED_PIN = "80db1e68769165c9ecf24e553254fa35d6e168d5"
 HR_2_22_0 = "351661ca32ac09a36dc5ee2d536e3128f2a3c8ed"     # v2.22.0, as tagged on 2026-11-13
 HR_2_15_1 = "58077d3c7e43986b6b15fba718e8ea69e387dfcc"     # v2.15.1
 FIREWALL = "mode: enforce\nallow:\n  - api.example.com\n"
 
 
 def catalog(releases=(RELEASED,)):
-    """The catalog with `releases` as the commits of OBAAF's action OBAAF lists (none ship today)."""
+    """The catalog with `releases` as the commits of OBAAF's action OBAAF lists for this test."""
     cat = checker.load()
     detection = copy.deepcopy(cat.detection)
     detection["egress_action_releases"] = list(releases)
@@ -97,7 +98,7 @@ class NativeFirewallTest(unittest.TestCase):
     """GitHub's native egress firewall: `runs-on: ubuntu-24.04-firewall` and a policy file in
     enforce mode, which the firewall's README says is read only at `.github/egress-firewall.yaml`."""
 
-    PLAIN = "      - run: python -m agents.fix"
+    PLAIN = "      - run: claude -p review"
 
     def firewall(self, policy=FIREWALL, **kw):
         kw.setdefault("runs_on", "ubuntu-24.04-firewall")
@@ -112,7 +113,7 @@ class NativeFirewallTest(unittest.TestCase):
         self.assertIn("printed to the job's log or saved as an artifact is not blocked", detail(f))
 
     def test_it_clears_the_egress_control_of_a_secret_too(self):
-        steps = "      - run: python -m agents.fix\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
+        steps = "      - run: claude -p review\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
         result = run_check(workflow(steps, runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
         secret = next(f for f in result.findings if f.rule == "OBAAF-GHA-005")
         self.assertEqual(next(c.verdict for c in secret.controls if c.id == "egress-enforced"), VERIFIED)
@@ -258,7 +259,7 @@ class EgressActionTest(unittest.TestCase):
         return egress(run_check(workflow(steps, **kw), files=files, config=config, cat=cat))
 
     def test_the_action_at_a_released_commit_with_the_agent_inside_clears_it(self):
-        f = self.check(CHECKOUT + "\n" + action())
+        f = self.check(CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
         self.assertEqual((f.kind, verdict(f), f.state), ("egress-action", VERIFIED, "fixed"))
         self.assertIn("DNS query", detail(f))
         self.assertIn("api.example.com", detail(f))
@@ -268,10 +269,15 @@ class EgressActionTest(unittest.TestCase):
         result = run_check(workflow(CHECKOUT + "\n" + action()), config={"lanes": {}})
         self.assertEqual(verdict(egress(result)), VERIFIED)
 
-    def test_today_no_commit_is_listed_so_it_is_cannot_tell(self):
-        f = self.check(action(), cat=checker.load())
+    def test_an_empty_catalog_cannot_verify_the_egress_action(self):
+        f = self.check(action(ref=REVIEWED_PIN), cat=catalog(releases=()))
         self.assertEqual(verdict(f), CANNOT_TELL)
         self.assertIn("none listed", detail(f))
+
+    def test_the_shipped_catalog_rejects_an_unknown_pin(self):
+        f = self.check(action(ref=SHA), cat=checker.load())
+        self.assertEqual(verdict(f), CANNOT_TELL)
+        self.assertIn("not a commit OBAAF lists as released (1 listed)", detail(f))
 
     def test_a_pin_that_is_not_a_listed_commit_is_cannot_tell(self):
         for ref in (SHA, "v1", "main", RELEASED.upper()):
@@ -376,12 +382,12 @@ class EgressActionTest(unittest.TestCase):
         f = self.check(action(run="./scripts/agent.sh"), files=files, config={"lanes": {}})
         self.assertEqual(verdict(f), VERIFIED)
 
-    def test_uploading_the_output_is_fine_and_running_it_is_not(self):
+    def test_output_uploads_and_later_steps_limit_egress_evidence(self):
         upload = (f"      - uses: actions/upload-artifact@{SHA}\n"
                   "        with: {name: out, path: '${{ steps.agent.outputs.workspace }}'}")
-        self.assertEqual(verdict(self.check(action() + "\n" + upload)), VERIFIED)
+        self.assertEqual(verdict(self.check(action() + "\n" + upload)), CANNOT_TELL)
         named = upload.replace("      - uses:", "      - name: Upload what obaaf-egress left\n        uses:")
-        self.assertEqual(verdict(self.check(action() + "\n" + named)), VERIFIED)
+        self.assertEqual(verdict(self.check(action() + "\n" + named)), CANNOT_TELL)
         unsure = {
             "any script after it": "      - run: echo done",
             "another output": "      - run: echo '${{ steps.agent.outputs.denied }}'",
@@ -414,6 +420,52 @@ class EgressActionTest(unittest.TestCase):
         cache = f"      - uses: actions/cache@{SHA}\n        with: {{key: k, path: /tmp/obaaf-egress.*/workspace/node_modules}}"
         self.assertEqual(verdict(self.check(cache + "\n" + action())), NOT_MET)
 
+    def test_a_cache_path_it_cannot_read_to_the_end_is_cannot_tell(self):
+        """Found by the review of #248: only a path that names /tmp or the output was read, so a path
+        from an expression, or one that climbs out with `..`, reached the scratch directory with the
+        control verified. Each of these is "cannot tell" now, with the shipped pin as with a test one."""
+        paths = {
+            "an expression": "'${{ env.AGENT_OUT }}'",
+            "a variable": "'${{ vars.CACHE_PATH }}'",
+            "an input": "'${{ inputs.dir }}'",
+            "a function": "\"${{ format('{0}tmp', '/') }}\"",
+            "climbing from the workspace": "'../../../../../t?p'",
+            "climbing with a class": "'../../../../../tm[p]'",
+            "climbing from home": "'~/../../t?p'",
+            "climbing to the scratch directory": "'../../../../../t?p/obaaf*/workspace'",
+            "another user's home": "'~tmp/x'",
+            "in a list": "\"node_modules\\n../../../../../t?p\"",
+            "excluded, then climbing": "\"!x\\n../../../../../t?p\"",
+            "the root folder": "/", "the root folder, twice": "'//'", "the root folder, with a dot": "'/.'",
+            # Found by the second review of #248.
+            "through /proc": "'/proc/self/root/t?p/obaaf?egress.*/workspace'",
+            "through another process": "'/proc/1/root/t?p'",
+            "an absolute path beside a plain one": "\"~/.npm\\n/proc/thread-self/root/t?p\"",
+            "an absolute path elsewhere": "/usr/local/share/x",
+            "negated twice": "'! !/'",
+            "after a byte-order mark": "\"\\ufeff/\"",
+            "negated twice, then a user's home": "'! !~root/x'",
+            "a list": "[a, b]",
+        }
+        for what, path in paths.items():
+            for name in ("path", "Path"):
+                cache = f"      - uses: actions/cache@{SHA}\n        with: {{key: k, {name}: {path}}}"
+                with self.subTest(what=what, name=name):
+                    f = self.check(cache + "\n" + CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
+                    self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
+                    self.assertIn("saves a cache whose path the checker cannot read to the end", detail(f))
+        for path in ("~/.npm", "node_modules", "'~/.cache/pip\\n~/.npm'", "./.cache", "./", ".",
+                     "/home/runner/.npm", "\"node_modules\\n!node_modules/.cache\""):
+            cache = f"      - uses: actions/cache@{SHA}\n        with: {{key: k, path: {path}}}"
+            with self.subTest(path=path):
+                f = self.check(cache + "\n" + CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
+                self.assertEqual(verdict(f), VERIFIED, detail(f))
+        for restore in ("actions/cache/restore", "actions/cache/save"):
+            cache = f"      - uses: {restore}@{SHA}\n        with: {{key: k, path: '${{{{ env.AGENT_OUT }}}}'}}"
+            with self.subTest(restore=restore):
+                f = self.check(cache + "\n" + CHECKOUT + "\n" + action(ref=REVIEWED_PIN), cat=checker.load())
+                self.assertEqual(verdict(f), VERIFIED, detail(f))
+
     def test_a_step_before_it_that_leaves_a_process_running_is_cannot_tell(self):
         """Found by the first review: a loop left running by an earlier step ran what the command wrote."""
         for run in ("nohup sh -c 'while sleep 5; do sh ./x.sh; done' &", "./watch.sh &", "setsid ./watch.sh",
@@ -436,7 +488,10 @@ class EgressActionTest(unittest.TestCase):
             f = self.check(f"      - run: {json.dumps(run)}\n" + action())
             with self.subTest(run=run):
                 self.assertEqual(verdict(f), CANNOT_TELL)
-        self.assertEqual(verdict(self.check("      - run: make deps && make lint 2>&1\n" + action())), VERIFIED)
+                # Since D-133 any such script is also a possible upload; the reason under test must still be given
+                # (review of #357, run `ouzel`).
+                self.assertIn("may leave a process running beside it", detail(f))
+        self.assertFalse(egress_mod.leaves_process("make deps && make lint 2>&1"))
 
     def test_long_scripts_take_linear_time(self):
         """Found by the third review: a regular expression with chained `[^\\n]*` took 43 seconds on a
@@ -468,7 +523,7 @@ class EgressActionTest(unittest.TestCase):
         self.assertEqual(verdict(self.check(action(), job_extra=services)), CANNOT_TELL)
 
     def test_a_step_before_it_is_not_after_it_but_one_beside_it_is(self):
-        before = "      - run: make deps"
+        before = "      - run: echo preparing"
         self.assertEqual(verdict(self.check(before + "\n" + action())), VERIFIED)
         names_tmp = "      - run: rm -rf /tmp/obaaf-egress.old"
         self.assertEqual(verdict(self.check(names_tmp + "\n" + action())), CANNOT_TELL)
@@ -711,6 +766,8 @@ class ModelKeysTest(unittest.TestCase):
         self.assertEqual(egress_mod.MODEL_KEYS, action_mod.MODEL_KEYS)
         self.assertEqual(egress_mod.WITHHELD_BY_AWF, action_mod.WITHHELD_BY_AWF)
         self.assertEqual(egress_mod.NAME_RE.pattern, action_mod._NAME_RE.pattern)
+        for name in ("RESERVED_NAMES", "RESERVED_PREFIXES", "RESERVED_SUFFIXES"):
+            self.assertEqual(getattr(egress_mod, name), getattr(action_mod, name), name)
 
 
 class AgentInstallTest(unittest.TestCase):
@@ -731,9 +788,8 @@ class AgentInstallTest(unittest.TestCase):
         for script in ("sudo npm install -g @anthropic-ai/claude-code\nclaude --version",
                        "npm i -g @anthropic-ai/claude-code@2.1.0",
                        "npm install --global @openai/codex@latest && codex --version",
-                       "# the CLI the action runs\npnpm add -g @google/gemini-cli; gemini --version",
-                       "sudo -E npm install -g --no-fund @anthropic-ai/claude-code @openai/codex",
-                       "yarn global add @anthropic-ai/claude-code", "bun add -g @anthropic-ai/claude-code"):
+                       "# the CLI the action runs\nnpm add -g @google/gemini-cli; gemini --version",
+                       "sudo -E npm install -g --no-fund @anthropic-ai/claude-code @openai/codex"):
             f = self.check(CHECKOUT + "\n" + self.install(script) + self.CONFINED)
             with self.subTest(script=script):
                 self.assertEqual(verdict(f), VERIFIED, detail(f))
@@ -780,11 +836,34 @@ class AgentInstallTest(unittest.TestCase):
                        "sudo -b npm install -g @anthropic-ai/claude-code",
                        "sudo -i npm install -g @anthropic-ai/claude-code",
                        "sudo -s npm install -g @anthropic-ai/claude-code",
-                       "sudo -uroot npm install -g @anthropic-ai/claude-code"):
+                       "sudo -uroot npm install -g @anthropic-ai/claude-code",
+                       # Found by the review of #248: pnpm, yarn and bun read configuration from the
+                       # working directory, and Yarn 1 runs the program a `.yarnrc` names in `yarn-path`.
+                       "pnpm add -g @google/gemini-cli; gemini --version",
+                       "yarn global add @anthropic-ai/claude-code", "sudo yarn global add @anthropic-ai/claude-code",
+                       "yarn global add --ignore-scripts @anthropic-ai/claude-code",
+                       "bun add -g @anthropic-ai/claude-code", "bun i -g @openai/codex",
+                       # Found by the second review of #248: npm reads a `.tgz`, `.tar` or `.tar.gz` "version"
+                       # as a file in the working directory, and runs its scripts.
+                       "npm install -g @anthropic-ai/claude-code@vendor.tgz",
+                       "sudo -E npm i -g @anthropic-ai/claude-code@claude-code-1.0.0.TGZ",
+                       "npm install --global @anthropic-ai/claude-code@v1.tar.gz",
+                       "npm i -g @openai/codex@codex.tar"):
             f = self.check(self.install(script) + self.CONFINED)
             with self.subTest(script=script):
                 self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
                 self.assertIn("neither an install it can vouch for nor a run", detail(f))
+
+    def test_a_yarn_install_after_a_checkout_does_not_verify_with_the_shipped_pin(self):
+        """The review of #248: with the reviewed pin listed, `yarn global add` after a checkout made
+        OBAAF-GHA-020 "fixed", though a `.yarnrc` the checkout brings can make yarn run the
+        repository's own program outside the sandbox, with the runner's `sudo`."""
+        steps = CHECKOUT + "\n" + self.install("yarn global add @anthropic-ai/claude-code") + keyed(
+            run="claude -p 'review the change'", ref=REVIEWED_PIN)
+        f = self.check(steps, cat=checker.load())
+        self.assertEqual(verdict(f), CANNOT_TELL, detail(f))
+        key = key_control(run_check(workflow(steps), cat=checker.load()))
+        self.assertEqual(key.verdict, CANNOT_TELL, key.detail)
 
     def test_what_can_make_the_same_words_run_something_else_is_not_read_as_an_install(self):
         """Found by the review: the step's env, its working directory and the defaults of the job or
@@ -926,7 +1005,12 @@ class BestControlTest(unittest.TestCase):
         late = f"{CHECKOUT}\n      - uses: step-security/harden-runner@{HR_2_22_0}\n        with: {{egress-policy: block}}"
         result = run_check(workflow(late + "\n      - run: claude -p x", runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
         f = egress(result)
-        self.assertEqual((f.kind, verdict(f)), ("firewall-runner", VERIFIED))
+        # The firewall's reading is the one kept. Since the review of #357 it is "cannot tell" here, not
+        # verified: the agent's step can change what the actions' post steps run (GITHUB_ENV, GITHUB_PATH).
+        self.assertEqual((f.kind, verdict(f)), ("firewall-runner", CANNOT_TELL))
+        self.assertIn("can change through GITHUB_ENV or GITHUB_PATH", detail(f))
+        alone = run_check(workflow("      - run: claude -p x", runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
+        self.assertEqual((egress(alone).kind, verdict(egress(alone))), ("firewall-runner", VERIFIED))
 
     def test_the_better_of_two_unproven_controls_stands(self):
         monitor = (f"      - uses: step-security/harden-runner@{HR_2_22_0}\n"
@@ -960,8 +1044,8 @@ class ReleaseDataTest(unittest.TestCase):
                 self.assertRegex(sha, r"^[0-9a-f]{40}$")
                 self.assertRegex(version, r"^\d+\.\d+\.\d+$")
 
-    def test_no_commit_of_the_egress_action_is_listed_yet(self):
-        self.assertEqual(checker.load().detection["egress_action_releases"], [])
+    def test_only_the_reviewed_commit_of_the_egress_action_is_listed(self):
+        self.assertEqual(checker.load().detection["egress_action_releases"], [REVIEWED_PIN])
 
     def test_listed_commits_of_the_egress_action_are_at_or_after_the_floor(self):
         """Only a commit at or after the floor may be listed: the checker reads the action's
@@ -1072,7 +1156,10 @@ def lists_differ(sha):
         finally:
             os.environ.clear()
             os.environ.update(saved)
-    for name, mine in (("MODEL_KEYS", egress_mod.MODEL_KEYS), ("WITHHELD_BY_AWF", egress_mod.WITHHELD_BY_AWF)):
+    for name, mine in (("MODEL_KEYS", egress_mod.MODEL_KEYS), ("WITHHELD_BY_AWF", egress_mod.WITHHELD_BY_AWF),
+                       ("RESERVED_NAMES", egress_mod.RESERVED_NAMES),
+                       ("RESERVED_PREFIXES", egress_mod.RESERVED_PREFIXES),
+                       ("RESERVED_SUFFIXES", egress_mod.RESERVED_SUFFIXES)):
         if getattr(module, name, None) != mine:
             return f"its {name} is not the checker's"
     if getattr(getattr(module, "_NAME_RE", None), "pattern", None) != egress_mod.NAME_RE.pattern:
@@ -1129,7 +1216,7 @@ class KeyOutOfReachTest(unittest.TestCase):
         return key_control(run_check(workflow(steps, **kw), cat=cat, config=config))
 
     def test_a_model_key_given_to_the_proxy_at_a_listed_commit_is_out_of_reach(self):
-        control = self.key(CHECKOUT + "\n" + keyed())
+        control = self.key(CHECKOUT + "\n" + keyed(ref=REVIEWED_PIN), cat=checker.load())
         self.assertEqual(control.verdict, VERIFIED)
         self.assertIn("the command can use a key the proxy holds and cannot read it", control.detail)
         self.assertIn("ANTHROPIC_API_KEY (secrets.ANTHROPIC_API_KEY) goes to AWF's API proxy", control.detail)
@@ -1139,8 +1226,13 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertIn("what an accepted install's own scripts do", control.detail)
         self.assertIn("make the provider act for it", control.detail)
 
+    def test_the_shipped_catalog_cannot_verify_key_handling_at_an_unknown_pin(self):
+        control = self.key(keyed(ref=SHA), cat=checker.load())
+        self.assertEqual(control.verdict, CANNOT_TELL)
+        self.assertIn("not a commit OBAAF lists as released (1 listed)", control.detail)
+
     def test_no_listed_commit_or_a_tag_is_cannot_tell(self):
-        control = self.key(keyed(), cat=checker.load())
+        control = self.key(keyed(ref=REVIEWED_PIN), cat=catalog(releases=()))
         self.assertEqual(control.verdict, CANNOT_TELL)
         self.assertIn("not a commit OBAAF lists as released (none listed)", control.detail)
         self.assertIn("goes to AWF's API proxy", control.detail)     # where the key goes, whatever the verdict
@@ -1166,7 +1258,7 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertEqual(verdict(f), VERIFIED)
 
     def test_githubs_native_firewall_holds_no_key(self):
-        steps = "      - run: python -m agents.fix\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
+        steps = "      - run: claude -p review\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
         result = run_check(workflow(steps, runs_on="ubuntu-24.04-firewall"), policy=FIREWALL)
         secret = secret_finding(result)
         verdicts = {c.id: c.verdict for c in secret.controls}
@@ -1176,7 +1268,7 @@ class KeyOutOfReachTest(unittest.TestCase):
         self.assertEqual(secret.state, "new")
 
     def test_a_job_with_no_confined_command_is_not_met(self):
-        steps = "      - run: python -m agents.fix\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
+        steps = "      - run: claude -p review\n        env: {KEY: '${{ secrets.MODEL_API_KEY }}'}"
         control = self.key(steps)
         self.assertEqual(control.verdict, NOT_MET)
         self.assertIn("no step of the job runs the agent's command behind a proxy", control.detail)
@@ -1265,6 +1357,32 @@ class KeyOutOfReachTest(unittest.TestCase):
             with self.subTest(ref=ref):
                 self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
                 self.assertNotIn("removes every OPENSSL_ variable", control.detail)
+
+    def test_a_name_the_action_reserves_under_env_is_refused_as_the_action_refuses_it(self):
+        """The action refuses `PATH`, `NODE_OPTIONS`, `ACTIONS_*`, `*_BASE_URL` and the rest of its reserved
+        names under `env`, matched exactly; the checker verified such a step (review of A3a, review-gpt
+        #283). Only at a listed commit, as for the OPENSSL_ names."""
+        for name in ("NODE_OPTIONS", "ANTHROPIC_BASE_URL", "ACTIONS_RUNTIME_TOKEN", "OTEL_ENDPOINT",
+                     "SERVICE_API_TARGET", "https_proxy", "TZ"):
+            step_env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", name: "x"}
+            with self.subTest(name=name):
+                control = key_control(run_check(workflow(keyed(step_env=step_env, env_input=name))))
+                self.assertEqual(control.verdict, NOT_MET, control.detail)
+                self.assertIn(f"names {name} under env, a name the action at a listed commit sets, withholds",
+                              control.detail)
+                control = key_control(run_check(workflow(keyed(step_env=step_env, env_input=name, ref="v1"))))
+                self.assertNotIn("a name the action at a listed commit sets", control.detail)
+        # A credential under a reserved name is not said to reach the command (second review pass).
+        step_env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", "ANTHROPIC_BASE_URL": "${{ secrets.GW }}"}
+        control = key_control(run_check(workflow(keyed(step_env=step_env, env_input="ANTHROPIC_BASE_URL"))))
+        self.assertEqual(control.verdict, NOT_MET, control.detail)
+        self.assertNotIn("passed to the command as ANTHROPIC_BASE_URL", control.detail)
+        # Exactly as the action matches: a spelling it does not list is passed to the command.
+        for name in ("Node_Options", "NODE_OPTIONS_EXTRA", "MY_BASE_URL_X"):
+            step_env = {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}", name: "x"}
+            with self.subTest(name=name):
+                control = key_control(run_check(workflow(keyed(step_env=step_env, env_input=name))))
+                self.assertNotIn("a name the action at a listed commit sets", control.detail)
 
     def test_with_every_control_the_checker_reads_in_place_only_the_setting_is_left(self):
         """The fifth control does not make OBAAF-GHA-005 clearable on its own: the environment's settings
@@ -1384,10 +1502,16 @@ class KeyOutOfReachBeforeAndBesideTest(unittest.TestCase):
                 self.assertIn("ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line", control.detail)
 
     def test_steps_after_it_cannot_reach_the_key(self):
-        """The step's process has ended; a later step can still matter to OBAAF-GHA-020, not to this."""
-        steps = keyed() + f"\n      - uses: actions/upload-artifact@{SHA}\n        with: {{name: out, path: out}}\n" \
-                          "      - run: nohup ./later.sh &"
+        """The step's process has ended, so a later step that does not upload cannot reach the key. Since D-133 a
+        later step that may upload an artifact makes this control "cannot tell" (review of #357, run `ouzel`)."""
+        steps = keyed() + "\n      - run: echo completed"
         self.assertEqual(self.key(CHECKOUT + "\n" + steps).verdict, VERIFIED)
+        for later in (f"      - uses: actions/upload-artifact@{SHA}\n        with: {{name: out, path: out}}",
+                      "      - run: nohup ./later.sh &"):
+            with self.subTest(later=later):
+                control = self.key(CHECKOUT + "\n" + keyed() + "\n" + later)
+                self.assertEqual(control.verdict, CANNOT_TELL)
+                self.assertIn("Another job could load the artifact", control.detail)
 
 
 # What slice 2c.10b's decision (D-070) rests on, at a commit of the action, as far as the workflow
@@ -1976,7 +2100,10 @@ class KeyReasonsSinceOwnStepsTest(unittest.TestCase):
         for name, before in cases.items():
             control = self.key(before + keyed())
             with self.subTest(name):
-                self.assertEqual(control.verdict, VERIFIED, control.detail)
+                self.assertEqual(control.verdict, CANNOT_TELL, control.detail)
+                reason = control.detail.split(". Another job could load", 1)[0]
+                self.assertRegex(reason, r"^step '[^']+' in job 'agent' (?:uses an action whose implementation "
+                                 r"may upload an artifact|runs a script whose artifact uploads the checker cannot rule out)$")
 
     def test_openssl_variables_no_longer_count_in_any_spelling(self):
         """Slice 2c.11b: the floor's egress.py removes every OPENSSL_ variable, matched trimmed and

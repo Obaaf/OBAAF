@@ -7,20 +7,45 @@ import shlex
 from obaaf.causes import Cause
 from obaaf.checker import acceptance, baseline
 from obaaf.checker.rules import ACCEPTED, FIXED
+from obaaf.checker.workflow import one_line
 
 
-def migration_command(result) -> str:
+def scoped_migration_command(baseline_path, checked, options) -> str:
     """Use only CLI arguments from this check. A migration requires three user decisions."""
-    paths = [str(result.baseline_path or "FILE")]
-    if result.checked not in ("", "."):
-        paths.append(str(result.checked))
+    paths = [str(baseline_path or "FILE")]
+    if checked not in ("", "."):
+        paths.append(str(checked))
     # Quoting protects spaces and shell metacharacters, but argparse reads an initial dash
     # as an option even after shell quoting. A relative path with ./ denotes the same file.
     args = ["obaaf", "baseline", "migrate"]
-    args.extend("./" + path if path.startswith("-") else path for path in paths)
+    # A leading `=` is expanded by zsh (`=ls` is the path of ls), so it gets ./ as well.
+    args.extend("./" + path if path.startswith(("-", "=")) else path for path in paths)
     args.extend(("--owner", "OWNER", "--reason", "REASON", "--expires", "YYYY-MM-DD"))
-    args.extend(str(option) for option in (result.options or ()))
+    args.extend(str(option) for option in (options or ()))
     return shlex.join(args)
+
+
+def migration_command(result) -> str:
+    return scoped_migration_command(result.baseline_path, result.checked, result.options)
+
+
+def migration_hint(command: str, *, summary: bool = False) -> str:
+    if command != one_line(command):
+        # Name the command even when it cannot be printed: a reader new to OBAAF cannot guess it
+        # (review-gpt #308).
+        return ("Run obaaf baseline migrate yourself with the baseline's original path and the check's original "
+                "paths and options, which cannot be printed faithfully as a one-line command, and supply an owner, "
+                "reason and expiry.")
+    return "The full report gives the command." if summary else command
+
+
+def baseline_identity(path) -> str:
+    """Which baseline a migration hint means, for a reader who cannot copy the command (review of #319).
+    A path that prints on one line is given as a shell word; another is escaped, and said to be."""
+    text = str(path)
+    if text == one_line(text):
+        return "Original baseline: " + shlex.quote("./" + text if text.startswith(("-", "=")) else text)
+    return "Original baseline (escaped, for display only): " + one_line(text)
 
 
 def acceptance_cause(finding, result) -> Cause | None:

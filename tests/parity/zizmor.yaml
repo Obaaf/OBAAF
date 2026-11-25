@@ -12,14 +12,14 @@
 #
 # A case is one (file, job, audit) zizmor reports, in its default persona, with the steps it names.
 # It is answered when OBAAF reports one of the audit's rules, in any state but `fixed`, on the same
-# job (anywhere in the file, where zizmor names no job), and for each step zizmor names, on that step
-# (OBAAF-GHA-006's one `restores` finding counts for each cache step of its job); a finding on the job
-# as a whole answers the job, never a step. A case that is not answered fails the test unless an entry
-# under `silent` names it with a reason. Where OBAAF answers part of a case, the entry lists under
-# `steps` the places it explains, numbered from 0 as zizmor-cases.json numbers them ([N], or [N, M] in
-# a parallel group). An entry under `silent` that names no case, a case OBAAF answers, or places other
-# than those OBAAF leaves unanswered, fails too, and so does a file OBAAF could not read, so this file
-# cannot say more than the tools do.
+# job (anywhere in the file, where zizmor names no job), and for each step zizmor names, on that
+# step (OBAAF-GHA-006's one `restores` or `capability-restores` finding counts for each cache step
+# of its job); a finding on the job as a whole answers the job, never a step. A case that is not
+# answered fails the test unless an entry under `silent` names it with a reason. Where OBAAF answers
+# part of a case, the entry lists under `steps` the places it explains, numbered from 0 as
+# zizmor-cases.json numbers them ([N], or [N, M] in a parallel group). An entry under `silent` that
+# names no case, a case OBAAF answers, or places other than those OBAAF leaves unanswered, fails
+# too, and so does a file OBAAF could not read, so this file cannot say more than the tools do.
 # zizmor-cases.json also holds the SHA-256 of each file the cases were read from; a changed file fails
 # the test until the cases are recorded again from CI.
 format: obaaf-zizmor-parity/v1
@@ -98,19 +98,6 @@ silent:
       OBAAF-GHA-011 covers agent jobs and jobs an untrusted trigger can start; this job runs on push
       and workflow_dispatch, runs no agent, and its token has no permissions (`permissions: {}`).
   - set: zizmor-tests
-    file: cache-poisoning.yml
-    job: publish
-    audit: cache-poisoning
-    kind: gap
-    issue: "#289"
-    reason: >-
-      OBAAF-GHA-006 is about release jobs, and OBAAF does not put this job in the release lane: its
-      command, `uv build publish`, is not one OBAAF knows publishes. But the job, started by a
-      release event, restores setup-uv's cache and then runs a step given `UV_PUBLISH_TOKEN: ${{
-      secrets.PYPI_PUBLISH_TOKEN }}`, a name OBAAF's own publishing_secret_patterns take for a
-      publishing credential, so a poisoned cache would run with it. OBAAF should say at least
-      "cannot tell" here.
-  - set: zizmor-tests
     file: cache-poisoning/caching-opt-in-boolish-toggle.yml
     job: publish-crate
     audit: cache-poisoning
@@ -118,9 +105,10 @@ silent:
     reason: >-
       OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
       an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
-      release), and OBAAF-GHA-006 is about release jobs; zizmor also takes every job a release event
-      or a tag push starts for one. This job, started by a release event, only builds wheels with
-      maturin-action and publishes nothing.
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a release event, only builds wheels with maturin-action and
+      publishes nothing. It is given no secret and no permissions (`permissions: {}`).
   - set: zizmor-tests
     file: cache-poisoning/issue-1081-repro.yml
     job: issue-1081-true-positive
@@ -129,9 +117,10 @@ silent:
     reason: >-
       OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
       an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
-      release), and OBAAF-GHA-006 is about release jobs; zizmor also takes every job a release event
-      or a tag push starts for one. This job, started by a release event, only sets up uv and
-      publishes nothing.
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a release event, only sets up uv and publishes nothing. It is
+      given no secret and no permissions (`permissions: {}`).
   - set: zizmor-tests
     file: cache-poisoning/issue-1152-repro.yml
     job: issue-1152-true-positive
@@ -140,9 +129,10 @@ silent:
     reason: >-
       OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
       an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
-      release), and OBAAF-GHA-006 is about release jobs; zizmor also takes every job a release event
-      or a tag push starts for one. This job, started by a release event, only sets up Node.js and
-      publishes nothing.
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a release event, only sets up Node.js and publishes nothing.
+      It is given no secret and no permissions (`permissions: {}`).
   - set: zizmor-tests
     file: cache-poisoning/issue-1152-repro.yml
     job: publish
@@ -151,9 +141,11 @@ silent:
     reason: >-
       OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
       an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
-      release), and OBAAF-GHA-006 is about release jobs; zizmor also takes every job a release event
-      or a tag push starts for one. This job, started by a release event, checks out and sets up
-      pnpm and Node.js with a registry URL, and runs no publish command.
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a release event, checks out and sets up pnpm and Node.js with
+      a registry URL, and runs no publish command. It is given no secret and no permissions
+      (`permissions: {}`).
   - set: zizmor-tests
     file: cache-poisoning/issue-2320-repro.yml
     job: issue-2320-true-positive
@@ -162,22 +154,10 @@ silent:
     reason: >-
       OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
       an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
-      release), and OBAAF-GHA-006 is about release jobs; zizmor also takes every job a release event
-      or a tag push starts for one. This job, started by a release event, only sets up uv and
-      publishes nothing.
-  - set: zizmor-tests
-    file: cache-poisoning/issue-343-repro.yml
-    job: goreleaser
-    audit: cache-poisoning
-    kind: narrower
-    reason: >-
-      OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
-      an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
-      release), and OBAAF-GHA-006 is about release jobs; zizmor also takes every job a release event
-      or a tag push starts for one. This job, started by a tag push and named goreleaser, only sets
-      up Go; it runs no goreleaser or other publishing step. It is given `contents: write`, which
-      none of its steps needs (setup-go reads the token only to download Go); whether such a job
-      should be "cannot tell" is part of #289.
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a release event, only sets up uv and publishes nothing. It is
+      given no secret and no permissions (`permissions: {}`).
   - set: zizmor-tests
     file: cache-poisoning/issue-642-repro.yml
     job: issue-642-true-positive
@@ -186,9 +166,11 @@ silent:
     reason: >-
       OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
       an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
-      release), and OBAAF-GHA-006 is about release jobs; zizmor takes docker/build-push-action for a
-      publishing step. Here it is given no `push: true`, so it builds an image and pushes nothing,
-      on a push event.
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor takes docker/build-push-action for a publishing step.
+      Here it is given no `push: true`, so it builds an image and pushes nothing, on a push event.
+      Such a build is not counted as holding what publishing needs, and the job is given no secret
+      and no permissions (`permissions: {}`).
   - set: zizmor-tests
     file: cache-poisoning/ramsey-composer-install.yml
     job: publish
@@ -197,9 +179,10 @@ silent:
     reason: >-
       OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
       an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
-      release), and OBAAF-GHA-006 is about release jobs; zizmor also takes every job a release event
-      or a tag push starts for one. This job, started by a release event, only installs Composer
-      dependencies and publishes nothing.
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a release event, only installs Composer dependencies and
+      publishes nothing. It is given no secret and no permissions (`permissions: {}`).
   - set: zizmor-tests
     file: cache-poisoning/trigger-heuristics/tag-and-branch.yml
     job: publish
@@ -208,9 +191,11 @@ silent:
     reason: >-
       OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
       an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
-      release), and OBAAF-GHA-006 is about release jobs; zizmor also takes every job a release event
-      or a tag push starts for one. This job, started by a tag push, a push to a branch named
-      release or a release event, only runs maturin-action builds and publishes nothing.
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a tag push, a push to a branch named release or a release
+      event, only runs maturin-action builds and publishes nothing. It is given no secret and no
+      permissions (`permissions: {}`).
   - set: zizmor-tests
     file: cache-poisoning/trigger-heuristics/tag-only.yml
     job: publish
@@ -219,9 +204,10 @@ silent:
     reason: >-
       OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
       an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
-      release), and OBAAF-GHA-006 is about release jobs; zizmor also takes every job a release event
-      or a tag push starts for one. This job, started by a tag push or a push to master, only runs
-      maturin-action builds and publishes nothing.
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a tag push or a push to master, only runs maturin-action
+      builds and publishes nothing. It is given no secret and no permissions (`permissions: {}`).
   - set: zizmor-tests
     file: excessive-permissions.yml
     job: excessive-permissions

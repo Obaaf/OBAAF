@@ -110,6 +110,149 @@ followed by `||`, `&` or a pipe without `pipefail`; in a `#!` script without `-e
 `powershell` script when more commands follow it; in a parallel branch beside the publish; or under
 a `when` or `if` that does not also guard the publish.
 
+**An approval that stops a publish** (OBAAF-JEN-005, flagship slice 2d.2l). An `input` step, or a
+Declarative stage's `input`, counts for a publish on the same terms, with two differences: an input in
+the same `catchError` or `try` block as the publish, before it, still counts, because an abort skips the
+rest of the block; and a stage's `input` is asked before its `when` unless the `when` says `beforeInput
+true`. No input counts for a publish in `post { always }`, `aborted`, `failure` or another failure path,
+or in a `catch` or `finally` block. A blank, empty or `null` `submitter`, and the group `authenticated`,
+let any user who can build the job approve. Not read, and so not counted as an approval: an input whose
+abort sets a flag the publish tests, one in a `finally` block, one inside `catchError(catchInterruptions:
+false)`, and a shared-library step. A submitter held in a variable, a method parameter or a map
+variable is "cannot tell", and so is a missing approval when part of the file was not read. Two
+conditions written the same way (compared by their whole structure) count as the same condition, even
+where a variable or a file they test changes between them; inside a method the file inlines, a condition
+that reads anything but properties of `env`, `params` and `currentBuild` (`env.BRANCH_NAME`, not a bare
+`BRANCH_NAME`) is tied to that call.
+
+**Another job's artifacts** (OBAAF-JEN-010, flagship slice 2d.2m). A copy is `copyArtifacts` on any
+receiver, `step([$class: 'CopyArtifact', ...])`, or a Jenkins URL to another build's artifacts in a shell
+step or `httpRequest` (`job/b/lastSuccessfulBuild/artifact/`, a job's `ws/`, a URL kept in the file's
+`environment` or in a variable). Its arguments are read as Groovy builds them: a map given as the only
+argument or held in a local variable the file declares once, in a block around the copy, and names nowhere else, and the last of a repeated key.
+A selector moves when it is the default, `lastSuccessful`, `lastCompleted`, `latestSavedBuild`, `permalink`,
+`lastWithArtifacts`, `workspace` or `buildParameter`, a `specific` build named by anything but digits (Jenkins
+reads other text as a permalink or a build's display name), or `upstream(fallbackToLastSuccessful: true)`;
+`specific` with digits, or with the number of a `build` step the file runs and keeps in a variable it names
+nowhere else, is fixed. The copy is cleared for a publish only by an `obaaf verify release` after it and before
+that publish, run in an `sh` script as a command whose failure stops the script (the reader of slice 2d.2e: not
+in an `echo`, a comment, after `|| true`, `&`, `set +e` or `exit`, nor with `returnStatus`), under no condition
+the publish does not share (a condition on parameters alone that the copy shares excepted), not in a parallel
+branch or a `catch`, `catchError` or `warnError`. A publish in a failure path, beside the copy in a parallel
+block, or before the copy in the same `retry` block or loop is never cleared. Another digest or signature check
+(`sha256sum -c`, `cosign verify`, `gpg --verify`) makes the copy "cannot tell", because its sums may come from
+the build that was copied. Also "cannot tell": a selector, a build number, a project or a `$class` the file
+computes, a spread map (`*: m`), `downstream`, `invokeMethod`, a method pointer or computed method name, any
+other place the file names `copyArtifacts` or the `CopyArtifact` class, a copy in a method or closure (read
+where it is written), and a file whose copies, checks and publishes expand into too many to compare. Not read:
+downloads by other tools (JFrog CLI, the Artifactory and Nexus plugins, an object store's "latest" key), a URL
+built in other ways (`env.X =`, a parameter's default; a value from `environment` or a variable is put in, but
+never takes away what the text alone shows, since the shell or a `withEnv` may set it otherwise), `bat` and `powershell` checks, a check whose
+status the script tests (`if (sh(..., returnStatus: true) != 0)`), and whether the check covers the files that
+were copied. Stages are told apart by name, so two Scripted stages with one name, or computed names, are one
+stage for the severity.
+
+**A provenance check that stops the publish** (OBAAF-JEN-012, flagship slice 2d.2n). Each publish needs an
+earlier `obaaf verify release` (without `--pre-approval`) that stops it when it fails: on a line of its own in an
+`sh` script that stops at a failed command, read by the reader of slice 2d.2e, with `returnStatus` absent or
+`false`, not in a parallel branch beside the publish, not in a `catch`, `catchError` or `warnError` the publish is
+not also in, and under no condition the publish does not share. A provenance-only check (`cosign
+verify-attestation`, `gh attestation verify`, `slsa-verifier verify`, `--pre-approval`) gives medium. A publish in
+the pipeline's `post` block is never checked; one in a stage's `post` block is checked by a check in an earlier
+stage; one in a `catch` or `finally` block after a check is "cannot tell". Also "cannot tell": a check the reader
+does not vouch for (Groovy text in the script, a computed `returnStatus`, an expansion among its arguments, a path
+or wrapper, `bat`, `powershell`, `pwsh`, a line before it the reader cannot read), a publish read where a closure
+or uncalled method is written, and a check read only there. To clear it, put `obaaf verify release` on its own
+line in an `sh` step, with literal arguments, before the publish. The limits are listed in
+[bypass-attempts.md](bypass-attempts.md#2d2n-a-provenance-check-before-the-publish).
+
+**A publish that can run after a failed or skipped check** (OBAAF-JEN-011, flagship slice 2d.2o). Two cases are
+reported at high. First, a publish in a failure path: a Declarative `post` condition that runs after a failure
+(`always`, `changed`, `regression`, `aborted`, `failure`, `unstable`, `unsuccessful`, `notBuilt`, `cleanup`) or a
+Scripted `catch` or `finally` block. A publish in a stage's own `post` block is not reported when no check runs in
+that stage and a check that stops its step runs in an earlier stage before it, since a failed check skips the
+stage, post block included. Second, a check before a publish whose failure does not stop it. The checks are
+`obaaf verify ...`, `gh attestation verify`, `cosign verify...`, `slsa-verifier verify...`, `sha256sum -c` and its
+kin, `gpg --verify` and `gpgv FILE`, as a command's name or after a wrapper such as `sudo`, `env` or `timeout`.
+Each is read from the command's words by the shell reader of slice 2d.2e, and every check in a step counts. Its
+failure is ignored when the step says so: `returnStatus: true`, `|| true`, `|| :`, `|| echo`, `|| printf`,
+`|| exit 0`, a trailing `&` (not followed by `wait $!`), a pipe without pipefail set before it, `set +e` or a `#!`
+line without `-e` with more commands after it, a trap on `EXIT` or `ERR` that runs `exit 0`, or more lines after
+it in a `bat` script. It is also reported when it runs in a parallel branch beside the publish, in a `catchError`,
+`warnError` or `catch` the publish is not also in, or under a condition the publish does not share. "Cannot tell"
+covers:
+
+- a check the reader does not vouch for and no listed form decides: Groovy text in the script, a computed
+  `returnStatus`, a path to the program, a check inside `if`, after `!` or in a `&&` list, one run by another
+  program (`uv run`, `docker run`, `kubectl exec`, `ssh`, `bash -c '...'`), a line before it the reader cannot read
+  (`export PATH=...`), a script that sources a file, sets another EXIT or ERR trap, starts a here-document or
+  defines a function before it, a later `$?`, `PIPESTATUS` or bare `exit`, and a `bat` script that tests
+  `errorlevel` or may leave before the check;
+- a `powershell` or `pwsh` step, or another `#!` program, that names a check: its language is not read, so the
+  name may be text it prints;
+- a check or publish read only where a closure or uncalled method is written;
+- a publish in a Declarative `post` block under a condition on the build's result;
+- a check in a catching block when the publish runs only on a result that block may have set (`post { success }`
+  or a guard on `currentBuild.result`).
+
+To clear it, publish in a later stage or in `post { success }`, and put each check on its own line in an `sh` step
+with literal arguments and nothing that ignores its failure. The limits are listed in
+[bypass-attempts.md](bypass-attempts.md#2d2o-a-publish-after-a-failed-or-skipped-check).
+
+**A check under a variable that changes what its shell runs** (OBAAF-JEN-010, 011 and 012; decision D-135). A
+check does not clear any of the three rules when its shell may run another program than the one it names: when a
+variable that changes what a shell runs is set around the step, or written to the build's `env` anywhere in the
+file.
+
+- *The names* are `PATH` (`PATH+NAME` included: Jenkins puts the value in front of `PATH`), `HOME`, `ENV`,
+  `SHELLOPTS`, `PS4`, `PROMPT_COMMAND`, `EXECIGNORE`, `GCONV_PATH`, `ACTIONS_ALLOW_UNSECURE_COMMANDS` and those
+  beginning `BASH`, `LD_`, `DYLD_` or `PYTHON` (six of Python's that load nothing, such as `PYTHONUNBUFFERED`,
+  excepted), in any letter case, with Groovy's `\uXXXX` and octal escapes read (`'\120ATH'` is `PATH`): the names
+  the GitHub Actions rules read since slice 2d.13.
+- *Around the step*: a `withEnv` entry (through any receiver: `withEnv`, `this.withEnv`, `s.withEnv`), an
+  `environment { }` block, a matrix axis, or a credential binding's variable.
+- *Anywhere in the file*: `env.X = ...` (any assignment operator), `env['X'] = ...`, `env.X++`,
+  `env.setProperty(...)`, `put`, `putAt`, or another method of `env` that does not only read it (`with { }`,
+  `identity { }`, `putAll`, a pointer such as `env.&setProperty`). `env` is reached by its name, by
+  `getProperty('env')` or `getAt('env')` on any receiver, and by `x.env`, `x['env']` or a computed property where
+  `x` can be the script (`this`, `script`, `steps`, a closure's `owner`, `delegate` or `thisObject` and chains of
+  them, `getOwner()`, a variable given an expression that names one of these, such as `c ? this : null`). Through
+  a method's or closure's parameter, `it`, or a variable given one's `env`, which may be the script or a map with
+  an `env` key, only a write or a method that may set a variable counts (`s.env.putAll(...)`, not
+  `echo(it.env)`); but once the file calls `with`, `identity` or `tap` on the script (`this.with { it.env }`), `it`
+  and that closure's parameter count as the script everywhere in the file. A property named `env` of anything else
+  (`buildInfo.env`) counts only where it is written to. Every node of the parsed file is read for this, and every `${...}` of its
+  strings as statements, whether the walker reaches it or not (a `when { expression { } }`, a method a directive
+  calls), and so is the text the parser keeps no node for (a loop's header, a method's parameter defaults, a switch's
+  case labels, a postfix `++`).
+- *Counted the same*: a name the checker cannot read (a computed entry or key, a list held in a variable, a setter
+  given a computed name); `env` used as a value, which the checker does not follow (given to a variable, as a
+  closure's `delegate`, to a method or a list, in a ternary, returned); a call or pointer whose name is computed
+  (`"$m"(...)`, `this.&"$m"`, `invokeMethod`, a pointer to `getProperty`); a statement the parser could not read
+  that names `env` on its line or the ten after it; and a place the file names `withEnv` that the checker does not
+  read as a call (a method pointer, `options { withEnv(...) }`, a `when` expression).
+
+Such a check is "cannot tell", and the reason names the variable and its line, with two exceptions: a check whose
+failure the step already ignores stays a finding, and a `--pre-approval` check stays a medium OBAAF-JEN-012. A
+publish in a later stage's failure-path `post` block, whose only check is such a check, gets a high OBAAF-JEN-011,
+as after an `export PATH` in the script: the check may not run the reviewed checker, so nothing shows that it fails
+and skips the stage before the post block runs. A variable set around another step changes nothing; a write to
+`env` counts for every step of the file, whatever its place.
+
+Not read: what the agent's own environment holds (the controller's node properties, `tools { }`, a container's
+image, `docker.image(...).inside('-e ...')`, a pod template's `envVars`); code from outside the file that runs
+where the walker does not reach (`load` or a shared-library step in a `when` expression), which the other rules do
+not read there either (#370); `this` or `env` carried through a method's result (`me().env`) or other reflection
+the checker does not model; and a step that checks which program the shell finds (`command -v obaaf`). Some safe files get "cannot tell": a parameter or local
+variable named `env`, a copy from `env.getEnvironment()`, `env` given to a variable only to read it
+(`def e = env; echo e.X`), `println env`, `env.metaClass` read, a harmless `withEnv` in a `when` expression, a
+statement the parser cannot read near a mention of `env`, `getProperty` or a string holding the word `env`
+(`'dev env x'`) in a loop's header, a default or a case label, and names such as `PYTHON_VERSION` that the
+prefix rule counts. Before the review of #365 only an `export`
+inside the check's own script stopped the reader, so `withEnv(["PATH+X=${env.WORKSPACE}/tools"])` around
+`obaaf verify release` cleared all three rules whatever `tools` held. OBAAF's own publish template is "cannot
+tell" under all three for this reason (below).
+
 **Credentials.** `withCredentials` with every binding type, `environment` `credentials()`,
 `sshagent`, `withSonarQubeEnv`, `docker.withRegistry` (also with a computed ID),
 `configFileProvider`, `wrap` with a credential or Vault wrapper class, wrapper steps that supply
@@ -132,16 +275,181 @@ credential bound where a change request can reach it is available to the change'
 take the Jenkinsfile itself from the target branch for untrusted changes, but the workspace, the
 build scripts and the tests are still the change's own.
 
-**Untrusted values.** Groovy interpolation (`"${...}"`), concatenation or `String.format` of a
-change request's title, source branch or author name; build parameters; branch and tag names; GitLab
-and GitHub Pull Request Builder variables; values a webhook trigger reads from the request; and
-commit text read with `git log` or `git show`. They are followed through variables, `env['X']`,
-`env.getProperty('X')`, method calls such as `.trim()`, `?:`, maps, lists and method parameters.
+**Untrusted values** (OBAAF-JEN-009; flagship slice 2d.2). Text others control, built into a command or into
+Groovy code before it runs: a change request's title, source branch or author name; build parameters (a
+`booleanParam` or `choice` cannot carry text and is not counted); branch and tag names; GitLab, GitHub Pull
+Request Builder and Bitbucket Push and Pull Request variables; values a webhook trigger reads (header variables
+also under their lower-case names); pipeline-github's `pullRequest` fields; `currentBuild.changeSets` and build
+causes; an `input` step's answer; and what `git log`, `git show`, `git cat-file -p`, `git rev-list --format`,
+`git for-each-ref --format=%(subject)` print (commit text), `git diff --name-only` and `git status` (file names)
+and `git rev-parse --abbrev-ref` or `git describe` (branch names, low), run with `returnStdout`.
+
+Each value is read from its structure, not by searching its text for names. `env` is read through aliases
+(`def e = env`, `this.env`, a variable or parameter given `this`, `env.getEnvironment()`, `System.getenv`), `?.`,
+comments and any letter case (Jenkins reads environment names without regard to case); `env[n]` and `env."${n}"`
+through a variable that only holds a literal, and a computed name is cannot tell; a declared string parameter read
+as `env.NAME` is a parameter. `env.getEnvironment()` and `System.getenv()` as a whole are every environment
+variable. A value is followed through variables, `def (a, b) = [...]`,
+`env.X = ...`, `env['X'] = ...`, `env.setProperty`, `binding.setVariable`, `this.X = ...`, `withEnv` entries
+(written with `+` too), `sb << x` (chained too), `.append` (chained too), `.add` and `.put`, a closure's or a `for`
+loop's parameter over the value (`each`, `collect`, `with` and other iteration methods; an implicit `it` holds the
+value in the body of the closure it belongs to, nested loops and closures called with it included, and never as a
+name for the whole file), a closure held in a variable, an alias of one or a map and called, what a method of the file returns (twelve
+methods deep, then cannot tell), named arguments into a `Map` parameter and varargs. A result that is a number, a
+boolean or a digest (`.length()`, `.toInteger()`, `as Integer`, `==`, `.contains()`, `.encodeBase64()`), a
+ternary choosing between literals, `URLEncoder.encode` and a `replaceAll('[^A-Za-z0-9._-]', '')` whitelist (only
+`replaceAll`, and only a class of letters, digits and `._@:+,/-`) carry no text. A value from a caller outside the
+file (a parameter of a method nothing here calls, inside that method; a local copy of one, an `env.X` set from
+one, the map a `vars/` step's closure fills through `body.delegate` or `body.setDelegate`) is cannot tell. So is an
+interpolation the parser cannot read (command syntax such as `${tool 'M3'}` is read as a statement), and so is any
+value past the reader's budget (per value, and per file, about 300,000 steps): past it the value is read by the
+names in its text and is at least cannot tell, never a pass. A method calling itself returns what it is given.
+Values nested deeper than it reads are read by the names in their text, as before.
+
+The sinks are `sh`, `bat`, `powershell` and `pwsh` (also as `steps.sh`, through a variable holding `this`, a
+pointer such as `this.&sh`, and `sh(*: opts)`), `bat`'s `%NAME%` (and `%NAME:~0,5%`, in any letter case, for a
+name in the environment), which cmd expands before it parses the line (so `bat 'echo %CHANGE_TITLE%'` is not the
+safe form it is in `sh`), the Docker Pipeline plugin's
+`docker.build`, `image.run`, `withRun`, `push`, `tag` and `pull`, which it runs through a shell step, and
+`inside(args)`, whose args become `docker run` options; Publish Over SSH's `execCommand` and SSH Steps' `command`;
+`"...".execute()`; `load`, `evaluate`, `Eval.me`, a `GroovyShell` or script engine and Job DSL's `scriptText`
+(high); and parameters passed to another job with `build` (medium), in a list held in a variable, in the
+`[$class: 'StringParameterValue', ...]` form or built from `params`.
+
+Not read (each is a test case with its reason in `tests/test_jenkins_injection.py`): taint is kept by name for the
+whole file and never cleared, so a name reused elsewhere, or reassigned to a constant, is still reported (an
+implicit `it` excepted); keys of one map are not told apart, and a map's property is followed only when read as
+that property; a container filled through another name (an alias, a parameter, `with`) is not followed; a closure
+held in a list, passed to a method or curried is not followed to its parameters; a parameter's default value is not
+read; `env` inside a map or list, `docker` in another variable and `Runtime.exec` are not read; a method's own
+parameter named `params` or `env` is read as the build's; a check of the value before it is used (`==~`,
+`when { branch ... }`, an `if`, the webhook's `regexpFilter`) is not read; quoting done in Groovy is not
+recognised, and a whitelist that keeps `-` can still let the value add an option where it starts a word; the
+contents of workspace files (`readFile`, `readJSON`, the output of commands other than git) are not counted as
+untrusted; text written with `writeFile` and run later is not followed; a computed step name and `invokeMethod`
+make the file cannot tell; a closure variable given to `each(f)`, a closure in a map called through an index, a `bat`
+script variable assigned more than once, `this.sb << x`, `def s = sb << x` and an alias of
+`env.getEnvironment()` used whole are not followed.
 
 **AI agents.** An agent CLI in a shell step (the patterns in `src/obaaf/data/detection.yaml`), a
 repository script that runs one, the AI Agent plugin's `aiAgent` step, steps and commands declared
 in the configuration, and stages declared with `OBAAF_LANE = 'agent'`. Not recognizing an agent is
 never evidence that a stage runs none.
+
+**Workspaces and agents** (flagship slice 2d.2j). OBAAF-JEN-003 asks whether what an AI agent wrote
+can reach a push, a `build` step or a publish without review, so the checker records the workspace
+every step runs in:
+
+| In the Jenkinsfile | Workspace |
+| --- | --- |
+| a top-level `agent` | one, for every stage that has no `agent` of its own, the pipeline's `post` and the stages' `post` blocks |
+| a stage's own `agent` (label, node, any, docker, dockerfile, kubernetes), `node()`, a `matrix` agent | a new one |
+| `agent none` on a stage, `dir()`, `container()`, `docker.image(...).inside`, `withDockerContainer` | the enclosing one |
+| a docker or dockerfile agent with `reuseNode true`, or a `reuseNode` the file does not fix | the enclosing one |
+| `ws()` | another directory on the same node, written by the same user: counted as shared |
+| `node(POD_LABEL)` (`"${POD_LABEL}"`, or the template's own `label:`: the same text, variable or literal) inside `podTemplate` | the pod's own, gone with the pod unless its `workspaceVolume` is a claim, a host path or an NFS export; pods on one named claim, or one export of one server, share it. Any other label there is an ordinary agent |
+| a method nothing in the file calls, the body of a step whose code is not in the file | one of its own, shared by everything in it |
+| a closure, where it is written | one of its own; where the file calls it, the caller's |
+
+The table follows the Jenkins handbook ([Pipeline Syntax](https://www.jenkins.io/doc/book/pipeline/syntax/):
+the top-level agent "specifies where the entire Pipeline ... will execute", and `reuseNode` runs the
+container "on the node specified at the top-level of the Pipeline, in the same workspace"; [Using
+Docker with Pipeline](https://www.jenkins.io/doc/book/pipeline/docker/); read on 2026-11-20). Where the
+handbook says nothing (that a stage's `post` runs in the stage's workspace, that a nested stage
+without an agent runs in its parent's), the checker takes the reading under which more steps share a
+workspace.
+
+The verdicts:
+
+- an agent and an effect in the same workspace, the effect running after the agent (later in the
+  file, in a sibling parallel branch, or inside a loop, `retry` or `waitUntil` around both): **high**;
+- a `stash` taken after the agent and `unstash`ed before the effect (the same name, or a name the file
+  does not fix), or `archiveArtifacts` brought back with `unarchive`: **high**;
+- the effect before the agent in a workspace Jenkins keeps between builds: **medium**, because what
+  the agent leaves there (a Git hook, `.git/config`, a script the effect runs) is in place for the
+  effect in the next build. A fresh pod, or `deleteDir()`, a full `cleanWs()` (or the `WsCleanup`
+  step) or a checkout with `WipeWorkspace` that certainly runs before the effect (or a clean in a
+  `post { always }` or `cleanup` block after the agent), clears it; `cleanWs` with `patterns`,
+  `externalDelete` or a `cleanWhen...: false`, and `CleanBeforeCheckout` (`git clean`, which keeps
+  `.git`), do not;
+- the agent and the effect in separate allocations that may land on the same machine (the same label,
+  label expressions that require a common label such as `linux && docker` and `linux`, an expression
+  that requires none such as `sandbox -> gpu`, any agent, a label the file does not fix, the same
+  `customWorkspace` or `ws()` path, or pods whose workspace claim the file does not fix):
+  **unknown**, because Jenkins keeps a job's workspace directory on an agent between allocations and
+  which agents carry which labels is controller configuration;
+- different labels, or separate pods with their own workspace: no finding.
+
+OBAAF-JEN-002 counts an AI agent's work like a change request's: an agent stage and a stage that
+holds credentials or publishes on the same persistent label, or on labels that require a common one,
+is a medium finding. Label expressions are parsed with Jenkins's operators (`!`, `&&`, `||`, `->`,
+`<->`, brackets). One that names the built-in node where a match can require it and holds on that
+node (`built-in || linux`, `linux -> built-in`, `built-in && !master`: since Jenkins 2.307 the built-in
+node carries `built-in` and not `master` unless the old label was kept) can place work on the
+controller, and so can a docker or dockerfile agent with `label 'built-in'`, whose workspace is under
+`$JENKINS_HOME` (when the controller itself runs in a container, Docker Pipeline also passes it
+`--volumes-from`). A label expression that requires no label (`!windows`) is read like `agent any`.
+
+OBAAF-JEN-006 reads docker run options as docker splits them: grouped short options (`-itv`), values
+written with `=` or attached (`-v/path`), `--mount type=bind,source=...`, `CAP_`-prefixed capabilities
+and `--device`, and `--privileged=false` is not privileged. A host mount of `/`, a container runtime's
+socket, the kernel's file systems (`/proc`, `/sys`), the runtimes' state (`/var/lib/docker` and others),
+rootless Docker's socket folder (`/run/user/...`), the controller's home (`/var/lib/jenkins`,
+`/var/jenkins_home`) and an agent's root (`/home/jenkins/agent`), whole or any part but a build's caches
+(`.m2`, `.gradle`, `.cache`, `tools` and others; the Git plugin's mirrors under `caches` count), a user's whole home (`/home/jenkins`), a home's
+credential folders (`.ssh` but its `known_hosts`, `.docker`, `.kube`, `.aws`, `.gnupg`) and credential
+files (`.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`), or a whole system folder (`/run`, `/var/run`, `/dev`, `/etc`, `/root`, `/home`, `/var`,
+read-only too; only the folders that hold programs, such as `/usr` and
+`/opt`, are ordinary read-only) reaches the host. A folder inside one (`/root/.m2`,
+`/etc/localtime:ro`, `/dev/shm`, `/var/jenkins_home/.m2`) and read-only `/sys/fs/cgroup` do not.
+`--volumes-from` is an unknown. Jenkins splits `args` itself, not exactly as a shell does, so the
+options are read both as a shell splits them and between blanks, and anything either reading finds
+counts; a backslash in them is an unknown. Booleans are read as docker reads them (`--privileged=t` is
+privileged), paths are cleaned (`//var/run`), `--mount` fields are read as CSV with keys in any case,
+`--use-api-socket` mounts the Docker socket, and Windows drive roots and the Docker named pipe count.
+Pod specs are read as YAML, which also reads JSON: string booleans count, a projected
+`serviceAccountToken` volume mounts a token whatever `automountServiceAccountToken` says, only the
+first document is read for the token, and a spec nested too deeply or too large to read is an unknown.
+`podTemplate`'s own `privileged`, `hostPathVolume`, `hostNetwork` and a `hostPathWorkspaceVolume`
+count; a Kubernetes agent with no pod spec at all mounts the service account token.
+
+OBAAF-JEN-007 passes a stage whose agent's shell steps run in a container started with exactly one
+network, `none`, and nothing that reaches the host. A host path mounted into that container may hold
+a socket, which is a way out whatever the network, so the finding stays and names the paths. A step
+that Docker Pipeline does not launch in the container (`aiAgent`, which the plugin runs itself) is not
+limited by it.
+
+**What the checker cannot decide here.** Reported as unknown, or left as a finding:
+
+- which machines carry which labels, whether a persistent agent is shared with other jobs, and what a
+  pod template defined on the controller (`inheritFrom`) mounts;
+- `matrix` cells: each cell has its own allocation, but the checker reads the cells as one, so an
+  agent in one cell and a push in another, kept apart only by `when` conditions on the axes, is
+  reported as sharing a workspace;
+- what an agent leaves outside the workspace on a persistent agent (`$HOME/.gitconfig`, tool caches):
+  a clean workspace does not remove it, which is why OBAAF-JEN-002 reports agent work on shared labels;
+- a later step outside the container that runs what an agent with no network wrote into the
+  workspace: OBAAF-JEN-007 judges where the agent runs, not what is done with its output;
+- what reaches an effect through values rather than files: the agent's output read into a variable
+  and passed to `build job:` parameters or a commit message, or `copyArtifacts` of the running build;
+- agent commands and effects the checker does not recognise (a push through `/usr/bin/git`, a
+  quoted option value before `push`, `gh api`, a repository script or Makefile that runs one): the
+  recorded attempts in [bypass-attempts.md](bypass-attempts.md#2d2j-agent-stages-and-workspaces)
+  list them, and #330 tracks them;
+- a closure handed to code outside the file, which is read where it is written, in a workspace of
+  its own;
+- a pod spec whose YAML redefines the plugin's workspace volume, and a label built from an
+  `environment` value (read as a label the file does not fix);
+- labels are compared without letter case, so `Built-In` counts as the built-in node, although Jenkins
+  compares labels with case;
+- a build's caches and `tools` under the controller's home or an agent's root are ordinary even when
+  mounted writable, though other builds on that machine use them, and a job named `tools` under
+  `/home/jenkins/workspace` is read as such a folder;
+- a `node()` whose literal label is a pod template's literal label is read as that pod, though a static
+  agent with the same label may take the build (only `POD_LABEL` is certain);
+- option-like text inside a quoted `--label` or `-e` value can be read as an option, because the
+  options are also read split between blanks; a workspace claim mounted read-only by the agent's pod
+  still counts as shared.
 
 **Publishing.** The upload commands shared with the workflow checker, plus `mvn deploy`, `gradle
 publish`, JFrog, Helm, crane and skopeo pushes, `curl --upload-file`, `docker.image(...).push()`
@@ -269,6 +577,17 @@ or start each tag build by hand, in which case that person cannot approve the re
 The publish job takes no parameters. It finds the build that started it from its own start cause
 (`currentBuild.getBuildCauses`), refuses to run if a person started it, and requires that build to be
 in the tag project. The tag is the name of that build's job, resolved to a commit through your SCM.
+The publish job writes that commit to `release-sha.txt` before copying the build's `dist/` artifacts.
+Both verification steps use `--revision-file release-sha.txt`. Set `OBAAF_REVISION` to a reviewed
+OBAAF commit that supports this option. Each verification step, and the signing step, first checks that the shell
+finds `obaaf` in the job’s virtual environment, where the Resolve stage installed the checker from that commit;
+nothing checks that file again after the install. The publish pipeline disables
+Declarative stage restarts. A fresh publish run must start from the tag build and collect a new approval.
+OBAAF's own rules cannot tell about this template under OBAAF-JEN-010, 011 and 012: both checks run under
+`withEnv(["PATH+OBAAF=..."])`, a `PATH` change can make a check's shell run another program, and the checker does
+not read the `command -v` step, which shows only which file the shell finds (decision D-135). Jenkins coverage is advisory, so this
+changes no exit status.
+
 At the end, the verifier checks the same facts again from the controller's JSON for both builds,
 which the publish job fetches with a read-only API token:
 

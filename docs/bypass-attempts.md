@@ -22,10 +22,11 @@ Where a way past depends on what GitHub does and the documentation does not say,
 | **2d.2h** | **The repository and instruction-file rules: OBAAF-REPO-001, OBAAF-REPO-002, OBAAF-INS-001** | **2026-11-15** | `tests/test_repo_instruction_bypasses.py` |
 | **2d.2i** | **Jenkins files and credentials: which Jenkinsfiles are read, OBAAF-JEN-001, 013, 014, 015** | **2026-11-15** | `tests/test_jenkins_files_credentials.py` |
 | **2d.2k** | **Pipeline code and pins: OBAAF-JEN-004, 008** | **2026-11-17** | `tests/test_jenkins_code_pins.py` |
-| 2d.2j (open) | Where pipeline code runs and agent stages: OBAAF-JEN-002, 003, 006, 007; [attempts recorded, not yet fixed](#2d2j-open-agent-stages-attempts-recorded-not-yet-fixed) | 2026-11-17 | |
-| Still open | The rest of 2d.2: OBAAF-JEN-005, 009 to 012; see [the plan](flagship.md) | | |
+| **2d.2j** | **Agent stages and workspaces: OBAAF-JEN-002, 003, 006, 007** ([below](#2d2j-agent-stages-and-workspaces)) | **2026-11-17, 2026-11-20** | `tests/test_jenkins_workspaces.py` |
+| **2d.2l** | **Release approvals: OBAAF-JEN-005** ([below](#2d2l-release-approvals)) | **2026-11-21** | `tests/test_jenkins_approvals.py` |
+| **2d.2** | **Untrusted text in a command: OBAAF-JEN-009** ([below](#2d2-untrusted-text-in-a-command)) | **2026-11-22** | `tests/test_jenkins_injection.py` |
 
-The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs), [2d.2e](#2d2e-release-and-effect-jobs), [2d.2f](#2d2f-pins-egress-and-declarations), [2d.2g](#2d2g-the-settings-rules), [2d.2h](#2d2h-the-repository-and-instruction-file-rules), [2d.2i](#2d2i-jenkins-files-and-credentials), [2d.2k](#2d2k-pipeline-code-and-pins) and the open [2d.2j](#2d2j-open-agent-stages-attempts-recorded-not-yet-fixed).
+The rest of this page is tranches 2d.2b, [2d.2c](#2d2c-what-a-run-checks-out), [2d.2d](#2d2d-triggers-scripts-and-release-jobs), [2d.2e](#2d2e-release-and-effect-jobs), [2d.2f](#2d2f-pins-egress-and-declarations), [2d.2g](#2d2g-the-settings-rules), [2d.2h](#2d2h-the-repository-and-instruction-file-rules), [2d.2i](#2d2i-jenkins-files-and-credentials), [2d.2k](#2d2k-pipeline-code-and-pins) and [2d.2j](#2d2j-agent-stages-and-workspaces).
 
 ## 2d.2b: what a job can reach
 
@@ -2471,9 +2472,289 @@ A second Opus 5.5 sub-agent, which wrote none of it either, reviewed the fixed v
 
 Every class is fixed or stated, and each probe is a test case with what is reported now (`tests/agent_code_review_cases.py`, run by `tests/test_agent_code.py`). Differences from what the reviewer wanted, each with its reason in the case file: a value put into a string's quotes is "cannot tell", as the reviewer's own finding A03 showed (two of its probes wanted it quiet); a list held in a name the code does not change is read rather than "cannot tell"; an unquoted PowerShell variable stays "cannot tell" (F-274); PHP's single quotes keep `\x2d` as text (checked with `php -r`), so that probe is not a way past; stated limits for program names given by escapes, pieces or run-time paths, lists in mappings, Perl's `exec { }`, AppleScript, Tcl, and a shell that runs another interpreter.
 
-## 2d.2j (open): agent stages, attempts recorded, not yet fixed
+## 2d.13: what an earlier step writes to GITHUB_ENV
 
-Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`, kept here for the run that takes 2d.2j: 71 ways past, 14 false positives, 3 slow cases, 23 held. The classes are in [the plan's entry for 2d.2j](flagship.md). None is fixed; the case files themselves were not kept, so each row says what the file did. OBAAF-JEN-002 and 006 have no recorded attempt yet (reviewer A was stopped by a safety classifier before its first case).
+OBAAF-GHA-016 (and OBAAF-GHA-021's checks and OBAAF-GHA-017's provenance commands, which use the same reader) vouched for a check after an earlier step that wrote `PATH=...` to `GITHUB_ENV` (F-278, D-125). The runner's handling was read from actions/runner v2.338.2 and shown on a GitHub-hosted `ubuntu-24.04` runner by CI's job `github-env-premise` (run 44711052227): a stand-in `obaaf` put first on the PATH through the file ran in place of the check, and after `SHELLOPTS=noexec` a step ending in `exit 1` succeeded without running.
+
+One Opus 5.5 sub-agent that wrote none of it attacked five versions, running each bash and dash behaviour it relied on against a mock set of runner files:
+
+| Pass | Attempts | Ways past (root causes) | Found |
+| --- | --- | --- | --- |
+| 1 | about 115 | 4 | `DYLD_...` on macOS; `$GITHUB_\<line break>ENV`; the output file's path changed into the env file's (the runner names a step's files side by side with one suffix); a write in the step's `shell` |
+| 2 | about 92 | 5, and a slow case | other copies of the output file's path (`set --`, `for`, `read`, `printf -v`, a name reference, `sed`); a substitution nested in `${...}`; a continued line in an `env` value; a write in the job's `env` or matrix; `$'GITHUB_\x45NV'`; two quadratic regular expressions |
+| 3 | about 54 | 4 | `tee`'s own output sent to the env file; `$'\0012'` in an `sh` step (dash); `1<>`, which writes over an earlier line; a container's `env` |
+| 4 | about 39 | 1 | a continued line splitting `<>` |
+| 5 | about 21 | 0 | |
+
+The second version searched for listed constructs; from the third on, every file command's variable in a bash script is read with the lexer and accepted only as a plain redirection target or `tee`'s file, which also removed most of the second version's false positives. Each way past is a test in `tests/test_github_env_steering.py`. Stated and not fixed: a name or a path a script assembles otherwise (a glob over the runner's temporary folder, `env | sed`, `/proc` through a group redirected to an output), what a program or action an earlier step runs writes, and a line break that a variable, a file or a command's output puts in a value at run time. Known false positives, by design: Python, PowerShell or an action that names a file command, a tool given the output file's path, `options: -e TZ=UTC` on a container, and `&&\` with no space before the backslash in a script that writes `GITHUB_ENV`.
+
+## 2d.14: a job that may publish, and image pushes
+
+OBAAF-GHA-006 was silent on a job outside the release lane that restores a cache and then holds a publishing credential (#289, found by the zizmor parity test); the slice adds the `capability-restores` and `capability-needed-job-restores` cases, and image pushes the release lane did not read (D-126). One Opus 5.5 sub-agent that wrote none of it attacked each version, with the workflows of 20 public projects (sparse clones of `.github`) diffed against `flagship` each time and buildx v0.39.0's own `bake --print` used to confirm how it reads outputs and overrides:
+
+| Pass | Attempts | Ways past | False positives | Found |
+| --- | --- | --- | --- | --- |
+| 1 | about 230 | 13 | about 16 | permissions a caller grants a called job not counted; `workflow_call` not counted for `contents: write`; options before `buildx`/`imagetools`; any expression in an output or bake override, a cache import (`--cache-from type=registry`) or `type=registry` anywhere on a line taken for a push (two docker/buildx workflows became release jobs); a local action counted as a cache step though its steps were read; capability and release findings side by side; the new command pattern tripling the time of a 120 KB line; the sample's numbers misstated |
+| 2 | about 270 | about 28 (8 kinds) | about 7 | expressions in `-o`/`--output` and bake's `--set` not read as in inputs; an expression in a bake key split by the key reader; bake's `+=`; quoted CSV fields and trimmed keys; bounding the existing `--push` pattern made a long continued command fall silent; a nested local action recognised by name only; `*.args.PUSH=true`; `--outputs=`; `docker image build`, `docker builder build`, `docker buildx b` |
+| 3 | about 370 | 7 (3 kinds), and a slow case | 3, documented | a chain of `-o,` that made the command pattern quadratic (132 s at 100 KB); a `;` or `&` in a quoted argument hid the output; an expression with spaces before `type=` on a command line; a contrived name collision between an unreadable nested action and the step after it |
+| 4 | about 300 | 3 quoting edge cases (an escaped quote inside a quoted argument, the `'\''` idiom, a `}` inside an expression) and commands 8 to 16 KB long | 0 | a crafted line of `docker build` and `-o,` chains, linear but 60 times `flagship`'s cost; the output piece is now 256 characters and stops at a space before the next option |
+| 5 | about 250 | 0 new (an output longer than 256 characters before its `type=` or `push=`, stated) | 0 | an expression could hold a space and the next option, so a crafted line of `${{ docker build -o ... }}` blocks took minutes; an expression piece now stops at a space before an option too. On every line the reviews built, a search costs at most about six times the older `--push` pattern's on the same line (a full check about four times), and it is linear; a sixth look confirmed the fix and lost nothing of 223 probes |
+
+Each way past and false positive is a test in `tests/test_gha006_may_publish.py`, except the name collision. Stated and not fixed: an unreadable local action inside a composite action followed at once by a step named after it (`<name>: ...`), which is then taken as read; options written before `buildx` or `imagetools`; an output option more than 8,192 characters into its command or after an unquoted `;`, `&` or `|` in it; what a bake file says; a credential passed under another name to a called workflow that restores a cache; `contents: write` on other events; permissions nobody declares; a `$/` action whose file cannot be read is not a cache step for a release job (older than this slice); an expression in a `docker` output that a comma could turn into another type; image pushes by other tools.
+
+## 2d.2j: agent stages and workspaces
+
+Run `tern`, 2026-11-20, from `flagship` at `1261b92`. Two sets of attempts: reviewer B's 111 on OBAAF-JEN-003 and 007 at `9b806db` (run `brant`, 2026-11-17, kept below as they were recorded), and 115 by a new Opus 5.5 reviewer on OBAAF-JEN-002, 003, 006 and 007 at `d9e268d`, the first commit of this slice.
+
+**What changed.** The classes behind most of reviewer B's ways past were that OBAAF-JEN-003 read an agent and an effect as sharing a workspace only inside one stage (C1), and that it cannot follow what a script's values are (A1). This slice builds C1: the model records a workspace for every step, and the rule follows a workspace across stages, post blocks, `reuseNode`, `ws()`, `stash` and `unarchive`; the table is in [jenkins.md](jenkins.md). A1, and commands the checker does not recognise as an agent or an effect, are not this slice's: they are tracked in #330.
+
+Of reviewer B's rows, these are fixed and tested in `tests/test_jenkins_workspaces.py`:
+- ways past B002 to B010 and B107: high (B006 through the stash);
+- false positives B073 to B075 and B102: no finding;
+- false positive B103 (a push before the agent): medium, not no finding. Jenkins keeps the workspace between builds, so what the agent leaves there (a Git hook, `.git/config`) is in place for the push in the next build. It clears in a fresh pod or after a full clean;
+- B080 still holds (a `ws()` on the same node is written by the same user);
+- B077 and B078 (a container with `--network none`, `unshare --net`) are not cleared. A socket mounted into the container is a way out whatever the network. Whether `unshare` can be undone depends on what the user may run (`sudo`, a setuid helper), which the file does not show;
+- B076 (a helper method's parameter) is #330's class.
+
+The other rows are commands and values the checker does not recognise (#330).
+
+The new review: 43 ways past, 7 false positives, 2 slow, 3 unsure and 60 held. The review-driven commit fixed 34 of the ways past, 2 of the false positives and both slow cases, each by class:
+- **Docker run options** are read as docker splits them (grouped short options, attached values, `--mount`, `CAP_` names, `--device`, `--privileged=false`), not by a list of patterns.
+- **Pod specs** are parsed as YAML, which also reads JSON. `podTemplate`'s own arguments count.
+- **`agent none` on a stage** keeps the agent the steps run on.
+- **`node(POD_LABEL)`** is the pod itself.
+- **`retry` and `waitUntil`** repeat their body.
+- **Persistent pod workspace volumes** are kept between pods and builds.
+- **A partial `cleanWs`** is not a clean.
+- **Label expressions** are compared by the labels they require.
+- **Indexes** replace the scans that made a 1.4 KB file take 12.5 s.
+
+Not fixed and listed in jenkins.md: matrix cells (R104), values that carry an agent's output (R029 to R031), `copyArtifacts` of the running build (R027), a later step on the host running what a no-network agent wrote (R076), what an agent leaves outside the workspace (R106), options in a variable (R078, R079), and a matrix axis as a label (R093). The case files are not kept in the repository; the tests hold the cases that were fixed.
+
+| Id | Rule | What the file does | Result at `d9e268d` | Verdict | After the fixes (statuses of 002, 003, 006, 007) |
+| --- | --- | --- | --- | --- | --- |
+| R001 | 003 | top agent; Fix then Push | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R002 | 003 | `agent{node{label}}` | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R003 | 003 | `retry{push; claude}` | M | way past | fixed: high; 2:unknown 3:fail 6:n/a 7:fail |
+| R004 | 003 | `for{push; claude}` | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R005 | 003 | `waitUntil{push; claude}` | M | way past | fixed: high; 2:unknown 3:fail 6:n/a 7:fail |
+| R006 | 003 | matrix, no agent, then Push | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R007 | 003 | matrix agent, Fix+Push per cell | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R008 | 003 | stage docker, no reuseNode | U | held | 2:unknown 3:unknown 6:pass 7:fail |
+| R009 | 003 | `reuseNode(true)` | H | held | 2:unknown 3:fail 6:pass 7:fail |
+| R010 | 003 | `reuseNode 'true'` | H | held | 2:unknown 3:fail 6:pass 7:fail |
+| R011 | 003 | `docker image:, reuseNode: true` | H | held | 2:unknown 3:fail 6:pass 7:fail |
+| R012 | 003 | `reuseNode false` | U | held | 2:unknown 3:unknown 6:pass 7:fail |
+| R013 | 003 | same customWorkspace, different labels | U | held | 2:unknown 3:unknown 6:n/a 7:fail |
+| R014 | 003 | same `ws('/srv/ci/shared')`, different labels | P | way past (minor) | fixed: unknown; 2:unknown 3:unknown 6:n/a 7:fail |
+| R015 | 003 | node in node, same label | U | held | 2:unknown 3:unknown 6:n/a 7:fail |
+| R016 | 003 | `.inside` agent, push on host | H | held | 2:unknown 3:fail 6:pass 7:fail |
+| R017 | 003 | withDockerContainer, then publish | H | held | 2:unknown 3:fail 6:pass 7:fail |
+| R018 | 003 | podTemplate, two `container()` | H | held | 2:pass 3:fail 6:pass 7:fail |
+| R019 | 003 | 2 pods, same PVC workspaceVolume | P | way past | fixed: unknown; 2:pass 3:unknown 6:pass 7:fail |
+| R020 | 003 | k8s PVC workspace, push before agent | P | way past | fixed: medium; 2:pass 3:fail 6:pass 7:fail |
+| R021 | 003 | podTemplate PVC, push before agent | P | way past | fixed: medium; 2:pass 3:fail 6:pass 7:fail |
+| R022 | 003 | stage `agent none`, post push | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R023 | 003 | parallel own agents, failFast | U | held | 2:unknown 3:unknown 6:n/a 7:fail |
+| R024 | 003 | `node` inside `script` | U | held | 2:unknown 3:unknown 6:n/a 7:fail |
+| R025 | 003 | stash/unstash map forms | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R026 | 003 | stash name from a variable | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R027 | 003 | archiveArtifacts then copyArtifacts (same build) | P | way past (unsure) | not fixed: listed as a limit (copyArtifacts of the running build); 2:unknown 3:pass 6:n/a 7:fail |
+| R028 | 003 | archiveArtifacts then `unarchive` | P | way past | fixed: high; 2:unknown 3:fail 6:n/a 7:fail |
+| R029 | 003 | `env.NOTES=readFile` into a build job parameter | P | way past | not fixed: values, #330; 2:unknown 3:pass 6:n/a 7:fail |
+| R030 | 003 | file text into a commit message, then push | P | way past (minor) | not fixed: values, #330; 2:unknown 3:pass 6:n/a 7:fail |
+| R031 | 003 | claude stdout into a build job parameter | P | way past | not fixed: values, #330; 2:unknown 3:pass 6:n/a 7:fail |
+| R032 | 003 | stash tree-a / unstash tree-b | P | held | 2:unknown 3:pass 6:n/a 7:fail |
+| R033 | 003 | stash in a later parallel branch | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R034 | 003 | cleanWs INCLUDE pattern | P | way past | fixed: medium; 2:unknown 3:fail 6:n/a 7:fail |
+| R035 | 003 | post always `cleanWs(cleanWhenSuccess:false)` | P | way past | fixed: medium; 2:unknown 3:fail 6:n/a 7:fail |
+| R036 | 003 | cleanWs EXCLUDE `.git/**` | P | way past | fixed: medium; 2:unknown 3:fail 6:n/a 7:fail |
+| R037 | 003 | deleteDir under `if` | M | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R038 | 003 | deleteDir in catchError | M | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R039 | 003 | `dir('build'){deleteDir}` | M | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R040 | 003 | post always `cleanWs()` | P | held | 2:unknown 3:pass 6:n/a 7:fail |
+| R041 | 003 | cleanWs notFailBuild | P | held (unsure) | 2:unknown 3:pass 6:n/a 7:fail |
+| R042 | 003 | cleanWs in a `when` stage | M | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R043 | 003 | publish; agent in post failure | M | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R044 | 003 | docker agent, push before agent | M | held | 2:pass 3:fail 6:pass 7:fail |
+| R045 | 003 | method parameter carries the command | not applicable | way past (B057's class) | not fixed: #330; 2:unknown 3:n/a 6:n/a 7:n/a |
+| R046 | 003 | two closures in one node | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R047 | 003 | two unknown-step bodies | U | held | 2:unknown 3:unknown 6:unknown 7:fail |
+| R048 | 003 | closure variable in two nodes | U | held | 2:unknown 3:unknown 6:n/a 7:fail |
+| R049 | 003 | library step body inside node | M | held | 2:unknown 3:fail 6:unknown 7:fail |
+| R050 | 003 | two methods nothing calls | U | held | 2:unknown 3:unknown 6:n/a 7:fail |
+| R051 | 003 | dir+timeout+retry after agent | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R052 | 003 | scripted parallel map | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R053 | 003 | effect closure called after agent | H | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R054 | 006/007 | `-v /var/run:/var/run` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R055 | 006/007 | `--mount type=bind,source=/` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R056 | 006/007 | `-v/var/run/docker.sock` (no space) | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R057 | 006/007 | `--volumes-from` | P/P | way past (unsure) | fixed: JEN-006 unknown, JEN-007 not cleared; 2:pass 3:pass 6:unknown 7:fail |
+| R058 | 006/007 | `--cap-add CAP_SYS_ADMIN` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R059 | 006/007 | `--cap-add SYS_MODULE` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R060 | 006/007 | `--device /dev/sda` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R061 | 006/007 | `label=disable`, `systempaths=unconfined` | P/P | unsure | fixed: JEN-006 high; 2:pass 3:pass 6:fail 7:fail |
+| R062 | 006/007 | `--volume "/:/host"` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R063 | 006 | containerd.sock mount | 006 P, 007 F | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R064 | 007 | `-v /tmp:/tmp` | P | unsure | JEN-007 not cleared; the finding names the mounted path; 2:pass 3:pass 6:pass 7:fail |
+| R065 | 006/007 | `--userns host` | H/F | held | 2:pass 3:pass 6:fail 7:fail |
+| R066 | 006 | `--privileged=false` | H | false positive | fixed: no finding; 2:pass 3:pass 6:pass 7:pass |
+| R067 | 007 | `--net=none` | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R068 | 007 | `--network-alias` | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R069 | 007 | `--network container:x` | F | held | 2:pass 3:pass 6:pass 7:fail |
+| R070 | 007 | `--add-host` | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R071 | 006/007 | `-itv docker.sock` | P/P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R072 | 006 | `--network "host"` | 006 P | way past | fixed; 2:pass 3:pass 6:fail 7:fail |
+| R073 | 007 | `aiAgent` step under `--network none` | P | way past | fixed: JEN-007 not cleared; 2:pass 3:pass 6:pass 7:fail |
+| R074 | 007 | `sandbox.inside` (library object) | U | held | 2:unknown 3:unknown 6:unknown 7:unknown |
+| R075 | 007 | stage `agent none` under top-level docker `--network none` | F | false positive | fixed: pass; 2:pass 3:pass 6:pass 7:pass |
+| R076 | 007 | gradlew on the host runs files the no-network agent wrote | P | way past (design) | not fixed: listed as a limit; 2:unknown 3:pass 6:pass 7:pass |
+| R077 | 007 | AI step in stage post | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R078 | 007 | args variable holding `'--network none'` | F | false positive (minor) | not fixed: computed options stay a finding; 2:pass 3:pass 6:unknown 7:fail |
+| R079 | 007 | `"--network ${NET}"`, `NET='none'` | F | false positive (minor) | not fixed: computed options stay a finding; 2:pass 3:pass 6:unknown 7:fail |
+| R080 | 007 | build `--network host`, run `none` | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R081 | 007 | withDockerContainer `args:` | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R082 | 007 | `withRun` (body runs on host) | F | held | 2:unknown 3:pass 6:n/a 7:fail |
+| R083 | 006 | podTemplate+node(POD_LABEL), token mounted | P | way past | fixed: high; 2:pass 3:pass 6:fail 7:fail |
+| R084 | 006 | declarative k8s token (control) | H | held | 2:pass 3:pass 6:fail 7:fail |
+| R085 | 006 | privileged; AI in `agent none` stage | M | way past | fixed: high; 2:pass 3:pass 6:fail 7:fail |
+| R086 | 006 | R085 without `agent none` | H | held | 2:pass 3:pass 6:fail 7:fail |
+| R087 | 006 | `hostPathVolume` docker.sock | P | way past | fixed: high; 2:pass 3:pass 6:fail 7:fail |
+| R088 | 006 | `containerTemplate(privileged:true)` | P | way past | fixed: high; 2:pass 3:pass 6:fail 7:fail |
+| R089 | 006 | JSON spec: privileged, automount false | H for the token | way past | fixed: privileged found, token not; 2:pass 3:pass 6:fail 7:fail |
+| R090 | 006 | JSON spec privileged, mvn build | P | way past | fixed: high; 2:pass 3:n/a 6:fail 7:n/a |
+| R091 | 002 | `node('!windows')` | label U | way past | fixed: the unknown says the expression requires no label; 2:unknown 3:pass 6:n/a 7:fail |
+| R092 | 002 | `def where='built-in'; node(where)` | floating U | way past | fixed: high; 2:fail 3:pass 6:n/a 7:fail |
+| R093 | 002 | matrix axis value `built-in` | floating U | way past | not fixed: matrix axis values stay an unknown; 2:unknown 3:pass 6:n/a 7:fail |
+| R094 | 002 | `linux -> built-in` | H | held | 2:fail 3:n/a 6:n/a 7:n/a |
+| R095 | 002 | `Built-In` | H | false positive (unsure) | unchanged (labels compared without case, as before); 2:fail 3:n/a 6:n/a 7:n/a |
+| R096 | 002 | `linux \ | \ | !linux` | not fixed: a tautology reads as the label linux; 2:unknown 3:pass 6:n/a 7:fail |
+| R097 | 002 | `!(!master)` | H | held | 2:fail 3:n/a 6:n/a 7:n/a |
+| R098 | 002 | `built-in&&linux` | H | held | 2:fail 3:n/a 6:n/a 7:n/a |
+| R099 | 002 | `'built-in'` in single quotes | U | held (unsure) | 2:unknown 3:n/a 6:n/a 7:n/a |
+| R100 | 002 | built-in top agent; AI in `agent none` stage | M | way past | fixed: high; 2:fail 3:pass 6:n/a 7:fail |
+| R101 | 002 | `linux` vs `(linux)` | U | way past (minor) | fixed: unknown; 2:unknown 3:unknown 6:n/a 7:fail |
+| R102 | 002 | release stage without `when` | U (+ JEN-001 medium) | unsure (design) | unchanged; 2:unknown 3:unknown 6:n/a 7:fail |
+| R103 | 002 | scripted shared label | M | held | 2:fail 3:unknown 6:n/a 7:fail |
+| R104 | 003 | matrix agent: Fix cell a, Push cell b | H | false positive | not fixed: listed as a limit; 2:unknown 3:fail 6:n/a 7:fail |
+| R105 | 003 | per-build `ws()` path | M | held (unsure) | 2:unknown 3:fail 6:n/a 7:fail |
+| R106 | 003 | post always `cleanWs`; agent writes `$HOME` | P | way past (design) | not fixed: listed as a limit; 2:unknown 3:pass 6:n/a 7:fail |
+| R107 | 003 | `linux && docker` vs `linux` | P | way past | fixed: unknown; 2:unknown 3:unknown 6:n/a 7:fail |
+| R108 | 003 | `linux` vs `' linux '` | P | way past (minor) | fixed: unknown; 2:unknown 3:unknown 6:n/a 7:fail |
+| R109 | 003 | dockerfile reuseNode stage post publish | H | held | 2:unknown 3:fail 6:pass 7:fail |
+| R110 | 003 | labels from variables | U | held | 2:unknown 3:pass 6:n/a 7:fail |
+| R111 | 007 | mount path containing "socks5" | F | false positive (minor) | JEN-007 not cleared; the finding names the mounted path; 2:pass 3:pass 6:pass 7:fail |
+| R112 | 007 | nested stages+post in a no-network container | P | held | 2:pass 3:pass 6:pass 7:pass |
+| R113 | 003 | 150 pushes + 150 agent steps | M, 0.27 s | held | 2:unknown 3:fail 6:n/a 7:fail |
+| R114 | 003 | 400+400 steps, 30 KB | 3.99 s | slow | fixed: 0.22 s; 2:unknown 3:fail 6:n/a 7:fail |
+| R115 | 003 | 1.4 KB file, methods expanded 60 times | 12.5 s | slow | fixed: 0.34 s; 2:unknown 3:fail 6:n/a 7:fail |
+
+### Second pass, on `3d797e0`
+
+The same reviewer re-ran R001 to R115 on the fixes and wrote 62 more. No earlier case got worse. It confirmed every claimed fix but one: R019, two pods on one named workspace claim, share its directory for certain, so it is now high, not unknown. It also asked for R101 to pair in OBAAF-JEN-002, which it now does. The new attempts: 26 ways past (15 of them blocking, 5 of those resting on behaviour the reviewer was not sure of), 9 false positives, 1 slow, 25 held. The third commit of #331 fixes 24 of the ways past, 8 of the false positives and the slow case, by class. Each is a test in `SecondReviewTest`. The options are read both as a shell and as blanks split them. Docker's booleans, path cleaning and `--mount` CSV are followed. System folders count whole and not their subfolders. Pod specs read string booleans and projected tokens and report what they cannot read. A computed label in a pod template is the pod. Label expressions are parsed with Jenkins's operators. `WsCleanup` and `WipeWorkspace` clean.
+
+| Id | Rule | What the file does | Result at `3d797e0` | Verdict | Now |
+| --- | --- | --- | --- | --- | --- |
+| R116 | 006/007 | `--network none --privileged=t` | P/P | blocking way past | fixed: docker's booleans |
+| R117 | 006 | `-v //var/run://var/run` | 006 P | blocking way past | fixed: paths cleaned |
+| R118 | 006/007 | `--mount type=bind,Source=/var/run` | P/P | blocking way past | fixed: keys in any case |
+| R119 | 006/007 | `--mount 'type=bind,"src=/var/run",…'` | P/P | blocking way past | fixed: CSV fields |
+| R120 | 006 | `--mount …,src=../../../../../..` | 006 P | blocking way past (unsure) | fixed: a relative source with `..` counts |
+| R121 | 006/007 | `--use-api-socket` | P/P | blocking way past | fixed |
+| R122 | 006/007 | `--device-cgroup-rule='b *:* rwm'` | P/P | blocking way past | fixed |
+| R123 | 006/007 | `-e 'A\' -e 'B --privileged -e 'C=1` | P/P | blocking way past (unsure) | fixed: both readings count, a backslash is an unknown |
+| R124 | 006/007 | `-e X=\ --privileged` | P/P | way past (unsure) | fixed: same |
+| R125 | 006/007 | `-v \\.\pipe\docker_engine:…` | P/P | way past | fixed |
+| R126 | 006/007 | `-v C:\:C:\host` | P/P | way past | fixed |
+| R127 | 006 | `-v /var/run/docker.sock` (one field) | high | false positive | fixed: an anonymous volume |
+| R128–R130, R132, R133 | 006 | `/run/`, `type=BIND`, `cap_dac_read_search`, `-v=`, `/run/../` | high | held | held |
+| R131 | 006 | `--security-opt label:type:spc_t` | P | unsure | now high (`label=type…` counts) |
+| R134 | 006 | `-v /root/.m2:/root/.m2` (Jenkins's Maven tutorial) | high | blocking false positive | fixed: a folder inside a system folder is not host access |
+| R135 | 006 | read-only `/etc/localtime`, `/etc/passwd`, `/etc/group` | high | blocking false positive | fixed |
+| R136 | 006 | `$HOME/.m2`, `/home/jenkins/.gradle` | P | held | held |
+| R137 | 006 | `-v /dev/shm:/dev/shm` | high | false positive | fixed |
+| R138 | 003 | `step([$class:'WsCleanup'])` before push | medium | false positive (earlier) | fixed |
+| R139 | 003 | checkout with `WipeWorkspace` | medium | false positive (earlier) | fixed |
+| R140, R142 | 003 | `cleanWs([cleanWhenSuccess:false])`; all `cleanWhen*` true | M / P | held | held |
+| R141 | 003 | `cleanWs(patterns: [])` | medium | false positive (minor) | not fixed: any `patterns` is read as partial |
+| R143 | 006 | `privileged: "true"` (string) | P | way past (unsure) | fixed: string booleans count |
+| R144 | 006 | privileged pod past a 20,000-node walk (aliases) | P | blocking way past | fixed: aliases are walked within a larger cap, and a spec too large is an unknown |
+| R145 | 006 | `hostUsers: false` | high | blocking false positive | fixed: `hostUsers` is not read |
+| R146 | 006 | automount false, projected `serviceAccountToken` | P | way past | fixed |
+| R147 | 006 | a second YAML document sets automount false | P | way past (unsure) | fixed: only the first document counts for the token, and more than one is an unknown |
+| R148 | 006 | custom tag forces the fallback; JSON-form privileged | wrong reason | way past (unsure) | fixed: the fallback reads JSON forms and says the spec was not read |
+| R149, R150 | 006 | merge key; privileged initContainer | high | held | held |
+| R151 | 006 | an env value that mentions `docker.sock` | high | false positive | fixed: only a hostPath's path counts |
+| R152 | 006 | capabilities `add:` as one string | P | held | held |
+| R153 | 002 | `docker -> linux` | label unknown | way past | fixed: an expression that requires no label selects like `agent any` |
+| R154 | 003 | `sandbox -> gpu` vs `trusted` | P | way past | fixed: unknown |
+| R155 | 003 | `linux <-> sandbox` vs `trusted` | P | way past (minor) | fixed: unknown |
+| R156 | 002 | quoted `"built-in && x"` | unknown | held | held |
+| R157 | 006 | `podTemplate(label: label) { node(label) }` | P | blocking way past | fixed: a computed label in a pod template is the pod |
+| R158 | 006 | `node("${POD_LABEL}")` | P | blocking way past | fixed |
+| R159 | 006 | `hostPathWorkspaceVolume(hostPath: '/')` | P | blocking way past | fixed |
+| R160 | 003 | YAML volume named `workspace-volume` on a claim | P | way past (unsure) | not fixed: listed in jenkins.md |
+| R161, R162 | 003 | `$class` map form; `dynamicPVC` | M / P | held | held |
+| R163 | 006 | `containerTemplate(privileged: 'true')` | P | way past (unsure) | fixed |
+| R164 | 006 | `volumes:` list held in a variable | unknown | held | held |
+| R165–R168 | 003 | `options { retry }` at pipeline and stage level; retry in a method; with conditions | H, M, H, H | held | held |
+| R169 | 002 | `environment { RUN_ON = 'built-in' }` + `label "${env.RUN_ON}"` | floating unknown | way past (unsure) | not fixed: listed in jenkins.md |
+| R170 | 002 | `@Field final String WHERE='master'` | high | held | held |
+| R171 | 002 | AI on `linux && docker`, publish on `linux` | unknown | way past (minor) | fixed: labels that require a common one pair |
+| R172–R174 | all | ordinary podTemplate; default pod; `ws()` paths on different labels | clean | held | held |
+| R175, R176 | 006/007 | 3,000-deep YAML; 4,000 `-v` | — | held | held |
+| R177 | 006 | six 1,200-deep pod specs, 15 KB | 5.0 s | slow | fixed: 0.01 s, an unknown |
+
+### Third pass, on `0521213`
+
+The reviewer re-ran R001 to R177; no case got worse, and it confirmed the second pass's fixes. 35 new attempts: 11 ways past, 5 false positives, 19 held. The fourth commit of #331 fixes these:
+
+| Id | Rule | What the file does | Result at `0521213` | Verdict | Now |
+| --- | --- | --- | --- | --- | --- |
+| R180 | 006 | `--label description='mounts -v /var/run:/var/run …'` | high | false positive (contrived) | not fixed: the blank-split reading, listed in jenkins.md |
+| R183 | 006 | `/sys/fs/cgroup:ro` | high | false positive (unsure) | fixed: read-only cgroups are ordinary |
+| R184 | 006 | `/var/lib/jenkins/.m2:/root/.m2` | high | false positive | fixed: only the controller's secrets, jobs, nodes, users and workspaces count inside its home |
+| R185 | 006 | `-v /home/jenkins:/home/jenkins` with an agent | pass | way past | fixed: a user's whole home counts |
+| R186 | 006/007 | `--network none -v /run/user/1000:…` | 006 pass | way past | fixed: rootless Docker's socket folder |
+| R187 | 006 | `/root/.ssh:ro` | pass | way past (unsure of scope) | fixed: a home's credential folders count |
+| R188 | 006 | `/etc:/host/etc:ro` | pass | way past (minor) | fixed: read-only is ordinary only for program folders |
+| R191 | 002 | `node('built-in && !master')`, agent step | unknown | blocking way past | fixed: the built-in node carries one of its two labels |
+| R192 | 002 | 200 nested brackets around `built-in` | floating unknown | way past (minor) | not fixed: an expression too deep to read is an unknown |
+| R200 | 003 | same claim, mounted read-only by the agent's pod | high | false positive (minor) | not fixed: listed in jenkins.md |
+| R201 | 003 | NFS `/exports/ws` and `/exports/ws/`, one server | pass | way past (minor) | fixed: paths cleaned |
+| R202 | 003 | the same NFS path on two servers | high | false positive | fixed: the server is part of the key |
+| R204 | 003 | `hostPathWorkspaceVolume` `/srv/ws` and `/srv/ws/` | pass | way past (minor) | fixed: unknown |
+| R205 | 002/003 | `node(params.STATIC_AGENT)` inside a pod template | 003 pass | way past | fixed: only `POD_LABEL` or the template's label variable is the pod |
+| R206 | 002 | `node(params.TARGET ?: 'built-in')` inside a pod template | pass | blocking way past | fixed: the floating unknown is back |
+| R208 | 006 | `privileged: 1` | pass | way past (unsure) | fixed: 1 counts as true |
+
+### Fourth pass, on `6614662`
+
+The reviewer re-ran R001 to R212: only the cases the third commit names changed, as intended. 18 new attempts on that commit's diff: 6 ways past (3 blocking), 1 false positive, 1 unsure, 10 held. The fifth commit of #331 fixes these:
+
+| Id | What the file does | Result at `6614662` | Verdict | Now |
+| --- | --- | --- | --- | --- |
+| R217 | `podTemplate(label: "ci-${env.BUILD_NUMBER}")` and `node("ci-${env.BUILD_NUMBER}")` | 006 pass | blocking way past | fixed: the same label text is the pod |
+| R218 | `def label = 'ci-pod'; podTemplate(label: label)` and `node('ci-pod')` | 006 pass | way past | fixed: the literal the variable holds |
+| R222 | `/var/lib/jenkins/init.groovy.d`, `/plugins`, read-write | pass | blocking way past | fixed: the controller's home counts but its caches |
+| R223 | `-v /var/jenkins_home:/jh` | pass | blocking way past | fixed |
+| R224 | `/home/jenkins/agent` | pass | way past | fixed |
+| R225 | `/home/jenkins/.ssh/known_hosts:ro` | high | false positive | fixed |
+| R226 | `~/.netrc`, `~/.git-credentials` | pass | way past | fixed: credential files |
+| R227 | `/var/lib/jenkins/secret.key:ro` | pass | way past (minor) | fixed |
+| R229 | NFS servers `nfs1.example` and `NFS1.example` | pass | way past (minor) | fixed: server names without case |
+| R230 | `privileged: 2` | pass | unsure | now high: any number but 0 counts |
+| R213–R216, R219–R221, R228 | `master`, `!built-in \|\| master`, `master && !built-in`, `!(built-in -> linux)`, dotted homes, a credential folder at depth, `secrets/../.m2`, NFS without a server | as expected | held | held |
+
+### Fifth pass, on `5f44ddc`
+
+The reviewer re-ran R001 to R230: only the cases the fourth commit names changed. Of 8 new attempts, 6 held. One was a way past: R234, the Git plugin's mirrors under `/var/lib/jenkins/caches`, which the controller fetches into, were taken for a build cache. One was a false positive: R235, read-only `/home/jenkins/agent/tools`. Both are fixed in the sixth commit of #331: `caches` no longer counts as a build cache, and an agent's root is read like the controller's home. Not changed: R232, a read-only `~/.npmrc`, is reported as the host's credentials, because the token in it is exposed. R238, a `node('linux')` inside `podTemplate(label: 'linux')`, is read as the pod and is listed in jenkins.md. The reviewer re-ran R001 to R238 on the sixth commit: only R234 and R235 changed, and it found nothing blocking. Its two remaining points are listed in jenkins.md: writable `tools`, and a job named `tools`.
+
+CI then caught what the review had not timed: OBAAF-JEN-002's shared-label pairing compared every allocation with every other, so 4,000 `node()` blocks on one label took 4.9 s here (0.46 s on `flagship`), past CI's 10 s limit on Python 3.10. The pairing is now indexed, the machine question asks one agent step per workspace within a budget, and label requirements are cached. The reviewer re-ran R001 to R245 on each change. R239 to R243 check that the indexed pairing finds what the old loop found, and they all held. R244 and R245, 4,000-allocation files, now take under 2 s.
+
+### Reviewer B's attempts (2026-11-17)
+
+Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`: 71 ways past, 14 false positives, 3 slow cases, 23 held. The case files themselves were not kept, so each row says what the file did. What the 2026-11-20 work fixed is listed above.
 
 | ID | Rule | Case | At `9b806db` | Verdict |
 | --- | --- | --- | --- | --- |
@@ -2588,3 +2869,261 @@ Reviewer B's 111 attempts on OBAAF-JEN-003 and 007, at `9b806db`, kept here for 
 | B109 | both | sh '"$WORKSPACE/ci/autofix.sh"' | exit=1 time=0.30s; JEN-003 not applicable; JEN-007 not applicable | way past |
 | B110 | both | sh './ci/autofix' (script without .sh suffix) | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
 | B111 | both | def agentCmd = 'claude' + ' -p ...'; sh agentCmd | exit=1 time=0.29s; JEN-003 not applicable; JEN-007 not applicable | way past |
+
+## 2d.2l: release approvals
+
+Rule: OBAAF-JEN-005, release without an approval by a named person. Reviewer: one Opus 5.5 sub-agent that did not write the rule, given the code, the rule's text and what the Pipeline: Input Step plugin documents (an abort, or a timeout around the step, throws and stops the build unless caught; `submitter` goes through `Util.fixEmptyAndTrim`; a Declarative stage asks for its `input` before its `when` unless `beforeInput true`). 2026-11-21, run `ptarmigan`. Every attempt is a case in `tests/test_jenkins_approvals.py`, with what the rule said before the slice and what it says now.
+
+**Result before the fixes:** 140 attempts (155 fixture files, some duplicates or invalid): 47 ways past, 9 false positives, 11 answers weaker than due, 6 over-cautious, 67 held. Before the slice the rule asked only whether some `input` step came before the first publish.
+
+| Class | Ways past and false positives | What changed |
+| --- | --- | --- |
+| The input's abort does not stop the publish | 7 ways past: `try { input } catch (e) {}`, `catchError`, `warnError`, `timeout` in a catch, the same in Declarative `script` blocks | An input counts only when its failure stops the build, as a check does for OBAAF-JEN-011 and 012; an input inside the same `catchError` or `try` block as the publish, before it, still counts |
+| The input may be skipped | 17 ways past: a `when` with `beforeInput true` or on the stage's `steps`, Scripted `if`, `else`, `switch`, loops that may run zero times (`for`, `.each`, `.times`), `&&`, `||` and `?:`, a `post { failure }` input, a method nothing calls, a closure never called | Every condition on the input must also guard the publish. Iteration methods, short-circuit operators and `?:` are now conditions in the model, as `for` was. Steps read where a closure or an uncalled method is written are marked and never count as an approval |
+| Parallel branches, order, second publishes | 10 ways past, 3 false positives: an input in a sibling parallel branch, only the first publish tested, a publish in `post { always \| aborted \| failure }` or a `catch` block, a closure assigned before and called after | Every publishing stage is tested. No input gates a publish in a failure path. A publish read only where its closure is written is "cannot tell" unless it is also read where it is called |
+| Submitter values | 10 ways past, 11 weaker: `''`, blank, `null`, `'\u0020'`, the Declarative `submitter ''` or `null`, a repeated key, a later spread, the group `authenticated` | Blank, empty and `null` are no submitter (a finding), trimmed as Java's `String.trim()` does; the last key wins; a spread or a map variable is "cannot tell"; a map given as the only argument is read; `authenticated` is a finding. The lexer now decodes `\uXXXX` in strings |
+| Spellings | 4 false positives: `input(m)`, `input([..])`, `input(*: m)`, a labelled statement | Read as above; a file part of which was not read gives "cannot tell" for a missing approval, not a finding |
+| Publishes the rule does not see | 3: a command in a variable, `gradlew jib`, `buildah push` | Not changed: publish detection is OBAAF-JEN-012's reader, left to 2d.2 |
+| Crashes and slow inputs | none; 2 false positives where a call was not expanded | "Cannot tell", as above |
+
+**Stated limits** (each a case in `LIMITS`): an input whose abort sets a flag that guards the publish does not count, nor one in a Scripted `finally` block, nor one inside `catchError(catchInterruptions: false)` (only the innermost catching block is recorded); all three fail closed, as a finding. A submitter or a map held in a variable, a method parameter or a concatenation of literals is "cannot tell". A shared-library step that might approve is not read; the file-wide note says so. Not verified on a live Jenkins: that `authenticated` lets every signed-in user respond, and that Groovy's last repeated key is the one the step receives.
+
+**Review of the fixes** (a second Opus 5.5 sub-agent, 2026-11-21, about 85 attempts at `7c46a65`; each is an `R-` case in the test file): 6 blocking classes, all fixed by class in the model, which every Jenkins rule shares:
+- the two branches of a `?:` and the cases of a `switch` had one condition label, so an input in one branch counted for a publish in the other (now each branch and case is its own condition, labelled by line, column and inlined call);
+- a condition's text left out its operator, so `== 'main'` and `!= 'main'` were one condition, and `expression { ... }` left out its body (both now in);
+- a condition on a parameter of a method the file inlines meant the same at every call (`onlyIf(params.ASK) { input }`, `onlyIf(true) { publish }`; it is now qualified by the call);
+- the "same catching block" test compared the block's line, so a helper's `try` or `catchError` called twice was one block (now one number per walk of a block);
+- `beforeAgent` and `beforeInput` were part of a `when`'s text, so two stages under `branch 'main'` differed (now left out), and `beforeOptions true`, which Jenkins evaluates before input, was not read (now read as `beforeInput`);
+- a `catch` that throws only under an `if` counted as rethrowing (now only a throw or `error` that always runs counts, so a check there no longer counts for OBAAF-JEN-011 and 012 either).
+
+A second pass on those fixes (about 35 attempts at `78fb08c`, each an `R2-` case) found three more classes, also fixed: a condition's text was still a flat list of names and strings, so `> 5` and `> 0`, `in ['prod']` and `in ['dev', 'prod']`, grouping, closure arguments and `expression { return ... }` collapsed (conditions are now compared by their whole structure, shown as the readable text with a digest); a condition inside an inlined method was tied to the call only when it named a parameter directly (now any condition there that reads more than `env`, `params`, `currentBuild` or an upper-case variable, or calls anything, is tied to the call); and a closure given to an inlined method that never calls it was read as running (now it is marked as maybe never running). It also found that the narrowed rethrow test missed a `throw` inside `stage { }` in a catch block (now steps that run their body once are followed, and `steps.error` counts).
+
+A third pass (13 attempts at `3ec6a50`, each an `R3-` case) found two more, also fixed: an upper-case name, or one called `params` or `env`, was taken for the build's own value even when it was the inlined method's parameter or a variable the file declares (now any name the file declares ties the condition to the call); and a trailing closure was bound to the first parameter, so `def withTimeout(int m = 60, Closure body)` never ran its body (it now binds to the last parameter, as Groovy does). A fourth pass (15 attempts at `33929df`, each an `R4-` case) found that "declared" was collected while walking, so a method defined below its use, or a closure parameter (which the parser does not keep), could still pass an upper-case parameter as the build's own value; declared names are now collected before the walk, and only the environment variables Jenkins sets count as the build's own. A fifth pass found that the first version of that collection took `env.VERSION = ...` for a declaration of `env`, which tied every helper's `env.BRANCH_NAME` condition to its call; only a bare name, `this.x` or `binding.x` is declared by an assignment now (`R5-` cases). A sixth check found that a variable Jenkins sets could still be shadowed by a form the reader does not see (`def (BRANCH_NAME, x) = ...`, a closure's `{ BRANCH_NAME -> }`, `binding.setVariable`); inside a helper, only properties of `env`, `params` and `currentBuild` now count as the build's own, and a bare name ties the condition to the call (`R6-` cases; conservative for a helper that tests a bare `BRANCH_NAME`). A last check found that a parameter read inside an interpolation (`"${c}" == 'true'`, `env."${key}"`) was invisible to that test; a condition holding an interpolation is now tied to the call (`R7-` cases). It also confirmed that binding a trailing closure to the last parameter makes a helper's `withCredentials` reach the closure's steps (new, true OBAAF-JEN-001 and 013 findings). The third pass also measured a cost: a helper with a long condition called 1,500 times took 33 s (now 0.45 s, against 0.41 s before the slice), and found that the condition labels had changed OBAAF-JEN-011's message, which a v0.1 baseline entry matches on (the label's readable part is now the text from before the slice, and only its hidden part tells conditions apart).
+
+More iteration methods (`sum`, `sort`, `findIndexOf` and others) are conditions. Left as stated limits, each in `LIMITS`: conditions with the same text count as one even where a variable, a file or a random value changes between them; `\u0020` in slashy strings; a computed map key; `x?.with { }`; a ternary continued on the next line; an input in an outer catching block for a publish in an inner one (conservative); `retry` around an input; an unread statement anywhere makes a missing approval "cannot tell"; a helper's condition is tied to each call even when both calls pass the same value, and a catch that throws on both branches of an `if`/`else` or leaves with `return` counts as swallowing (all conservative). The parser keeps no `?.` or `*.`, and no type after `as` or `instanceof`, so conditions that differ only there are one condition; a condition longer than 4,000 characters is told apart by its place in the file.
+
+## 2d.2m: artifacts from another build
+
+Rule: OBAAF-JEN-010, an artifact from another build used by a moving reference (issue #341, decision D-129). Reviewer: one Opus 5.5 sub-agent that did not write the rule, given the code, the rule's text and the copyartifact plugin's selectors, on 2026-11-21 at `651cb4e`. Every attempt is a case in `tests/test_jenkins_artifact_transfer.py` (`CASES`), with what the rule said before and says now.
+
+**Result before the fixes:** 120 attempts: 51 ways past, 8 false positives, 5 wrong severities, 3 slow cases (466 bytes of nested helpers took 2.4 s in this rule, 744 bytes 11.7 s), and 7 "cannot tell" where the file decides.
+
+| Class | Ways past and false positives | What changed |
+| --- | --- | --- |
+| A check accepted by its text | 22 ways past: `sha256sum -c` after the publish, with `\|\| true`, in `catchError`, `warnError` or `try`, with `returnStatus`, under `if (params.VERIFY)`, inside an `echo` or a comment, `echo obaaf verify release`, after `exit 0`, `&`, `set +e`, a `#!` line without `-e`, a pipe, in a parallel branch, a closure never called, a later stage with the same name | Only `obaaf verify release`, read by the reader of slice 2d.2e as a command whose failure stops the `sh` script, after the copy and before each publish it covers, outside catching blocks, failure paths, parallel branches and conditions the publish and copy do not share |
+| A check that ties nothing to a build record | 6: sums that came with the copy, `--ignore-missing`, `cosign verify` of another image, a check in another folder, on another node, for another copy | Any check but `obaaf verify release` makes the copy "cannot tell" |
+| Spellings of the copy | 8 ways past, 4 false positives: `step([$class: 'CopyArtifact'])`, `script.copyArtifacts` in a helper, `this.steps.copyArtifacts`, a method pointer, a computed method name; a map as the only argument, in a variable, spread | `copyArtifacts` on any receiver and `step` with a `CopyArtifact` class are copies; arguments as Groovy builds them; a variable only when it has one value; any other place the file names copyArtifacts or the class is "cannot tell" |
+| The selector by its name | 11: `specific('lastSuccessfulBuild')`, a display name, `params`, `env`, `${...}`, `?:`, `upstream(fallbackToLastSuccessful: true)`, a spread after `selector:`, a computed project with a fixed number | `specific` is fixed only for digits or a `build` result's number; other text moves; computed values are "cannot tell"; selector maps by `$class` |
+| Fetches without the copy step | 5: `curl`, `wget` and `httpRequest` of `.../lastSuccessfulBuild/artifact/`, JFrog CLI, an S3 "latest" key | Jenkins artifact and workspace URLs are read; other tools are a stated limit |
+| Severity and stages | 5 wrong severities: a publish in the stage's `post`, a publish before the copy, stages with one name or computed names, a copy in a class method | High when an unchecked publish after the copy is in its stage, post blocks included; stage names are a stated limit |
+| Copies that never run | 2 false positives: a copy in a method or closure nothing calls | "Cannot tell", unless the same copy is also read where it runs |
+| Cost | 3 slow cases | Each publish's latest check is worked out once per set of copy conditions, guard keys once per step, and more than 150,000 comparisons is "cannot tell" |
+
+**Review of the fixes** (a second Opus 5.5 sub-agent, about 230 attempts at `0b0c0ba`; each blocking class is an `R` case in `REVIEW_CASES`): about 50 ways past in 11 classes, 11 of them regressions, 9 false positives and 1 cost case, all fixed by class:
+- a check counted for a publish in `post { failure }` or `always`, in a `catch` or `finally` block, or before the copy in the same `retry` block (such a publish is now never cleared);
+- `returnStatus` given by a variable or a spread map (only an absent or `false` one lets the check count);
+- variables resolved file-wide by name: a map changed after it was declared, a selector or `build` variable that is also a parameter, a loop or closure variable, or set through `this.` or `binding.setVariable`, and plugin symbols redefined by the file or called on another object (now resolved only as D-129 says);
+- URLs: a `..` segment, a URL split by quotes, a job's workspace, a URL in `environment` or a variable;
+- the class named by `new`, an import, a computed `$class` or a computed method name;
+- false positives: a `#!/bin/bash` script with `set -euo pipefail` or a single command, a script whose `#!` is not at its very start (Jenkins runs it with `sh -xe`), a copy and its check under one condition, `copyArtifacts(base + [...])` read as the default selector, `CopyArtifactPermissionProperty`, a closure defined and called;
+- `selector: null`, which is the default;
+- 30 nested `if` blocks around a check and a publish in nested helpers (2.6 s in this rule at 1.3 KB; now "cannot tell" at once, as more than 150,000 comparisons). The rest of the checker still takes about 6 s on that input, as it did before the slice.
+
+**Second review** (the same sub-agent, about 220 earlier attempts re-run and about 60 new at `55b4383`; each blocking class is an `R2_` case in `REVIEW2_CASES`): about 26 ways past in 6 classes, 3 of them regressions, all fixed by class:
+- a variable read by its one declaration while a closure's parameter, an alias, an argument, a use inside an interpolated string or a binding write could change it (now a variable is read only when the file names it in exactly one other place and writes no binding or property);
+- a copy's own condition clearing a check under the same condition, when the copy makes it false at the check (`if (!fileExists('app.jar'))`; now only conditions on parameters alone are shared);
+- a closure called where the checker reads it and run again by `parallel` after the check (a copy in a closure is now always "cannot tell");
+- a loop that publishes before it copies (a loop around the copy now counts like a `retry` block);
+- a URL kept in a Groovy variable;
+- 120 parameter conditions on copies in nested helpers (5.5 s in this rule at 4.5 KB; the budget now counts the copies' sets of conditions).
+
+**Third review** (the same sub-agent, about 280 earlier attempts re-run and about 28 new at `957f17d`; each blocking class is an `R3_` case in `REVIEW3_CASES`): about 13 ways past in 3 classes, fixed by class:
+- a declaration in another method or block gave the read its value, while the read was a script property a getter (`def getSel()`), `propertyMissing` or a property write could set (now the declaration must be in a block that encloses the read, with no method between, and the source is no longer searched for binding words, which a comment could hold);
+- `$NAME` in a single-quoted script read as a Groovy or `environment` value when the shell or a `withEnv` sets it itself (now the text as written is always read too, and what it shows counts);
+- `params` reassigned in the file (left as a stated limit; contrived).
+
+On this repository the slice changes one result: `templates/jenkins/obaaf-release-publish.Jenkinsfile` line 74 is OBAAF-JEN-010 "cannot tell" instead of a pass, because its copy's build number is computed and its checks follow `export PATH=...` (#344). Expectrail has no Jenkinsfile and is unchanged.
+
+A fourth pass (19 new attempts at `e9203ff`) found no blocking fault; its one minor class, a read before the declaration on the same line, is fixed (the place is compared by line and column) and is case `R4_01`.
+
+**Stated limits** (each a case in `LIMITS` or written in D-129): other download tools and object-store keys are not read; two Scripted stages with one name, or computed names, are one stage for the severity; what counts as publishing is the shared detector's (`curl -X PUT --data-binary` and `scp` are not publishes); a copy in a class method, a spread map and `downstream` are "cannot tell"; a digest check is "cannot tell" whatever it checks; an `echo` of an artifact URL counts as a fetch; conditions are compared by their structure (`if (go)` twice is one condition even when `go` changes), and code after a conditional `return` is not treated as conditional, both as for OBAAF-JEN-011 and 012 (slice 2d.2).
+
+## 2d.2n: a provenance check before the publish
+
+Rule: OBAAF-JEN-012, a publish without an earlier check of the artifact's provenance, approvals and agent records that stops it (decision D-130). Before the slice the rule searched each script's text for `obaaf verify release` (or a provenance-only check) with a regular expression, counted a check read where an uncalled closure is written, and counted any check before a publish in a failure path. The slice reads checks with the shell reader of slice 2d.2e, as OBAAF-JEN-010 does since 2d.2m. Every attempt is a case in `tests/test_jenkins_provenance.py` (`CASES`, 363 in all), with what the rule said at `a4b2dc0` and says now; `LIMITS` gives, for each case whose answer is a stated limit, the answer the reviewer judged right and why the rule gives another.
+
+**First attempt** (an Opus 5.5 attacker that did not write the rule, 206 attempts on the slice's first version, `6e508a8`, 2026-11-21). The first version was wrong on 79 (8 ways past, 25 false positives of which 24 were also there at `a4b2dc0`, 42 "cannot tell" where the file decides, 4 findings where it cannot tell); the rule at `a4b2dc0` was wrong on 69. Fixed by class:
+- Groovy text in the script (`"... ${EXTRA}"` with `EXTRA = '|| true'`, concatenation, a method parameter) was read as written: now "cannot tell";
+- `obaaf verify release --pre-approval`, which skips the approvals, counted as the full check: now a provenance check (medium);
+- a check in a method or closure nothing calls counted where it is written, or turned every finding into "cannot tell";
+- an `echo` argument, a comment and `--help` gave "cannot tell" where they are no check;
+- `.trim()` before a `#!` line, a computed `returnStatus` and a path to `obaaf` are "cannot tell".
+
+**First review** (a second Opus 5.5 sub-agent, 116 attempts at `699d7d3`): 8 blocking findings, fixed by class:
+- a publish in a failure path after a check outside it (a stage's `post { always }` in a later stage, a `catch` after the check) became high: now a stage's post block after a check in an earlier stage is checked, the pipeline's post block is high whatever comes before it, and a `catch` or `finally` block after a check is "cannot tell" (how far the `try` body reaches is not compared);
+- a check closure run by a call the model does not follow (`parallel(verify: verify)`, an alias, a method pointer) was dropped, giving high: a check read only where it is written and never seen called now makes the file's unchecked publishes "cannot tell";
+- a publish closure also run through such a call was decided only where it is called, and a publish in an uncalled method written below the check counted as checked: a publish read where it is written is now always "cannot tell";
+- `.trim()` on part of a concatenated script was missed; argparse abbreviations (`--pre`, `--hel`) and shell variables among the check's words (`$VERIFY_FLAGS`) were taken literally; build numbers read as digits let `|| exit ${BUILD_NUMBER}` through; `OUT="$(obaaf verify release ...)"` was no check;
+- a test claimed more than it checked (renamed and narrowed).
+
+**Second review** (the same sub-agent, 35 new attempts at `ad4d91b`): 3 blocking findings, fixed: a stage's post block was recognised by its stage name (a Scripted `stage('post build')` inside the pipeline's post block passed; a check in a stage named `post build checks` was ignored), so the model now records which stage's post block a step is in (`Ctx.post_owner`); `--pr` is `--pre-approval` to argparse, `-ho` asks for help, an unquoted `$ARTIFACTS` or backticks among the check's arguments may add options (now any expansion there is "cannot tell"); a wrapper's own `-h` was taken for the check's.
+
+**Third review** (the same sub-agent, 50 attempts at `912249c`): no blocking finding. It ran 1,371 Jenkinsfile texts from the Jenkins test files through every rule before and after the second-review change: identical for every rule but OBAAF-JEN-012. OBAAF-JEN-010 changed in one case only, as intended: a `#!/bin/bash -ne` line now reads the script as running nothing.
+
+**Result.** No attempt in the file is quiet where the reviewer judged a finding or "cannot tell", except three forms the Jenkins model did not read before the slice either (a method named `sh`, a closure helper called with a trailing closure; cases R56, R61, N01). No answer is a finding where the rule was quiet at `a4b2dc0` and quiet was right, except Q13 (a check closure run through `parallel(name: closure)` and also called after the publish) and T11 (`--actor -h`, which argparse refuses with status 2).
+
+**Stated limits** (148 cases, each in `LIMITS`): most are "cannot tell" where the file decides, because the reader of slice 2d.2e vouches for a command only on a line of its own after lines it can read (`; true`, `&& echo ok`, `set -Eeuo pipefail`, a here-document, `export PATH=`, wrappers such as `timeout`, `docker run`, `sudo`; #347), Groovy values are not resolved, expansions among the check's arguments are not followed, `bat`, `powershell` and `pwsh` are not read, and failure handlers are not compared with how far their `try` body reaches. Some findings remain where the rule was already wrong at `a4b2dc0`: the older text reading decides where the reader does not vouch and takes `set -Eeuo`, `set -eE` and a last-line check under `#!/bin/bash` for ignored failures; a `returnStatus: true` step followed by `if (rc != 0) { error ... }` is no check; `catchError` before `post { success }`, a check in `finally`, nested `catchError`, a typed `catch`; a check in a `load`ed file or shared-library step.
+
+On this repository the slice changes one result: `templates/jenkins/obaaf-release-publish.Jenkinsfile` is OBAAF-JEN-012 "cannot tell" instead of a pass, because its checks follow `export PATH=...` (#344). Expectrail has no Jenkinsfile and is unchanged.
+
+## 2d.2o: a publish after a failed or skipped check
+
+Rule: OBAAF-JEN-011, a publish in a failure path, or a check before a publish whose failure does not stop it (decision D-131). Before the slice the rule found a check with two regular expressions over the script's text and read only the first kind (`verify_commands`) for a failure the script ignores, with the same text search OBAAF-JEN-012 used before slice 2d.2n. It decided whether a check stops a publish with `gates()`, which never let a check in the same catching block as the publish stop it. The slice reads every check from the command's words with the shell reader of slice 2d.2e, compares them as OBAAF-JEN-012's `provenance_gates` does, and says "cannot tell" where the file does not decide. Every attempt is a case in `tests/test_jenkins_failure_paths.py` (`CASES`, 394 in all), with what the rule says after the slice (asserted) and what it said at `75dae58` (recorded); `LIMITS` names the 102 whose answer differs from the reviewer's judgement, and why.
+
+**First attempt** (an Opus 5.5 attacker that did not write the rule, 172 attempts on the rule as it was at `75dae58`, 2026-11-21). The rule was wrong on 74: 43 ways past (39 should be findings, 4 cannot tell), 31 false positives, and 3 inputs that took 2.8 to 4.1 seconds. Fixed by class:
+- a checksum or signature check (`sha256sum -c`, `shasum -c`, `cosign verify`) was never read for a failure it ignores, so `|| true`, `set +e`, a pipe or a `#!` line without `-e` passed: every check is now read the same way;
+- the older reading searched the rest of the line: `set -e` or `pipefail` anywhere in the script counted, even after the check or inside an `echo`; `set +o errexit`, `set +ex`, a backslash-continued `|| true` and `trap 'exit 0' EXIT` were missed; `|| exit 1`, `|| { ...; exit 1; }`, a `||` in a comment, a `|` in a quoted argument and an `echo` of the command were read as ignoring the failure. Now the reader vouches for the check, or a short list of forms that decide on their own gives the reason, or it is "cannot tell";
+- a check named by a path or inside `bash -c` was no check: now "cannot tell"; `gpg --verify` is a check (OBAAF-JEN-010 already counted it);
+- a check and the publish in the same script were never compared, and a check in a failure path that ignores its failure was dropped even when a publish ran after it;
+- `post { notBuilt }` was not a failure path (this also changes OBAAF-JEN-005, 010 and 012, which share the list);
+- a computed `returnStatus`, and a check read only where an uncalled closure or method is written, counted as a check that stops the publish: now "cannot tell";
+- a check and the publish in the same `catchError`, `warnError` or `try` block were reported, though a failed check skips the rest of the block;
+- a publish in a later stage's post block was reported after a Verify stage whose failure skips it;
+- a guard on the build's result in a Declarative `post` block, and a catching block before a publish that runs only on `post { success }` or under such a guard, gave high: now "cannot tell" (what the block sets the result to is not read);
+- every check was compared with every publish: now once per kind of publish, so 2,000 checks and 2,000 uploads take a fraction of a second.
+
+**Review passes** (one Opus 5.5 sub-agent that did not write the rule, 2026-11-21; its attempts are the cases whose ids start with V, V2 to V6). Each pass found classes, each fixed by class before the next:
+- **First pass** (77 attempts on `50b7e2d`, 8 blocking): a check in a later stage hid a publish in an earlier stage's post block; a check the reader could not read skipped the place test (a parallel branch, a catching block); the first result-guarded publish ended the search for a later one; one verdict per step let a passing check hide a swallowed one; 15 false highs (`gpgv` as an argument, a trap on any signal, `set +e` in a subshell, a function or a here-document, `& wait $!`, `rc=$?; exit $rc`, `exit ${PIPESTATUS[0]}`, bat `|| exit /b 1`); a line of 120 KB took 5 s; five messages differed from the older rule's for the same check and publish.
+- **Second pass** (53 on `009a801`, 6 blocking): a check after words that were not listed wrappers (`uv run`, `docker run`, `sudo -u ci`) became no check; `cd d && check || true` lost its `|| true`; a catching block's "cannot tell" hid a step that ignores its own failure; four message wordings; six false highs (`pid=$!; wait $pid`, text inside a string that runs over lines, an uncalled function, `{ check; } > log`, a bare `exit`); 30,000 checks on one line took 149 s.
+- **Third pass** (52 on `5ddafa5`, 7 blocking): a 20 KB base64 word took 6.7 s (a path prefix in the program pattern); `set -o errexit -o nounset -o pipefail` was read to its first option only; a package name, a commit message or a printed string read as a swallowed check; a trap on ERR that exits 1, an `if`/`else`, a function with `{` on the next line, `exec`; a comment ending in a backslash swallowed the next line; a bat check behind `if exist`; three message wordings.
+- **Fourth to sixth passes** (18, 10 and 12 attempts on `32735f1`, `60be83f` and `9e12b4c` and after, the last ones single items): continued lines (6.7 s for 4,000), runners not listed (`gosu`, `fakeroot`), an escaped backslash at a line's end, `case` patterns ending a function, `grep -c`, a publish written before the check in the same step, `sudo apt-get install gpgv` after a runner, `bash -lc`, a runner's option values (`sudo -u git`), `ghcr.io` read as `gh`, an assignment's value, `apt-get -y purge`, `ssh -y`. A check on `533c5e8` found nothing blocking; the speed change after CI's timing failure (`24b2235`) moved one line-start test across lines, found by the same reviewer and fixed (`. file` after a line ending in `;`), and a second speed change (one placeholder for each run of lines that cannot change the reading) briefly lost a command after a non-breaking space, also found and fixed.
+
+**Result.** No attempt is quiet where the reviewer judged a finding or "cannot tell", except four forms the Jenkins model did not read before the slice either: a publish closure run through `parallel` in a post block (F37), a publish or check command kept in a variable (F38, R37), and a `return` that leaves only a `script {}` block (X10). Every message the older rule gave for a check and a publish it still names is unchanged, checked on every case and on 1,767 Jenkinsfile texts from the test files; the exceptions are where the finding now names a later publish (VB01 to VB03, VG03, V3q07) and V3p15, where the older reading took `set +e` inside an `echo` for a command. Outside OBAAF-JEN-011, only `post { notBuilt }` moves: OBAAF-JEN-012 from quiet to high, OBAAF-JEN-005 to its failure-path message, OBAAF-JEN-010 to medium for a later stage's `notBuilt` block.
+
+**Stated limits** (102 cases, each in `LIMITS`): most are "cannot tell" where the file decides, because the reader of slice 2d.2e vouches for a command only on a line of its own after lines it can read (`if`, `&&`, `;` lists, subshells, `bash -c`, `set -o` lines, `export PATH=`; #347), Groovy values are not resolved, `powershell` and other `#!` programs are not read, a script that may keep the failure itself (`wait $!`, `rc=$?`) is not followed, and what catchError, warnError or a catch block sets the build's result to is not read. Some findings remain where the reviewer judged quiet: the status tested in Groovy (`if (rc != 0) error ...`), conditions compared by how they are written, `skipStagesAfterUnstable()`, nested catching blocks compared by the inner one, and which check is meant to stop which publish.
+
+**Speed.** The attacker's three slow inputs (2.8 to 4.1 s at `75dae58`) and the review passes' slow inputs take about as long as at `75dae58` (under 1.2 s), except two adversarial ones that are linear but slower: 30,000 checks on one line (2.4 s; 0.9 s at `75dae58`) and 40,000 check lines (4.5 s; 1.1 s), where every line is split into words by both the reader and the rule.
+
+On this repository the slice changes one result: `templates/jenkins/obaaf-release-publish.Jenkinsfile` gets two OBAAF-JEN-011 "cannot tell" (its checks follow `export PATH=...`, #344), as OBAAF-JEN-012 already did; exit status, JSON fields and SARIF are otherwise unchanged. Expectrail has no Jenkinsfile and is byte-identical in text, JSON, SARIF and `--no-fixes` output.
+
+## 2d.2: untrusted text in a command
+
+Rule: OBAAF-JEN-009, text others control built into a command or into Groovy code before it runs (decision D-132). Before the slice the rule searched each interpolation's text for names (`_UNTRUSTED_RE`, `_PARAM_RE` and the names of tainted variables), so whatever hid a name from that search hid the source.
+
+**First attempt** (an Opus 5.5 attacker that did not write the rule, 172 attempts on the rule as it was at `653b153`, 2026-11-22; ids A001 to A172; the run that took the slice added 29, ids B-a01 to B-a30). The rule was wrong on 124 of the 172: 77 ways past, 41 false positives, 4 wrong severities and 2 slow inputs. Fixed by class, with a reader of each value's syntax tree (`src/obaaf/checker/jenkins/values.py`):
+- the source spelled otherwise: `env?.X`, a comment before the dot, `env.change_title` (Jenkins reads environment names without regard to case), `env.getEnvironment().X`, `env[n]` and `env."${n}"` with `n` a literal, `def p = params`, `def e = env`, `this.env.X`;
+- `\u0024{...}`, which Groovy 2.4 (the version Jenkins runs) turns into an interpolation before lexing;
+- taint set only by assignment to a plain name: `sb << x`, `.append`, `list.add`, `map.put`, `m.t = x`, `env.setProperty`, `binding.setVariable`, `this.T = x`, `withEnv` entries built with `+`, `def (a, b) = [...]`;
+- bindings the rule never read: closure and `for` parameters, a closure variable called, named arguments into a `Map` parameter, varargs, a method's return value;
+- commit text lost through `.split('\n')[0]`, `git rev-list --format`, `git cat-file -p`, a format in a variable, `%%B` in `bat`, a second git command on a line; file names from `git diff --name-only`; branch names from git commands;
+- sources not listed: `gitlabTriggerPhrase`, ghprb e-mail variables, Bitbucket Push and Pull Request variables (from its README's table), pipeline-github's `pullRequest`, `currentBuild.changeSets` and build causes, `input` answers, parameters declared with `properties([parameters([...])])` and read by bare name; Generic Webhook header variables (lower-cased by the plugin) and a variables list held in a variable;
+- sinks not read: `def s = this; s.sh`, `this.&sh`, `sh(*: opts)`, Docker Pipeline's `build`, `run`, `withRun`, `push`, `tag`, `pull` and `inside(args)`, Publish Over SSH `execCommand`, `bat`'s `%NAME%` (cmd expands it before parsing), `Eval.me`, `GroovyShell`, Job DSL, and `build` parameters in a variable, in the `$class` form, from `params.collect`, or wrapped in `.trim()` or `?:`;
+- false positives from judging names in text: ternaries and comparisons choosing literals, numbers and booleans derived from the value, `replaceAll` whitelists, URL and base64 encoding, `booleanParam` and `choice`, `env.Y` after `env['X'] = value`, and a method on a literal (`'a,b'.split(',')`) making every Jenkins rule "cannot tell";
+- a wrong severity for a webhook payload variable holding `$` or an object (medium; now high unless its path ends in a number, count, identifier or state).
+
+**First review pass** (a second Opus 5.5 sub-agent that did not write the fix, 203 attempts and 66 size probes on `b8e1ce4`; its JEN-009 cases are the ids starting R1-). It found 11 blocking classes, each fixed by class:
+- the new skipping of comments inside `${...}` read `//` in a slashy regex (`replaceFirst(/^https?:\/\//, '')`) as a comment, so the whole file could not be read: removed; an interpolation the parser cannot read is now "cannot tell" instead;
+- one parameter or variable named `env` or `params` anywhere turned off the build's own for the whole file: removed (a method's own `params` is read as the build's, a stated limit);
+- `env.TARGET` for a declared string parameter, and `env.X` set from an uncalled method's parameter, were quiet;
+- `.replace('[^...]', '')` (a literal replace), `.asType(String)` and the file's own method named like a safe one were read as clearing the value;
+- `body.setDelegate(config)` in a `vars/` step was not read;
+- helpers that each call the next twice took up to 9.5 seconds: a method's result is now worked out once for each set of argument sources, and the reader has a budget for the whole file;
+- `getProperty(k)` over a literal list of names raised a TypeError, so every rule said "cannot tell";
+- chained `sb << 'a' << x` and `sb.append('a').append(x)`, `this` held in a variable or parameter not named `script` or `steps`, `bat`'s `%NAME:~0,5%`, lower-case names and a script held in a variable, a closure alias or a closure in a map, named arguments with a trailing closure, and a method ending in an assignment were not followed;
+- one loop's implicit `it` over a tainted value made every `it` in the file tainted: an implicit `it` now holds the value only inside its own closure;
+- messages changed for a map read through its property (`cfg.title (from ...)` where the base said `cfg (from ...)`): restored;
+- the documentation claimed more than the code (nothing lost, every caller value "cannot tell", messages unchanged) and said nothing of what the shared model's changes do to OBAAF-JEN-013 (a key held in a variable, `env['T'] = TOKEN`, changed its messages; new findings through `this.T =` and `env.setProperty`): the JEN-013 messages are restored and the new findings are stated.
+Non-blocking notes it made, also handled: a chain of 2,000 calls exhausted the stack (the reader now reads past 150 levels by the names in the text); more than eight nested helpers passed (now twelve, then "cannot tell"); `%%NAME%%` and a Groovy local were read as `bat` variables; the whitelist accepted space and `=`; `git status | wc -l` was read as file names; `$.after`, `$.action` and `$.pull_request.merged` were high. Still open from it: a `\u000a` in a comment moves later line numbers by one (as Groovy 2.4 counts it), stated in the changelog.
+
+**Second review pass** (the same sub-agent, 65 new cases, 102 probes and its 203 first-pass cases re-run, on `13ba10c`; ids R2-). It confirmed B1 to B4, B7 and B10 fixed and found seven blocking classes in the new code, each fixed:
+- the implicit `it` was given only where a variable was assigned, so a nested loop over `it.items`, `for (e in it.items)`, `run(it)` and `env['MSG'] = it` lost the value; and a closure alias called made `it` a file-wide name again: every judgement during the walk now gets the enclosing body's `it`, an implicit `it` is never recorded as a name, and the innermost body with its own `it` decides for each step;
+- the per-file budget ran out on a 43 KB file and then let `${e.CHANGE_TITLE}` pass: past either budget a value is now at least "cannot tell";
+- still slow (4.7 and 5.7 s on 35 and 43 KB, base 1.4 and 2.0 s): the method-result cache now keys on the state of the names the method can read rather than on every change, so those files take 1.6 to 2.3 s (the third pass found that key incomplete; see below);
+- the cache reused a result computed under a recursion cut or a spent budget, and named the first caller's variable for the second (`q(t)` then `q(u)`): a result computed under a cut is not kept, and the key holds the arguments as given;
+- `bat`'s `%JOB_NAME%%CHANGE_TITLE%` was quiet (two adjacent names), and `%NAME%` of a value from a caller outside the file passed: names are now read left to right with `%%` as a literal, and a caller's value is "cannot tell";
+- a comment inside `${...}` holding `}` made the step low or quiet instead of high: the lexer now skips comments inside `${...}` and reads a slashy or dollar-slashy string there as text, so the whole expression is read (the first pass's regex case still parses);
+- the record still held a template marker, and the guide's words on `it` and on the budget were wrong.
+Non-blocking notes handled: an inner literal loop inside a tainted loop was high; `${}` was "cannot tell"; `env.getEnvironment().keySet()` (names, not values) was high. The other misses it listed are stated limits.
+
+**Third review pass** (the same sub-agent, 59 new cases, its 268 earlier cases re-run, and 1,734 Jenkinsfile texts from the base's Jenkins tests run through base and change for every rule, on `a3d687c`; ids R3-). It confirmed the second pass's findings fixed and found three blocking classes, each fixed:
+- the method-result cache could still reuse a stale result: a key held in a variable (`env[k]` with `k = 'T'`) or a value stored as `m.t` was not part of its key, the twelve-method cut was cached and returned only the names in the text, and recursion cut by name returned nothing for `f(b, null)`: the key now also holds the literals the method's words hold and the dotted keys under them, a result computed under a cut is not kept (from the fourth and fifth passes: a recursion cut or the twelve-method cut is kept for the same place in the chain, the call stack being part of the key; a result computed after a budget ran out, or with part of it more than 150 levels deep, never is), past twelve methods the call is read by its names and is at least "cannot tell", and a recursive call returns what it is given;
+- slow inputs under 50 KB: the lexer looked back over the whole interpolation before each `/` (9.6 s for 22,000 divisions; base 0.06 s), and the cache key read every word of a 2,500-name helper on every call: the lexer now looks back over spaces only and checks the deadline, the key's cost counts against the budget, and the per-file budget is about 300,000 steps (the largest text in that corpus used about 4,000);
+- `${tool 'M3'}` and `${tool name: 'jdk17', type: 'jdk'}`, a common idiom, were "cannot tell": command syntax inside `${...}` is now read as a statement.
+Non-blocking notes handled: `${i++ / 2}` and `a$/2` were read as strings; a multi-line slashy string inside `${...}` was refused; `bat`'s `50% done %X%` was a false positive and `%ProgramFiles(x86)%%X%` a miss (names now run from each `%` to the next, as cmd reads them). Left as stated limits: a closure defined in a tainted loop and called with no arguments keeps the loop's `it` (errs towards a finding); a value worked out for an uncalled method's parameter can reach a step outside it as "cannot tell"; a twelve-method chain whose names show only a branch name is low, which a build parameter drops.
+
+**Fourth review pass** (the same sub-agent, 15 new cases, its 327 earlier cases and the corpus re-run, on `836ea94`; ids R4-). It found three blocking items, each fixed: a caller's value stored as a map property (`opts.target = config.target` in a `vars/` step) passed, because the reader looked dotted keys up only among tainted values (older than the slice's later passes; base was quiet too): it now reads them among caller values as well; a 43 KB size case took 1.2 s (base 0.24 s), because results computed after a budget ran out were never kept, so every call expanded the helper chain again: a call is no longer expanded once a budget is spent, and the call stack is part of the key, so the case takes 0.36 s; and this record gave a wrong figure for the corpus. Non-blocking, handled: a block comment directly before a slashy string inside `${...}` made the file unreadable. Left: a recursive method whose result is a number still carries its argument's source (as before the slice); `${println x}` is reported though its value is null (as before).
+
+**Fifth review pass** (the same sub-agent, 11 new cases and its 342 earlier cases and the corpus re-run, on `1833b81`; ids R5-). It found two holes in the new caching, each a pass, both fixed: a result computed with part of it more than 150 levels deep (read by names only) was cached and reused for a plain call, and the cache key did not hold map properties that hold a caller's value (`opts.target = config.target`, walked after an earlier call). Such results are no longer cached, and the key holds those properties. Left: a nested-looking comment (`/* a /* b */`) before a slashy string holding `//` inside `${...}` makes the file unreadable, so every rule is "cannot tell". A closing check of these two fixes by the same sub-agent (on `cd4cb70`) found nothing blocking; it noted that a map property written with `this.` and read without it, or the reverse, is not linked (as before the slice).
+
+**Stated limits** (each a case in `LIMITS` with its reason): taint is kept by name for the whole file and never cleared (an implicit `it` excepted); keys of one map are not told apart, and a map's property is followed only when read as that property; containers filled through another name, closures in lists or passed to methods, curried closures, parameter defaults, `env` inside a map, `docker` held in another variable and `Runtime.exec` are not followed; a guard on the value (`==~`, `when { branch }`, an `if`, the webhook's `regexpFilter`) is not read; quoting in Groovy is not recognised; a whitelist keeping `-` can still let the value add an option; workspace files' contents are not counted as untrusted; `writeFile` then a later run is not followed; a computed step name, `invokeMethod`, a method called on a closure parameter and an interpolation the parser cannot read make the file or step "cannot tell"; past the reader's budget a value is at least "cannot tell"; a closure variable given to `each(f)`, a closure in a map called through an index, a `bat` script variable assigned twice, `this.sb << x`, `def s = sb << x` and an alias of `env.getEnvironment()` used whole are not followed. No stated limit is quiet where something was judged unless the rule was quiet there before the slice too (a test holds this).
+
+## Review of #365: a check under a changed `PATH` (OBAAF-JEN-010, 011 and 012)
+
+Pull request #365 (the lead session's, for #344) moved the publish template's `export PATH` into
+`withEnv(["PATH+OBAAF=..."])`, and its test asserted that OBAAF-JEN-010, 011 and 012 then passed. They passed because
+the shell reader read only the check's own script: the same `withEnv` with a folder from the workspace
+(`PATH+X=${env.WORKSPACE}/tools`) cleared all three. The review made such a check "cannot tell" (decision D-135; the
+record of cases is `tests/test_jenkins_check_environment.py`).
+
+**Attack on the first version** (an Opus 5.5 sub-agent that did not write it, about 285 attempts on `16872fb`, each
+run through the checker; Groovy and Jenkins were not run). Four classes got past it, each fixed with cases:
+
+- Groovy octal escapes were not decoded (`'\120ATH'` was read as `120ATH`), in every Jenkins rule;
+- `env` reached through the script object or a variable holding it (`this.env.setProperty`, `script.env['PATH']`,
+  `steps.env`, `def s = this; s.env.PATH`, `getProperty('env')`);
+- `withEnv` called through another receiver (`s.withEnv`), a method pointer, a quoted name, or in `options { }`;
+- writes in Groovy the walker does not walk: a `when { expression { } }`, a method an `environment` value or another
+  directive calls, a GString, a `for` loop's start.
+
+Non-blocking items handled: a matrix axis and a credential binding's variable around the step are read; the
+file-wide part is worked out once (2,000 assignments and 2,000 checks took 4.2 s, 6,300 took 27 s; now 1.2 and 3.4 s).
+Stated limits: the agent's own environment (`tools { }`, a container's image or `-e` options, a pod template's
+`envVars`, wrappers such as `withPythonEnv`), `env` handed on through a list or map, and false "cannot tell" for a
+parameter or local named `env`, a copy from `env.getEnvironment()`, a comment or string showing a write, and names
+such as `PYTHON_VERSION`.
+
+**Second attack pass** (the same sub-agent, about 265 attempts on `9f9ffee`). The four classes were fixed (the attacker's 39
+cases `unknown`), but the second version found writes to `env` in Groovy the walker does not walk with a scan of the
+file's text, and that scan was got past with an alias of `env`, a comment between `env` and the name, `(env)`, a
+`\u0050` escape, a triple-quoted or quoted name, `this."env"`, a multiple assignment, a computed setter name, a
+method pointer (`env.&setProperty`), `env.identity { }`, `getProperty('e' + 'nv')`, a computed `withEnv` or a
+pointer to one; and one 256 KiB line of `env[` took 135 s. The scan is replaced by a reading of every node of the
+parsed file, and of every `${...}` parsed as statements; a call or pointer whose name is computed, and a statement
+the parser could not read near `env`, are "cannot tell". The same pass found the lexer change correct: colour codes
+give the verdicts they gave, `'\174\174 true'` and `'\046'`, which passed, now give their findings, and slashy
+strings are not decoded.
+
+**Third attack pass** (the same sub-agent, about 360 attempts on `6007f19`). All earlier cases were `unknown` and
+the slow inputs took under a quarter of a second. It got past the node reading with `env` reached as a value:
+through a ternary, `?:`, `as`, a method's or closure's result, a closure whose `delegate` is `env` (the usual
+Jenkins configuration idiom), a script property (`this.e = env`); and with Groovy the parser keeps no node for (a
+method's parameter default, a switch case label). Now any use of `env` other than a read, a write or a method call
+on it counts as a name the checker cannot read, and those texts, a loop's header and a postfix `++` are searched.
+Code from outside the file that runs in a `when` expression (`load`, a shared-library step) is not read by any rule
+there, before or after this change (#370). The claims reviewer's third pass found that writes inside a `${...}` were
+reported with the interpolation's own line numbers and that an unreadable statement there was looked for in the
+file's first lines; both are fixed, and a loop bounded by an `env` value no longer counts.
+
+**Fourth attack pass** (the same sub-agent, about 220 attempts on `75146e9`). All earlier cases were `unknown`. It
+got past with `getProperty('env')` on a closure's `owner`, `delegate` or `thisObject`, a computed property of one
+of them, a pointer to `getProperty`, a `\u0065nv` escape in the texts the parser drops (they were searched before
+the escapes were translated), `getProperty` with a computed name in a default or a loop's header, and a case label
+over several lines; it also found false "cannot tell" for `buildInfo.env.collect()` and a YAML file's `env`. Each
+is fixed: `getProperty` and `getAt` reach `env` on any receiver, a property named `env` counts on a receiver that
+can be the script (or where it is written to), the texts are translated first and searched for `getProperty` too,
+and a case label runs to the next case.
+
+**Fifth attack pass** (the same sub-agent, about 100 attempts on `3bb3520`). It found `getProperty('env')` on a
+method's result or an index (`me().getProperty('env')`, `[this][0].getAt('env')`, `getOwner().getProperty`) and
+`this['env']` or `this.'env'` in the dropped texts, both fixed; and, needing data flow, `this` through a ternary,
+`it`, `owner.owner`, now read, and `me().env`, a stated limit with other reflection the checker does not model.
+A last pass (about 60 attempts on `8d98aea`) found a triple-quoted `env` in the dropped texts, fixed; and the claims
+reviewer found that `targets.each { echo(it.env) }` was "cannot tell", so a parameter's or `it`'s `env` now counts
+only where it is written to or given a method that may set a variable, and a variable given one is followed.
+
+**Claims review** (a second Opus 5.5 sub-agent): the template is "cannot tell" for its `PATH` change only (replacing
+both `withEnv` calls with `dir('.')` gives three passes); a check under such a variable before a publish in a later
+stage's failure-path `post` block gives a new high OBAAF-JEN-011, which the texts now say; `--revision-file`
+accepted only 40 or 64 lower-case hex digits with at most one line ending, refused every other file it could read
+with exit 2 and gave no traceback; a FIFO with no writer waits. Its second pass found the computed setter name the
+attack found too.

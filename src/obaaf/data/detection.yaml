@@ -1061,6 +1061,16 @@ upload_commands:
   - '(^|[\s;&|(])git\s+push\b[^\n]*\s--(tags|follow-tags)\b'
   - '(^|[\s;&|(])aws\s+(-\S+\s+\S+\s+)*s3\s+(cp|sync|mv)\b'
   - '(^|[\s;&|(])docker\s+(buildx\s+)?(build|bake)\b[^\n]*\s--push\b'
+  # Flagship slice 2d.14: an image build whose output pushes, read as `workflow.image_output_pushes` reads
+  # an action's `outputs`: `-o`/`--output` of type `registry`, of type `image` with a `push` or
+  # `push-by-digest` that is not false or an expression in it, or whose type or whole value is an
+  # expression; bake's `--set` of an `output` the same way (also `+=`), of `push` not false, or with an
+  # expression before its `=`. It looks up to 8,192 characters or quoted strings into one command, past
+  # quoted text but not past an unquoted `;`, `&` or `|`, and reads each output's first 256 characters or
+  # expressions, not past a space before the next option, inside an expression too. And a multi-platform
+  # image's manifest list, which `docker buildx imagetools create` pushes unless it is given `--dry-run`.
+  - '(^|[\s;&|(])docker\s+(buildx\s+(build|bake|b)|(builder\s+|image\s+)?(build|bake))\b(?:[^\n;&|''"]|''[^''\n]{0,4096}''|"[^"\n]{0,4096}"){0,8192}?\s((-o(\s+|=)?|--output(\s+|=))[''"]?(?:(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}type=registry\b)|(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}type=image\b)(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}(?:\bpush(?:-by-digest)?=(?!(false|False|FALSE|0|f|F)\b)|\$\{\{))|(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}type=\$\{\{)|\$\{\{)|--set(\s+|=)[''"]?(?:[^\s;&|''"=]*\$\{\{|[^\s;&|''"=.]*\.(push\+?=(?!(false|False|FALSE|0|f|F)\b)|outputs?\+?=[''"]?(?:(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}type=registry\b)|(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}type=image\b)(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}(?:\bpush(?:-by-digest)?=(?!(false|False|FALSE|0|f|F)\b)|\$\{\{))|(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}type=\$\{\{)|\$\{\{))))'
+  - '(^|[\s;&|(])docker\s+buildx\s+imagetools\s+create\b(?![^\n;&|#]{0,65536}\s--dry-run(=(true|True|TRUE|1|t|T))?(?=\s|$))'
   - '(^|[\s;&|(])docker\s+(image|manifest)\s+push\b'
   - '(^|[\s;&|(])(npm|pnpm|yarn)\s+(-\S+\s+)*(npm\s+)?publish\b(?!(?=[^\n;&|#]*\s--dry-run(=true)?(?!\S)(?!\s+(false|0|no)(\s|$)))(?![^\n;&|#]*\s(--dry-run=(false|0|no)|--dry-run\s+(false|0|no)|--no-dry-run)(?!\S)))'
   - '(^|[\s;&|(])cargo\s+(\+\S+\s+)?publish\b(?!(?=[^\n;&|#]*\s--dry-run(=true)?(?!\S)(?!\s+(false|0|no)(\s|$)))(?![^\n;&|#]*\s(--dry-run=(false|0|no)|--dry-run\s+(false|0|no)|--no-dry-run)(?!\S)))'
@@ -1345,7 +1355,7 @@ harden_runner_releases:
 
 # Commits of OBAAF's egress action (actions/egress, slice 2c.2) that OBAAF lists as released: each
 # one a commit the escape tests passed on, listed by a maintainer. OBAAF-GHA-020 credits the action
-# only at one of these. None is listed yet, so the action is "cannot tell" at best.
+# only at one of these. The workflow must also meet the other egress control conditions.
 #
 # Only a commit at or after `egress_action_floor` may be listed. The floor was the merge of slice 2c.4
 # (#128): the checker reads the action's `model-keys` and `env` inputs as the action reads them from
@@ -1371,4 +1381,5 @@ harden_runner_releases:
 # whose action's own steps differ from the floor's where the checker's verdicts rest on them. A later
 # commit that reads its inputs another way must not be listed until the checker reads it that way too.
 egress_action_floor: f3b50d418f421ea5dd17b277310fa11fe3541635
-egress_action_releases: []
+egress_action_releases:
+  - 80db1e68769165c9ecf24e553254fa35d6e168d5

@@ -81,6 +81,17 @@ class PaperworkTest(unittest.TestCase):
                 self.assertEqual(len(candidate.items), 1)
                 self.prove(candidate)
 
+    def test_a_hash_in_a_json_baseline_value_does_not_block_its_removal(self):
+        # From the review of #278: JSON has no comments, so `#` in a reason is not one.
+        f = next(f for f in self.result().findings if f.rule == "OBAAF-GHA-008")
+        valid = baseline.entry_for(f, "@prior", "prior review", self.expiry)
+        stale = dict(valid, path="missing", reason="tracked in #42")
+        self.base.write_text(json.dumps({"format": baseline.FORMAT, "findings": [valid, stale]}))
+        self.options = replace(self.options, baseline=Path("accepted.json"))
+        c = self.planned()
+        self.assertEqual(json.loads(c.edits[0].after)["findings"], [valid])
+        self.prove(c)
+
     def test_unique_lane_and_ambiguous_or_distant_lane(self):
         key = self.file + "#build"
         self.config.write_text(f"lanes:\n  {key}: trused # retain me\n")

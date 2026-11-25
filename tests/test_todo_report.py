@@ -87,6 +87,14 @@ class TodoOrderAndFieldsTest(unittest.TestCase):
         ])
         self.assertEqual([g["count"] for g in groups], [1, 2, 1, 1, 1, 3])
 
+    def test_checkout_preview_precedes_higher_severity_manual_work(self):
+        checkout = Finding("OBAAF-GHA-011", "low", "ci.yml", 1, "Checkout.")
+        manual = Finding("OBAAF-JEN-001", "high", "Jenkinsfile", 1, "Review manually.")
+        groups = self.todo([manual, checkout])
+        self.assertEqual(groups[0]["id"], "checkout-credentials")
+        self.assertIsNotNone(groups[0]["command"])
+        self.assertIsNone(groups[1]["command"])
+
     def test_fields_of_a_rule_entry_and_an_acceptance_entry(self):
         ownerless = Finding("OBAAF-GHA-011", "high", "wf", 1, "Kept.")
         ownerless.acceptance = acceptance.make(acceptance.IGNORE, None, "reviewed", "2027-01-01",
@@ -119,6 +127,33 @@ class TodoOrderAndFieldsTest(unittest.TestCase):
         stale = [{"path": "wf"}, {"rule": "OBAAF-GHA-009", "path": "wf", "job": ["j"]}, "not an entry"]
         groups = self.todo([odd, old], baseline_stale=stale, baseline_format=baseline.FORMAT_V1, options=None)
         self.assertEqual(sum(g["count"] for g in groups), 2)
+
+    def test_missing_owner_preview_distinguishes_ignore_and_baseline_entries(self):
+        findings = []
+        for source in (acceptance.BASELINE, acceptance.IGNORE):
+            finding = Finding("OBAAF-GHA-011", "high", "wf", 1, "Kept.")
+            finding.acceptance = acceptance.make(source, None, "reviewed", "2027-01-01", date(2026, 11, 19))
+            findings.append(finding)
+        baseline_only, = self.todo(findings[:1], whole_repository=True)
+        self.assertIsNone(baseline_only["command"])
+        mixed, = self.todo(findings, whole_repository=True)
+        self.assertIn("--owner OWNER", mixed["command"])
+        self.assertIn("baseline entries by hand", mixed["nextAction"])
+        # Review of #364: the command ends its line, so it can be copied to the end of the line.
+        self.assertTrue(mixed["nextAction"].endswith(mixed["command"]), mixed["nextAction"])
+        for fields, hint in (({"errors": ["incomplete"]}, "scan errors"),
+                             ({"checked": "line\nbreak"}, "cannot be printed"),
+                             ({"baseline_format": baseline.FORMAT_V1}, "Migrate the old-format baseline")):
+            rows = self.todo(findings, whole_repository=True, **fields)
+            row = next(row for row in rows if row["id"] == "acceptance-owner-missing")
+            self.assertIsNone(row["command"])
+            self.assertIn(hint, row["nextAction"])
+            if "baseline_format" in fields:
+                # The migration it waits for comes first.
+                self.assertEqual(rows[0]["id"], "acceptance-old-baseline", rows)
+        # A prerequisite keeps the cause's own advice (review of #364).
+        row, = self.todo(findings, whole_repository=False)
+        self.assertIn("record the responsible owner", row["nextAction"])
 
     def test_an_inconsistent_catalogue_leaves_the_list_empty_and_says_why(self):
         from obaaf.catalog import load

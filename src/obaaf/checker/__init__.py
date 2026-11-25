@@ -18,7 +18,10 @@ import shlex
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from obaaf.settings_evidence import SettingsEvidence
 
 from obaaf import yamlutil
 from obaaf.catalog import Catalog, load
@@ -2229,6 +2232,9 @@ class Config:
             raise ConfigError(f"{path}: unknown setting(s) {', '.join(unknown)}; the checker reads "
                               f"{', '.join(sorted(CONFIG_KEYS))}")
         ignore = data.get("ignore") or []
+        if not isinstance(ignore, list):
+            # `ignore: 5` raised TypeError here (found by the review of #278).
+            raise ConfigError(f"{path}: ignore must be a list of entries")
         for entry in ignore:
             if not isinstance(entry, dict):
                 raise ConfigError(f"{path}: every ignore entry must be a mapping")
@@ -2307,8 +2313,10 @@ class CheckResult:
     checked: str = ""                                        # the path the command line asked to check
     options: list[str] = field(default_factory=list)         # --config and --platform as the command line gave them
     today: date | None = None                                # the day acceptances were judged against
+    whole_repository: bool = False                           # a repository root on every platform, not a part
 
     fail_on: str = "medium"  # threshold to reproduce in the report’s suggested commands
+    settings_path: str = ""  # explicitly selected offline settings evidence
 
     @property
     def workflow_files(self) -> list[str]:
@@ -2331,6 +2339,13 @@ class CheckResult:
     def at_or_above(self, severity: str) -> list[Finding]:
         threshold = SEVERITY_ORDER[severity]
         return [f for f in self.active() if SEVERITY_ORDER[f.severity] >= threshold]
+
+    def unmatched_ignores(self):
+        for entry in self.config.ignore:
+            if not any(f.rule == entry["rule"] and f.rule != IDLE_DECLARATION
+                       and fnmatch.fnmatch(f.path, str(entry["path"]))
+                       and (not entry.get("job") or entry["job"] == f.job) for f in self.findings):
+                yield entry
 
     def stale_gating(self, spec: str, catalog: Catalog) -> list[dict]:
         """Baseline entries no finding matched that make `--fail-on spec` fail: the same threshold and
@@ -2415,7 +2430,7 @@ def _resolve(target: Path, platform: str) -> tuple[Path, list[Path], list[Path],
 
 def check(target: Path, files: list[Path] | None = None, config: Config | None = None,
           catalog: Catalog | None = None, today: date | None = None, platform: str = "auto",
-          gate_files: list[Path] | None = None) -> CheckResult:
+          gate_files: list[Path] | None = None, settings: SettingsEvidence | None = None) -> CheckResult:
     """Check a repository root (workflows, Jenkinsfiles and repository files) or specific files.
 
     platform: auto (both kinds of CI definition), github (workflows only) or jenkins (Jenkinsfiles only).
@@ -2436,9 +2451,15 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
             jenkins_paths = [f for f in files if platform == "jenkins" or jenkins_mod.is_jenkinsfile(f)
                              or f.suffix.lower() == ".groovy"]
             files = [f for f in files if f not in jenkins_paths]
+    if settings is not None:
+        settings = settings.for_scan(root, is_repo)
+        gate_files = [*(gate_files or []), settings.source]
     config = config or Config.load(root)
     # Jenkinsfiles are found from the repository root, not from .github/workflows.
     jenkins_sought = is_repo and platform != "github" and target == root
+    # Only a check of the repository's own folder, on every platform, can tell that a baseline or
+    # ignore entry matches no finding at all (fix_paperwork._full_scope makes the same test).
+    whole_repository = is_repo and platform == "auto" and target == root
     errors: list[str] = []
     jenkins_notes: list[str] = []
     if jenkins_sought:
@@ -2513,7 +2534,7 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
                 suspect_jobs.append((rel, job.id))
         try:
             found = rules_mod.WorkflowRules(workflow, catalog, protected=config.protected_secrets,
-                                            agents=config.agents, firewall=firewall).run()
+                                            agents=config.agents, firewall=firewall, settings=settings).run()
         except expr_mod.TooComplex as exc:
             # A file the checker could not read is an error, never a pass.
             errors.append(f"{rel}: {exc}")
@@ -2575,7 +2596,8 @@ def check(target: Path, files: list[Path] | None = None, config: Config | None =
         cov.extend(jenkins_mod.coverage(result, findings))
         summaries.append(jenkins_mod.summary(result))
     return CheckResult(findings=findings, files=rels, errors=errors, config=config, notes=notes,
-                       jenkins_files=jenkins_rels, coverage=cov, jenkins=summaries, today=today)
+                       jenkins_files=jenkins_rels, coverage=cov, jenkins=summaries, today=today,
+                       whole_repository=whole_repository)
 
 
 def _prepare_workflows(read: list, root: Path, actions_root: Path | None, config: "Config",
