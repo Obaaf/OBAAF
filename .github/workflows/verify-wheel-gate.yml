@@ -1,0 +1,82 @@
+name: Verify gate patch compatibility from the installed wheel
+on:
+  push:
+    branches: [lead/verify-wheel-gate-60ba958-d9e643f]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 1a5715d413215a2d0e983daef6def8f9aea76303
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Build from the sdist and replay the public CLI patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          sandbox_dir="$(mktemp -d "$RUNNER_TEMP/obaaf-wheel.XXXXXX")"
+          export TMPDIR="$sandbox_dir/tmp"
+          mkdir "$TMPDIR"
+          if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          test "$(git rev-parse HEAD)" = 1a5715d413215a2d0e983daef6def8f9aea76303
+          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-edit --no-ff 60ba958709925ccd24c5bd23fa62b9fce34bc43c
+          git -c user.name='OBAAF validation' -c user.email='validation@users.noreply.github.com' merge --no-edit --no-ff d9e643f7e4cf7c284fd6c1e568c696de82d5ed92
+          git rev-parse HEAD^{tree}
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt setuptools
+          python -c 'from setuptools.build_meta import build_sdist; import sys; build_sdist(sys.argv[1])' "$sandbox_dir"
+          python -m pip wheel --no-deps --no-build-isolation --wheel-dir "$sandbox_dir" "$sandbox_dir"/obaaf-*.tar.gz
+          python -m venv "$sandbox_dir/clean"
+          "$sandbox_dir/clean/bin/python" -m pip install --constraint actions/setup-obaaf/constraints.txt "$sandbox_dir"/obaaf-*.whl
+          cd "$sandbox_dir"
+          "$sandbox_dir/clean/bin/python" -I - <<'PY'
+          from importlib.resources import files
+          from pathlib import Path
+          import os
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          import obaaf
+          
+          assert Path(obaaf.__file__).resolve().is_relative_to(Path(sys.prefix))
+          cli = str(Path(sys.executable).with_name("obaaf"))
+          src = Path(os.environ["GITHUB_WORKSPACE"])
+          data = files("obaaf.data")
+          first = data.joinpath("init-gate-27b15c9.yaml").read_bytes()
+          assert first == (src/"tests/fixtures/init/gate-template-27b15c9.yaml").read_bytes()
+          current = data.joinpath("init-workflow.yaml").read_bytes()
+          old = (src/"tests/fixtures/init/report-only-3.3.yaml").read_bytes()
+          report = b'obaaf check source "${config[@]}" --fail-on never\n'
+          gate = b'gate_check .github/obaaf-baseline.json --fail-on medium\n'
+          workflow = Path(".github/workflows/obaaf-pipeline-check.yml")
+          def run(root, *args):
+              return subprocess.run(args, cwd=root, capture_output=True, check=True).stdout
+          for name, original, expected_source in [("old-report", old, first), ("first-gate", first, first), ("settings", current, current)]:
+              for eol in (b"\n", b"\r\n"):
+                  with tempfile.TemporaryDirectory() as temp:
+                      root = Path(temp) / "example repository"
+                      (root/workflow.parent).mkdir(parents=True)
+                      run(root, "git", "init", "-q")
+                      run(root, "git", "config", "core.autocrlf", "false")
+                      before = original.replace(b"\n", eol)
+                      (root/workflow).write_bytes(before)
+                      run(root, "git", "add", ".")
+                      patch = str(Path(temp) / "review.patch")
+                      run(root, cli, "fix", ".", "--gate", "medium", "--patch", patch)
+                      assert (root/workflow).read_bytes() == before
+                      run(root, "git", "apply", "--check", patch)
+                      run(root, "git", "apply", patch)
+                      after = (root/workflow).read_bytes()
+                      assert expected_source.count(report) == 1
+                      assert after == expected_source.replace(report, gate).replace(b"\n", eol)
+                      assert re.findall(rb"setup-obaaf@[0-9a-f]{40}", after) == re.findall(rb"setup-obaaf@[0-9a-f]{40}", before)
+                      assert run(root, "git", "diff", "--name-only", "-z") == workflow.as_posix().encode() + b"\x00"
+                      print(name, "CRLF" if eol == b"\r\n" else "LF", "preserved original checker pin and exact expected workflow bytes")
+          PY
