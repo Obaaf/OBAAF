@@ -6,6 +6,7 @@ import difflib
 import errno
 import os
 from pathlib import Path, PureWindowsPath
+import subprocess
 
 from obaaf.checker.workflow import one_line
 from obaaf.fix_proof import ProofError
@@ -42,15 +43,33 @@ def _patch_lines(edits):
                 yield b"\\ No newline at end of file\n"
 
 
-# Variables that move the work tree, the repository or the attributes Git uses. OBAAF's own Git queries
-# run without any GIT_ variable (fix_apply._git), so with one set the user's `git apply` could read the
-# patch's paths from another folder than the one checked (second review of review-gpt #368).
+# Variables that move the repository or the work tree Git uses. They are refused rather than followed.
 GIT_LOCATION = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_ATTR_SOURCE")
-# Configuration given in the environment is common (URL rewrites, credential helpers), so it is refused
-# only where it names a key that moves the work tree or the attributes.
-GIT_LOCATION_KEYS = ("core.worktree", "core.attributesfile")
+# Kept for these queries, unlike fix_apply._git: the caller's own configuration (attributes, ignore rules,
+# core.worktree, files it includes) and search limits, which their `git apply` will use too (third
+# review of review-gpt #368). The queries are read-only and run no filter.
+GIT_KEPT = ("GIT_CONFIG", "GIT_CEILING_DIRECTORIES")
 TOP_ONLY = ("--patch needs the top folder of the Git work tree: git apply reads the patch's paths from there, "
             "so a patch from a folder below it would change other files or none")
+
+
+def _query(git, root, *args):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") or k.startswith(GIT_KEPT)}
+    env.pop("LANGUAGE", None)
+    env.update(GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="", GIT_OPTIONAL_LOCKS="0", LC_ALL="C")
+    command = [str(git), "--literal-pathspecs", "--no-replace-objects", "-c", "core.hooksPath=/dev/null",
+               "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", *args]
+    try:
+        return subprocess.run(command, cwd=root, env=env, capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ProofError(f"Git could not be run: {exc}") from exc
+
+
+def _answer(git, root, *args):
+    done = _query(git, root, *args)
+    if done.returncode:
+        raise ProofError("Git could not read the repository: " + one_line(done.stderr.decode(errors="replace").strip()))
+    return done.stdout
 
 
 def check_git_targets(root, edits):
@@ -59,52 +78,48 @@ def check_git_targets(root, edits):
     Git reads a patch's paths from the top of the work tree it finds. From a checked folder below
     the top, the patch would change a file the proof never read, or, run in that folder, nothing at
     all, with exit 0 both times. Outside any work tree Git reads them from the folder it runs in, so
-    the checked folder itself is right. A folder is taken to be outside one only when neither it nor
-    a folder above it holds `.git`; otherwise Git must run and say this is the top, and a failure
-    (no Git, a repository owned by another user) refuses. The per-file refusals are those of
-    `--apply` that matter to Git as well: a target Git would not show as changed (assume-unchanged,
-    skip-worktree, ignored), and a checkout transformation `--apply` also refuses."""
+    the checked folder itself is right. Where neither the folder nor one above it holds `.git`, that
+    is taken as outside; otherwise Git must run and either say this is the top or that there is no
+    repository, and any other answer (no Git, a repository owned by another user) refuses. The
+    per-file refusals are those of `--apply` that matter to Git as well: a target Git would not show
+    as changed (assume-unchanged, skip-worktree, ignored), and a checkout transformation `--apply`
+    also refuses."""
     from obaaf.checker.repo import find_git
-    from obaaf.fix_apply import _git
 
     named = sorted(name for name in GIT_LOCATION if name in os.environ)
-    count = os.environ.get("GIT_CONFIG_COUNT", "")
-    keys = [os.environ.get(f"GIT_CONFIG_KEY_{i}", "") for i in range(int(count))] if count.isdigit() else []
-    if (any(key.strip().lower() in GIT_LOCATION_KEYS for key in keys)
-            or any(key in os.environ.get("GIT_CONFIG_PARAMETERS", "").lower() for key in GIT_LOCATION_KEYS)):
-        named.append("a GIT_CONFIG variable naming core.worktree or core.attributesFile")
     if named:
         raise ProofError(f"--patch cannot tell which work tree git apply would use while {', '.join(named)} "
                          "is set; unset it and rerun")
     marked = any(os.path.lexists(folder / ".git") for folder in (root, *root.parents))
     git = find_git(root)
-    try:
-        if not git:
-            raise ProofError("no git program was found on the PATH")
-        inside = _git(git, root, "rev-parse", "--is-inside-work-tree")
-    except ProofError as exc:
+    if not git:
         if marked:
-            raise ProofError(f"{TOP_ONLY}, and Git could not say whether this is it ({exc}); "
-                             "run obaaf fix where Git can read the repository") from exc
+            raise ProofError(f"{TOP_ONLY}, and no git program on the PATH can confirm this folder is it")
         return
-    top = _git(git, root, "rev-parse", "--show-toplevel").rstrip(b"\n") if inside == b"true\n" else b""
+    done = _query(git, root, "rev-parse", "--is-inside-work-tree")
+    if done.returncode:
+        if not marked or b"not a git repository" in done.stderr:
+            return
+        raise ProofError(f"{TOP_ONLY}, and Git could not read the repository here: "
+                         + one_line(done.stderr.decode(errors="replace").strip()))
+    top = _answer(git, root, "rev-parse", "--show-toplevel").rstrip(b"\n") if done.stdout == b"true\n" else b""
     try:
         same = bool(top) and os.path.samestat(os.stat(os.fsdecode(top)), os.stat(root))
     except OSError:
         same = False
-    if not same or _git(git, root, "rev-parse", "--show-prefix") != b"\n":
+    if not same or _answer(git, root, "rev-parse", "--show-prefix") != b"\n":
         raise ProofError(TOP_ONLY + "; run obaaf fix on the top folder")
     for edit in edits:
         name = edit.path.as_posix()
-        listed = _git(git, root, "ls-files", "-v", "-z", "--", name)
+        listed = _answer(git, root, "ls-files", "-v", "-z", "--", name)
         # `H` is a plain tracked entry; an untracked target lists nothing.
         if listed and listed != b"H " + os.fsencode(name) + b"\0":
             raise ProofError(f"{name}: Git's index marks it assume-unchanged or skip-worktree (or it has a "
                              "conflict), so Git would not show the change; clear it with git update-index first")
-        # check-ignore takes no literal pathspec, which _git always sets; ls-files does.
-        if not listed and _git(git, root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", name):
+        # check-ignore takes no literal pathspec; ls-files does.
+        if not listed and _answer(git, root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", name):
             raise ProofError(f"{name}: Git ignores this untracked file, so Git would not show the change")
-        attrs = _git(git, root, "check-attr", "-z", "filter", "ident", "working-tree-encoding", "--", name)
+        attrs = _answer(git, root, "check-attr", "-z", "filter", "ident", "working-tree-encoding", "--", name)
         if any(value not in (b"unspecified", b"unset") for value in attrs.rstrip(b"\0").split(b"\0")[2::3]):
             raise ProofError(f"{name}: a filter, ident or working-tree-encoding attribute would make git apply "
                              "write other bytes than the proven ones")

@@ -207,12 +207,9 @@ class FixPatchReviewTest(unittest.TestCase):
 
         self.config.write_bytes(self.policy(b"\n", True))
         self.git("add", ".")
-        moved = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "Core.WorkTree", "GIT_CONFIG_VALUE_0": "/elsewhere"}
         for name, values in (("GIT_DIR", {"GIT_DIR": str(self.root / ".git")}),
-                             ("GIT_WORK_TREE", {"GIT_WORK_TREE": str(self.root)}),
-                             ("core.worktree", moved),
-                             ("core.worktree", {"GIT_CONFIG_PARAMETERS": "'core.worktree'='/elsewhere'"})):
-            with self.subTest(name=name, values=values), mock.patch.dict(os.environ, values):
+                             ("GIT_WORK_TREE", {"GIT_WORK_TREE": str(self.root)})):
+            with self.subTest(name=name), mock.patch.dict(os.environ, values):
                 code, _, err = self.export()
                 self.assertEqual(code, 2, err)
                 self.assertIn(name, err)
@@ -222,6 +219,38 @@ class FixPatchReviewTest(unittest.TestCase):
                  "GIT_CONFIG_VALUE_0": "git@example.com:"}
         with mock.patch.dict(os.environ, other):
             code, _, err = self.export()
+        self.assertEqual(code, 0, err)
+
+    def test_configuration_from_the_environment_is_read(self):
+        # Third review: a config file named in the environment, or included from one, set attributes
+        # that the check, which ran Git without them, never saw. (Git reads core.worktree only from the
+        # repository's own configuration, so in the environment it moves nothing.)
+        from unittest import mock
+
+        self.config.write_bytes(self.policy(b"\n", True))
+        self.git("add", ".")
+        attributes = self.root.parent / "attributes"
+        attributes.write_text("*.yml ident\n")
+        included = self.root.parent / "included.cfg"
+        included.write_text(f"[core]\n\tattributesFile = {attributes.as_posix()}\n")
+        for values in ({"GIT_CONFIG_GLOBAL": str(included)},
+                       {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "include.path", "GIT_CONFIG_VALUE_0": str(included)}):
+            with self.subTest(values=values), mock.patch.dict(os.environ, values):
+                code, _, err = self.export()
+                self.assertEqual(code, 2, err)
+                self.assertFalse(self.patch.exists())
+
+    def test_a_stray_git_entry_above_a_plain_folder_is_not_a_work_tree(self):
+        import shutil
+
+        shutil.rmtree(self.root / ".git")
+        (self.root.parent / ".git").mkdir()
+        self.addCleanup((self.root.parent / ".git").rmdir)
+        probe = subprocess.run(["git", "-C", str(self.root), "rev-parse", "--is-inside-work-tree"], capture_output=True)
+        if probe.returncode == 0:
+            self.skipTest("the temporary folder is inside a Git work tree")
+        self.config.write_bytes(self.policy(b"\n", True))
+        code, _, err = self.export()
         self.assertEqual(code, 0, err)
 
     def test_an_ignored_untracked_target_is_refused(self):
