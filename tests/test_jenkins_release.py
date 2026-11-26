@@ -163,11 +163,21 @@ class JenkinsReleaseLaneTest(unittest.TestCase):
         # What the publish template runs before anyone approves.
         before = self.verify(envelopes, release_run=tag_build(self.rev), pre_approval=True)
         self.assertTrue(before.ok, before.blocks)
-        self.assertFalse(self.verify(envelopes, release_run=tag_build("b" * 40), pre_approval=True).ok)
+        blocked = self.verify(envelopes, release_run=tag_build("b" * 40), pre_approval=True)
+        self.assertFalse(blocked.ok)
+        # A pre-approval run that blocks never says PASSED (review of #393).
+        self.assertEqual(blocked.to_text().splitlines()[0], "Release verification: BLOCKED, do not upload")
         after = self.verify(envelopes, approvals=publish_run(), release_run=tag_build(self.rev))
         self.assertTrue(after.ok, after.blocks)
         self.assertEqual(after.approvals, ["carol"])
         self.assertEqual(after.artifacts[0]["tier"], "B")
+
+    def test_pre_approval_with_no_approvals_required_still_needs_full_verification(self):
+        self.policy.write_text(self.policy.read_text().replace("min_approvals: 1", "min_approvals: 0"))
+        result = self.verify(self.write_records(), release_run=tag_build(self.rev), pre_approval=True)
+        self.assertTrue(result.ok, result.blocks)
+        self.assertEqual(result.to_text().splitlines()[0],
+                         "Pre-approval checks: PASSED, full verification is still required")
 
     def test_raw_r_s_signatures_from_a_key_service_are_accepted(self):
         self.assertTrue(self.verify(self.write_records(p1363=True), pre_approval=True).ok)
@@ -177,15 +187,25 @@ class JenkinsReleaseLaneTest(unittest.TestCase):
         (self.tmp / "publish-run.json").write_text(json.dumps(publish_run()))
         (self.tmp / "release-run.json").write_text(json.dumps(tag_build(self.rev)))
         args = ["verify", "release", "--policy", self.policy, "--artifacts", self.dist,
-                "--approvals", self.tmp / "publish-run.json", "--release-run", self.tmp / "release-run.json",
+                "--release-run", self.tmp / "release-run.json",
                 "--repo-dir", self.repo]
         for env in envelopes:
             args += ["--dsse", env]
+        code, out, err = run_cli(*args, "--source-revision", self.rev, "--pre-approval")
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual(out.splitlines()[0], "Pre-approval checks: PASSED, release approval is still required")
+        code, out, err = run_cli(*args, "--source-revision", self.rev)
+        self.assertEqual(code, 1, err or out)
+        self.assertEqual(out.splitlines()[0], "Release verification: BLOCKED, do not upload")
+        # Blocked for the missing approval itself, not only for the missing publishing build's JSON.
+        self.assertIn("no Jenkins approvals were supplied", out)
+        args += ["--approvals", self.tmp / "publish-run.json"]
         revision_file = self.tmp / "release-sha.txt"
         revision_file.write_text(self.rev + "\n", encoding="ascii")
         for revision in (["--source-revision", self.rev], ["--revision-file", revision_file]):
             code, out, err = run_cli(*args, *revision)
             self.assertEqual(code, 0, err or out)
+            self.assertEqual(out.splitlines()[0], "Release verification: PASSED, upload may proceed")
             self.assertIn("release approved by: carol", out)
         revision_file.write_text("b" * 40, encoding="ascii")
         self.assertEqual(run_cli(*args, "--revision-file", revision_file)[0], 1)

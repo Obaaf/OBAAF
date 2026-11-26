@@ -4,6 +4,14 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### A passing pre-approval run no longer says the upload may proceed
+
+Issue #391. `obaaf verify release --pre-approval` runs before anyone approves a release, so the approver can read the result, and it skips the approvals. When it passed, its first line was `Release verification: PASSED, upload may proceed`, the line a full verification prints, while a warning further down said the approvals were not checked. The release manager reads this log, in Jenkins and in a GitHub run's summary, before deciding to approve.
+
+- **Now the text report of a passing pre-approval run begins** `Pre-approval checks: PASSED, release approval is still required`, or, where the policy's `release.min_approvals` is 0 or less, `Pre-approval checks: PASSED, full verification is still required`. The text report is what the console shows by default (and with `--format json --output FILE`), and what goes in the GitHub step summary.
+- **Not changed:** the text report of a full verification that passes still begins `Release verification: PASSED, upload may proceed`, and that of any run that blocks, with `--pre-approval` or without, `Release verification: BLOCKED, do not upload`; a run that stops on an error writes no report, as before. Exit statuses and the JSON decision are unchanged: a passing pre-approval run still has `"allowed": true`, with the warning as the only sign that approvals were skipped (#394).
+- **Worth knowing:** a script that matched the first line of a pre-approval run against `Release verification: PASSED` no longer matches; `PASSED` alone still does. Neither OBAAF template reads the text.
+
 ### `${{ }}` expressions that read `env` in a step's command lines
 
 Slice 2d.19, from #382; decision D-142. GitHub works out a `${{ }}` expression in a step's `run` before the shell starts, with the `env` context: the step's own `env` over its job's over its workflow's. The checker read such an expression as written, so `run: ${{ env.AGENT }} -p review` with `AGENT: claude` in the job's `env` put the job in no agent lane, and no agent rule applied.
