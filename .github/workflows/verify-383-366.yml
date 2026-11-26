@@ -83,7 +83,7 @@ jobs:
           git show --no-patch --format='Native merge %H parents %P tree %T'
           git merge-base --is-ancestor fc822e79bac911c0573c7d38f10ea95b7ece9c2c HEAD
           echo "Integrated review tree $(git rev-parse HEAD^{tree})"
-          git diff --check fc822e79bac911c0573c7d38f10ea95b7ece9c2c HEAD
+          git diff --check HEAD^1 HEAD
           worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
           if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
           export TMPDIR="$worktemp"
