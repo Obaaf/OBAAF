@@ -141,6 +141,26 @@ class TheLanesTest(unittest.TestCase):
             "        env:\n", "        with: {script: $TOOLS/review.sh}\n        env:\n", 1)
         self.assertEqual(self.lane(text, files), "agent")
 
+    def test_a_uses_key_handed_in_keeps_every_name(self):
+        """From the third review: a `uses:` input or `env` name with a local path made the caller's words none."""
+        files = {f"{ACTION_DIR}/action.yml": composite("    - run: bash ${{ inputs.script }}\n      shell: bash\n"),
+                 "ci/review.sh": "#!/bin/bash\nclaude --dangerously-skip-permissions -p review\n"}
+        for handed in ("        with: {uses: ./.github/actions/none, script: $TOOLS/review.sh}\n",
+                       "        with: {script: $TOOLS/review.sh}\n"):
+            with self.subTest(handed=handed):
+                text = flow("", job_env="{TOOLS: ./ci}", uses=f"./{ACTION_DIR}").replace("        env:\n", handed
+                                                                                        + "        env:\n", 1)
+                if "uses: ./" not in handed:
+                    text = text.replace("          ANTHROPIC_API_KEY", "          uses: ./.github/actions/none\n"
+                                        "          ANTHROPIC_API_KEY", 1)
+                self.assertEqual(self.lane(text, files), "agent")
+
+    def test_a_name_before_a_hyphen_is_given(self):
+        """From the third review: bash reads `$TOOLS-dir` as `$TOOLS`."""
+        files = {f"{ACTION_DIR}/action.yml": composite("    - run: bash $TOOLS-dir/review.sh\n      shell: bash\n"),
+                 "ci-dir/review.sh": "#!/bin/bash\nclaude --dangerously-skip-permissions -p review\n"}
+        self.assertEqual(self.lane(flow("", job_env="{TOOLS: ./ci}", uses=f"./{ACTION_DIR}"), files), "agent")
+
     def test_a_local_action_names_a_value_in_any_letter_case_and_with_a_hyphen(self):
         """From the second review: the reader folds an `env` name's case and keeps `-` in `env['MY-TOOL']`."""
         for job_env, run in (("{CLAUDE: claude}", "${{ env.claude }}"), ("{MY-TOOL: claude}", "${{ env['MY-TOOL'] }}")):

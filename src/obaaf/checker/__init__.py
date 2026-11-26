@@ -1536,7 +1536,8 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
         # handed in through `with:`), so that jobs whose other values differ share one reading; all of them where
         # a step of the action uses another local action, which may read any.
         if env_words is not None:
-            env_words = env_words | (_env_words([given, given_env]) or frozenset())
+            handed = _env_words([given, given_env])
+            env_words = None if handed is None else env_words | handed
         given_env = {**{name: value for name, value in inherited_env.items()
                         if env_words is None or name.casefold() in env_words}, **given_env}
 
@@ -1599,7 +1600,11 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 if key_name == "env":
                     put[key_name] = step_env
                 elif key_name in _COMMAND_FIELDS:
-                    put[key_name] = _put_inputs(value, inputs, folder, problems, done, step_env, counts)
+                    # Only the fields `Step.env_put_in` reads (the run script, and a github-script script or the
+                    # egress action's command among the inputs) widen its bound (found by the third review: 16
+                    # readings of `working-directory` made the bound of a one-reading `run` 16 times as wide).
+                    put[key_name] = _put_inputs(value, inputs, folder, problems, done, step_env,
+                                                counts if key_name in ("run", "with") else None)
                 else:
                     put[key_name] = _put_inputs(value, inputs, folder, [], ignored, step_env)
             # One ledger for every reading of a local action in the check (flagship slice 2d.17): the readings
@@ -1685,11 +1690,12 @@ def _action_size(root: Path, folder: str) -> int:
 
 
 _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+_NAME_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _env_words(raws) -> frozenset | None:
-    """The words in the text of a local action's files (flagship slice 2d.18), in lower case and with `-` kept in
-    them (`env['MY-TOOL']`), as the reader folds a name's case: the names of the job's and the workflow's `env`
+    """The words in the text of a local action's files (flagship slice 2d.18), in lower case, each with `-` kept in
+    it (`env['MY-TOOL']`) and each name in it (`$TOOLS-dir`), as the reader folds a name's case: the names of the job's and the workflow's `env`
     that a reading of the action can use; None when a step of the action uses another local action, or a `uses`
     that holds an expression, whose reading may use any. Each value is visited once, however many times YAML
     names it through an alias."""
@@ -1712,7 +1718,10 @@ def _env_words(raws) -> frozenset | None:
                 seen.add(id(value))
                 stack.extend(value)
         elif isinstance(value, str):
+            # A word with `-` and each name in it: `env['MY-TOOL']` reads `MY-TOOL`, and bash reads `$TOOLS-dir` as
+            # `$TOOLS` (found by the third review).
             words.update(word.casefold() for word in _WORD_RE.findall(value))
+            words.update(word.casefold() for word in _NAME_WORD_RE.findall(value))
     return frozenset(words)
 
 
