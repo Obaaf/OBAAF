@@ -2,12 +2,39 @@ name: Verify the settings audit with the artifact-consumer draft
 
 on:
   push:
-    branches: [lead/verify-383-366-3b92167]
+    branches: [lead/verify-383-366-fc2c398]
 
 permissions:
   contents: read
 
 jobs:
+  handoff-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: d86402998a1039c768f8b26fcb892b9ded6ab159
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run the full suite on the published integration commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = d86402998a1039c768f8b26fcb892b9ded6ab159
+          test "$(git rev-parse HEAD^{tree})" = 688923acb42e0bce99870270c49fb615e4a10702
+          export TMPDIR="$(mktemp -d "$RUNNER_TEMP/obaaf-tests.XXXXXX")"
+          if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+          python -m unittest discover -s tests
+
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -77,11 +104,12 @@ jobs:
           print("Resolved documentation on", ours, "tree", git("rev-parse", "HEAD^{tree}").decode().strip(), flush=True)
           PY
           git worktree add --detach "$RUNNER_TEMP/flagship-383" fdb77411e0f2e6ef78f47b78d631e5d246d9d23d
-          (cd "$RUNNER_TEMP/flagship-383" && python "$RUNNER_TEMP/resolve-383.py" 3b9216735a9cab3637784e5828cfd9170b1d7f46)
-          python "$RUNNER_TEMP/resolve-383.py" 3b9216735a9cab3637784e5828cfd9170b1d7f46
-          test "$(git show -s --format=%P)" = "2f8474ed1cbe75cfe1197633502c9e1204bb1817 3b9216735a9cab3637784e5828cfd9170b1d7f46"
+          (cd "$RUNNER_TEMP/flagship-383" && python "$RUNNER_TEMP/resolve-383.py" fc2c398494e20b8c89f21dd2cd12b1062ed02367)
+          test "$(git -C "$RUNNER_TEMP/flagship-383" rev-parse HEAD^{tree})" = 688923acb42e0bce99870270c49fb615e4a10702
+          python "$RUNNER_TEMP/resolve-383.py" fc2c398494e20b8c89f21dd2cd12b1062ed02367
+          test "$(git show -s --format=%P)" = "2f8474ed1cbe75cfe1197633502c9e1204bb1817 fc2c398494e20b8c89f21dd2cd12b1062ed02367"
           git show --no-patch --format='Native merge %H parents %P tree %T'
-          git merge-base --is-ancestor 3b9216735a9cab3637784e5828cfd9170b1d7f46 HEAD
+          git merge-base --is-ancestor fc2c398494e20b8c89f21dd2cd12b1062ed02367 HEAD
           echo "Integrated review tree $(git rev-parse HEAD^{tree})"
           git diff --check HEAD^1 HEAD
           worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
@@ -120,7 +148,7 @@ jobs:
               assert scan["files"] and not scan["errors"]
           print("Both audits preserved the saved observations; both settings-enabled checker reports matched.")
           PY
-      - name: Check the second-review corrections on the resolved flagship tree
+      - name: Check the third-review corrections on the resolved flagship tree
         if: matrix.test == 'suite'
         shell: bash
         run: |
