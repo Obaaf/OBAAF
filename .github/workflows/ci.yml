@@ -446,12 +446,16 @@ jobs:
     # does `${{ env.NAME }}` in a step's `run` find a value set under another letter case, and which value
     # does it give when the job's `env` and the step's own `env` set one name in two cases? The process
     # environment is printed beside it. It checks nothing out, holds no secret and writes nothing. Plan
-    # slice 2d.19a. What the first runs showed (45856719413 and 45857766790) is asserted for each system:
+    # slice 2d.19a (#387). Each system's answer is asserted as these runs showed it: Linux on ubuntu24
+    # 20261122.23.1 (runs 45856719413 and 45857766790), Windows on win25-vs2026 20261116.315.1 (run
+    # 45857766790) and macOS on macos26 20261123.0526.1 (run 45859375180, the first to show macOS):
     # - Linux and macOS: the context is case-sensitive. Both spellings keep their own value, in the
     #   context and in the process; a spelling nobody set is empty; `env['name']` is `env.name`.
     # - Windows: it is not. The step's `premise_two_cases` replaces the job's `PREMISE_TWO_CASES`, the
     #   one variable keeps the job's spelling, and every spelling gives the step's value.
-    # On every system the step's own value of one name wins over the job's.
+    # On every system the step's own value of one name wins over the job's. Not probed here: a name in
+    # the workflow's own `env` (it would reach every job of this file), and self-hosted runners. The
+    # images are not pinned: a change on a new image turns this job red, which is how it would be seen.
     name: "Runner premise: letter case in the env context (2d.19, ${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
@@ -476,13 +480,17 @@ jobs:
         shell: pwsh
         run: |
           # A list of objects, not a hashtable: PowerShell's hashtables fold the case of their keys.
-          # `sensitive` is what Linux and macOS give, `folded` what Windows gives.
+          # `sensitive` is what Linux and macOS give, `folded` what Windows gives. The three rows that read
+          # `ENV.` and `env['...']` in another case were added after those runs; the run after them shows them.
           $seen = @(
             [pscustomobject]@{ read = 'env.PREMISE_TWO_CASES'; got = '${{ env.PREMISE_TWO_CASES }}'; sensitive = 'from-job'; folded = 'from-step' }
             [pscustomobject]@{ read = 'env.premise_two_cases'; got = '${{ env.premise_two_cases }}'; sensitive = 'from-step'; folded = 'from-step' }
             [pscustomobject]@{ read = 'env.Premise_Two_Cases'; got = '${{ env.Premise_Two_Cases }}'; sensitive = ''; folded = 'from-step' }
             [pscustomobject]@{ read = "env['premise_two_cases']"; got = '${{ env['premise_two_cases'] }}'; sensitive = 'from-step'; folded = 'from-step' }
             [pscustomobject]@{ read = 'env.premise_job_only'; got = '${{ env.premise_job_only }}'; sensitive = ''; folded = 'job-only' }
+            [pscustomobject]@{ read = 'ENV.premise_two_cases'; got = '${{ ENV.premise_two_cases }}'; sensitive = 'from-step'; folded = 'from-step' }
+            [pscustomobject]@{ read = "env['Premise_Two_Cases']"; got = '${{ env['Premise_Two_Cases'] }}'; sensitive = ''; folded = 'from-step' }
+            [pscustomobject]@{ read = "env['premise_job_only']"; got = '${{ env['premise_job_only'] }}'; sensitive = ''; folded = 'job-only' }
             [pscustomobject]@{ read = 'env.PREMISE_SAME'; got = '${{ env.PREMISE_SAME }}'; sensitive = 'same-from-step'; folded = 'same-from-step' }
             [pscustomobject]@{ read = 'step env: env.premise_job_only'; got = $env:PREMISE_SEEN_IN_STEP_ENV; sensitive = ''; folded = 'job-only' }
           )
