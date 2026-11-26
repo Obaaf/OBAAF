@@ -808,6 +808,42 @@ def spans(text: str) -> list:
     return out
 
 
+def names_read(text: str):
+    """The names the `${{ }}` expressions of `text` read from `env` with `env.NAME` or `env['NAME']`, or None where
+    one reads it any other way (`env[x]`, `(env).X`, `toJSON(env)`) or the text cannot be read. Used to keep the
+    key of a reading small (found by the third review: a key of the whole `env` for each of 2,000 steps took
+    1 GB)."""
+    try:
+        found = spans(text)
+    except expr_mod.TooComplex:
+        return None
+    names: set = set()
+    for _start, _end, body in found:
+        toks = expr_mod.tokens(body)
+        for i, (kind, word) in enumerate(toks):
+            if kind != "id" or word.lower() != "env" or (i and toks[i - 1] == ("op", ".")):
+                continue
+            nxt = toks[i + 1:i + 4]
+            if len(nxt) >= 2 and nxt[0] == ("op", ".") and nxt[1][0] == "id":
+                names.add(nxt[1][1])
+            elif len(nxt) == 3 and nxt[0] == ("op", "[") and nxt[1][0] == "str" and nxt[2] == ("op", "]"):
+                names.add(nxt[1][1])
+            else:
+                return None
+    return names
+
+
+def relevant(name, names, case: str) -> bool:
+    """Whether a scope's entry `name` can give a value to the expressions that read `names` (`names_read`)."""
+    if names is None or not isinstance(name, str) or _YAML12_SCALAR.fullmatch(name):
+        return True
+    if name in names:
+        return True
+    if case == "exact":
+        return False
+    return not name.isascii() or any(fold(name) == fold(n) for n in names if isinstance(n, str))
+
+
 def may_read_env(text: str) -> bool:
     return expr_mod.OPEN in text and _MAY_READ_ENV.search(text) is not None
 
@@ -815,8 +851,10 @@ def may_read_env(text: str) -> bool:
 class Plan:
     """What `put_in` will make of a text, worked out before any of it is made (found by the review of 2d.19:
     readings made first, and counted after, kept 1.2 GB for 600 steps past the workflow's bound): the units of the
-    text with the values of their expressions, the characters of values put in (`size`), the characters of the
-    readings beyond the text as written (`copies`), and the most readings of one line (`readings`)."""
+    text with the values of their expressions, the characters of values put in in every reading (`size`, which
+    the lanes ledger counts as D-138 counts `$NAME`), the characters the text made comes to past the text as
+    written (`copies`: the first reading's values, and for each reading past the first its line again with its
+    values), and the most readings of one line (`readings`)."""
 
     __slots__ = ("units", "size", "copies", "readings")
 
@@ -879,7 +917,7 @@ def _plan(text: str, env: Env, room: int | None, state: list) -> Plan:
         return Plan([], 0, 0, 1)
     units_ = _units(text, [(start, end) for start, end, _texts in work])
     planned: list = []
-    size = copies = 0
+    size = copies = firsts = 0
     most = 1
     w = 0
     for u_start, u_end in units_:
@@ -906,19 +944,22 @@ def _plan(text: str, env: Env, room: int | None, state: list) -> Plan:
             values += sum(len(t) for t in texts) * (count // len(texts))
             first += len(texts[0])
         size += values
+        firsts += first
         # The copies are what the readings past the first make: the line's text outside its expressions again for
         # each, and the values in them (found by the second review: counting only the text outside let 100 lines
         # of five expressions with 1,000-character values make 768 MB). One reading's values are what GitHub puts
         # in, bounded for the workflow like any value (D-138).
         copies += (count - 1) * (outside + 1) + (values - first)
-        state[0] = whole_room - room + copies
+        state[0] = copies + firsts
         if copies > COPIES_TEXT:
             raise Unread(f"holds expressions that read `env` whose readings come to more than {COPIES_TEXT:,} "
                          "characters")
-        if copies + size > whole_room:
+        # What the text made comes to: the first reading's values and the copies (found by the third review:
+        # counting every reading's values again gave false errors earlier than D-138 gives them for `$NAME`).
+        if copies + firsts > whole_room:
             raise NoRoom
         planned.append((u_start, u_end, here))
-    return Plan(planned, size, copies, most)
+    return Plan(planned, size, copies + firsts, most)
 
 
 def build(text: str, made: Plan) -> str:

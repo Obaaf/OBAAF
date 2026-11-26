@@ -527,5 +527,45 @@ class FromTheSecondReviewTest(unittest.TestCase):
         self.assertEqual(lane(linux), "trusted")
 
 
+
+class FromTheThirdReviewTest(unittest.TestCase):
+    """The third review of slice 2d.19 (on `8ec9bf1`)."""
+
+    def test_a_readings_key_holds_only_what_its_expressions_read(self):
+        self.assertEqual(env_expr.names_read("echo ${{ env.A }} ${{ ENV['B'] }} ${{ matrix.env }}"), {"A", "B"})
+        self.assertIsNone(env_expr.names_read("echo ${{ env[matrix.k] }}"))
+        self.assertIsNone(env_expr.names_read("echo ${{ toJSON(env) }}"))
+        self.assertIsNone(env_expr.names_read("echo ${{ (env).A }}"))
+        self.assertFalse(env_expr.relevant("OTHER", {"A"}, "exact"))
+        self.assertTrue(env_expr.relevant("a", {"A"}, "both"))
+        self.assertTrue(env_expr.relevant("1", {"A"}, "exact"))
+        self.assertTrue(env_expr.relevant("\u00e9", {"A"}, "folded"))
+
+    def test_a_value_replaced_in_place_is_read_again(self):
+        job = {"env": {"AGENT": "echo"}}
+        step = wf.Step(index=0, raw={"run": "${{ env.AGENT }} -p x"}, line=1, put_ins=wf.PutIns(), seq=1,
+                       inherited=(job, {}))
+        self.assertNotIn("claude", step.env_expressions_text())
+        job["env"]["AGENT"] = "claude"
+        self.assertIn("claude -p x", step.env_expressions_text())
+
+    def test_a_prompt_through_an_expression_errors_where_name_does(self):
+        value = "p" * 100_000
+        for form in ('claude -p "${{ env.PROMPT }}"', 'claude -p "$PROMPT"'):
+            steps = "".join(f"      - run: {form} # {n}\n" for n in range(45))
+            text = (f"on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-latest\n    env:\n"
+                    f"      PROMPT: {value}\n    steps:\n{steps}")
+            with self.subTest(form=form):
+                self.assertEqual(problems(text), [])
+
+    def test_two_readings_of_a_prompt_are_not_counted_twice(self):
+        a, b = "a" * 96_000, "b" * 96_000
+        steps = "".join("      - run: claude -p \"${{ github.event_name == 'push' && env.A || env.B }}\"\n"
+                        for _ in range(20))
+        text = (f"on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-latest\n    env:\n      A: {a}\n"
+                f"      B: {b}\n    steps:\n{steps}")
+        self.assertEqual(problems(text), [])
+
+
 if __name__ == "__main__":
     unittest.main()

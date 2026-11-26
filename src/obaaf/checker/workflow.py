@@ -2335,15 +2335,23 @@ class Step:
         once for the same lines, runner and `env` values (by their ids), and kept on the workflow's ledger."""
         case = env_expr.env_case(self.job)
         scopes = self._env_scopes()
-        ids = tuple((id(scope), tuple((name, id(value)) for name, value in scope.items()) if isinstance(scope, dict)
-                     else None) for scope in scopes)
-        key = ("env-expressions", own, case, ids)
+        # The key holds only the entries the expressions can read (all of them where one reads `env` in a way not
+        # pinned to names), as a digest, with those values kept so that their ids stay theirs (found by the third
+        # review: the whole `env` in each step's key took 1 GB for 2,000 steps).
+        names = env_expr.names_read(own)
+        entries = tuple(tuple((name, value) for name, value in scope.items() if env_expr.relevant(name, names, case))
+                        if isinstance(scope, dict) else scope for scope in scopes)
+        digest = hashlib.blake2b(repr(tuple(
+            (id(scope), tuple((repr(name), id(value)) for name, value in entry) if isinstance(scope, dict) else
+             repr(scope)) for scope, entry in zip(scopes, entries))).encode("utf-8", "surrogatepass"),
+            digest_size=20).digest()
+        key = ("env-expressions", own, case, digest)
         put_ins = self.put_ins
         made = put_ins.lanes.made.get(key) if put_ins is not None else None
         if made is None:
             try:
                 # The room left on the workflow's ledger is checked as the plan is made, so a step past it costs
-                # little and nothing is kept for it (found by the second review).
+                # little and keeps only its refusal (found by the second review).
                 plan = env_expr.plan(own, env_expr.Env(scopes, case),
                                      room=put_ins.copies.room if put_ins is not None else None)
                 why = None
@@ -2359,8 +2367,10 @@ class Step:
                 plan, why = None, ENV_EXPRESSIONS_WORKFLOW_UNREAD
                 if put_ins is not None:
                     put_ins.copies.room = max(0, put_ins.copies.room - getattr(error, "spent", 0))
-            # The scopes' values are kept with the reading, so that their ids, which the key holds, stay theirs.
-            kept = tuple(tuple(scope.values()) if isinstance(scope, dict) else scope for scope in scopes)
+            # The values the key names are kept with the reading, so that their ids stay theirs; a refusal keeps
+            # nothing (read again with other values, it is refused or read, never read wrongly).
+            kept = tuple(value for entry in entries if isinstance(entry, tuple) for _name, value in entry) \
+                if plan is not None else ()
             made = [plan, None, why, kept]
             if put_ins is not None:
                 put_ins.lanes.made[key] = made
@@ -2371,7 +2381,7 @@ class Step:
             return own, 0, 1, None
         # The lines a step's readings copy are counted for the whole workflow before they are made, each step
         # once (found by the review: 600 steps each copying 2 MB took 1.2 GB).
-        if put_ins is not None and not put_ins.copies.settle((self.seq, key), plan.copies + plan.size):
+        if put_ins is not None and not put_ins.copies.settle((self.seq, key), plan.copies):
             return None, None, 1, ENV_EXPRESSIONS_WORKFLOW_UNREAD
         if text is None:
             text = made[1] = env_expr.build(own, plan)
