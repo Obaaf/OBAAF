@@ -3127,3 +3127,45 @@ stage's failure-path `post` block gives a new high OBAAF-JEN-011, which the text
 accepted only 40 or 64 lower-case hex digits with at most one line ending, refused every other file it could read
 with exit 2 and gave no traceback; a FIFO with no writer waits. Its second pass found the computed setter name the
 attack found too.
+
+## 2d.18: an agent named through the `env` a step runs with
+
+Issue #377 (found by the reviewer of slice 2d.16): `$a$b --dangerously-skip-permissions -p review` with `a: cla` and
+`b: ude` in the job's `env` got no OBAAF-GHA-026 and no agent lane. On `flagship` `660f824` the wider class was that
+the lanes put only the step's own `env` into its command lines: `run: $CLAUDE -p "review"` with `CLAUDE` in the
+workflow's `env` and a model key in the step's was in no agent lane, so no agent rule applied. Now the lanes put in
+the step's own `env` over its job's over its workflow's, a local action read for an agent is given the same, and
+OBAAF-GHA-026's cheap put-in is tried on every script with a `$` (decision D-139; the cases are
+`tests/test_env_named_agent.py`).
+
+**Review** (one Opus 5.5 sub-agent that did not write it, six passes, each run through the checker against `660f824`):
+
+- *First pass* (77 attempts on `032a527`: 29 ways past, 15 of them in the slice's scope; 10 false errors; 4 costs).
+  Four of its five blocking findings were in a first version that also worked out `${{ }}` expressions reading `env`;
+  the fifth was an old test (below). The
+  readings of every `||` in a step were multiplied together, so five `${{ env.X || 'd' }}` were an error of the file.
+  `toJSON(env.AGENT)`, `join(env.AGENT, '')`, `(env).AGENT` and `env[env.KEY]` were read as empty. A file's author
+  could make the check 4 to 65 times slower (about 627 s against 9.6 s). That part was taken out and is slice 2d.19,
+  with these cases as its starting points. An old test of slice 2d.17 that asserted "the lanes do not read the
+  workflow's `env`" now expects the lanes' errors past D-138's bound.
+- *Second pass* (20 attempts on `fe0cefa`: 4 ways past, 4 false errors). A local action whose four
+  `${{ inputs.x || 'default' }}` make 16 readings of `--prompt "$PROMPT"` was an error for a 13 KB prompt in the
+  job's `env` (as it was on the base for a prompt in the using step's own `env`): such a step's bound is now as many
+  times as wide as its `run` or `with:` readings. A filter of the job's names by the words of the action's files
+  missed a script path handed in through `with:` (`$TOOLS/review.sh`), a name in another letter case, and one with
+  `-` in it.
+- *Third pass* (8 attempts on `e6c9b94`: 5 ways past). The filter missed names when a `uses:` key was handed in, and
+  `$TOOLS-dir`; with the workflow's ledger filled, the second pass's local steps were skipped in silence.
+- *Fourth pass* (5 attempts on `aa1b565`: 5 ways past). The filter missed a name the inputs make only once put in
+  (`${{ inputs.a }}${{ inputs.b }}` with defaults `$TO` and `OLS`, the caller's `with:`, or `'$TO'` after `||`),
+  through a repository script. The filter was removed: the action is given the whole `env` and read again for each
+  job whose values differ.
+- *Fifth pass* (4 attempts on `2f6284e`) and *sixth pass* (on `59b6e3c`, a cache of OBAAF-GHA-026's cheap put-in per
+  step, after CI's Python 3.10 job ran a 400-job test at 30.5 s against its 30 s limit): no blocking finding; the
+  cache gave the same output as the head before it on 104 cases.
+
+Stated, not fixed (D-139): `${{ env.X }}` in a workflow's own step (slice 2d.19); what an earlier step writes to
+`GITHUB_ENV`; an `env` written as one expression; a container's `env`; an `env` value that is itself an expression;
+the second pass's silent skip of a local step past the workflow's ledger, the lanes resting on slice 2d.4a's own
+ledger there; a heavy local action read once for each of many jobs whose `env` differs, which can pass the check's
+units (an error); slice 2d.17's many-callers false error, which now reaches a called workflow's `env`.
