@@ -3169,3 +3169,37 @@ Stated, not fixed (D-139): `${{ env.X }}` in a workflow's own step (slice 2d.19)
 the second pass's silent skip of a local step past the workflow's ledger, the lanes resting on slice 2d.4a's own
 ledger there; a heavy local action read once for each of many jobs whose `env` differs, which can pass the check's
 units (an error); slice 2d.17's many-callers false error, which now reaches a called workflow's `env`.
+
+## 2d.19: `${{ }}` expressions that read `env` in a step's command lines
+
+Issue #382, from the first review of 2d.18: `run: ${{ env.AGENT }} -p review` with `AGENT: claude` in the job's `env`
+was in no agent lane on `flagship` `b17f5f0`, so no agent rule applied. Now the lanes work such expressions out
+(`checker/env_expr.py`, decision D-142; the cases are `tests/test_env_expressions.py`, 69 tests).
+
+**Review** (one Opus 5.5 sub-agent that did not write it, four passes, each compared with `b17f5f0`):
+
+- *First pass* (on `0fcffb3`: about 87 workflow cases and 14 timed cost runs; 5 blocking findings). Nine
+  `${{ inputs.k || env.K }}` in one `helm` command were an error (a value from another context doubled each
+  expression's readings, 2^9 past 256); an index of 4,000 unknown keys built 16,000,000 values (56 times the base's
+  time), `fromJSON` re-parsed one 380 KB value 5,000 times (25 times), and copies of lines were bounded per step but
+  not per workflow (31 times the memory); `casefold` took `ß` for `SS` and the Kelvin sign for `k` where GitHub
+  compares letter by letter, and Windows folded `ß` into `SS`; names YAML reads as numbers, booleans or null were
+  dropped. Not blocking: a number index was not taken whole, an unknown `format` template dropped its arguments, `-1`
+  was refused. All fixed; each is a test.
+- *Second pass* (on `890d422`; 1 blocking). The values in every reading were not counted before the text was made:
+  100 lines of five computed indexes over 1,000-character values took 768 MB. Not blocking: refused steps each
+  worked to their own bound; `join(env.*)` left out names YAML reads otherwise; .NET's simple case mapping of
+  U+1FB3. Fixed: the plan counts the text before anything is made, against the workflow's room, and the work of a
+  refused plan is charged.
+- *Third pass* (on `8ec9bf1`; 1 blocking). Each step's key held the whole `env` (1 GB for 2,000 steps over 5,000
+  entries); the new ledger counted values twice (false errors where `$NAME` passes). Fixed: the key holds only the
+  entries the expressions can read, as a digest; the ledger counts each text once.
+- *Fourth pass* (on `2bf73c7`: 26 probes of the key's names, 2 shapes of D-084's values put in place, 3 cost
+  cases): no blocking finding and no way past; the time on the cost cases is 1.3 to 1.4 times the base's.
+
+Stated, not fixed (D-142): OBAAF-GHA-026 reads options through these expressions only as its medium "cannot
+tell" (slice 2d.19c); an expression in another action's inputs, a `docker://` step's arguments, a step's `shell` or
+an `env` value; what an earlier step writes to `GITHUB_ENV`; pwsh `$env:X` and cmd `%X%`; the `$NAME` put-in of
+D-139 on Windows still merges names as written; more than 1,024 readings of one line (eleven
+`${{ github.ref == 'refs/heads/main' && env.PROD || env.DEV }}` in one command) is an error.
+
