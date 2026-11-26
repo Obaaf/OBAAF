@@ -30,7 +30,55 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = 2f8474ed1cbe75cfe1197633502c9e1204bb1817
-          git -c user.name='Verification Runner' -c user.email='verification@localhost' merge --no-ff --no-edit fc822e79bac911c0573c7d38f10ea95b7ece9c2c
+          cat > "$RUNNER_TEMP/resolve-383.py" <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+          
+          def git(*args):
+              return subprocess.check_output(["git", *args])
+          
+          target = sys.argv[1]
+          ours = git("rev-parse", "HEAD").strip().decode()
+          result = subprocess.run(["git", "merge", "--no-ff", "--no-commit", target])
+          paths = git("diff", "--name-only", "--diff-filter=U").decode().splitlines()
+          assert result.returncode == 1 and paths == ["CHANGELOG.md", "DECISIONS.md"], paths
+          for path in paths:
+              ancestor, current, incoming = [git("show", f":{stage}:{path}").decode() for stage in (1, 2, 3)]
+              if path == "CHANGELOG.md":
+                  marker = "## [Unreleased]\n\n"
+                  section = incoming.split(marker, 1)[1]
+                  block = section[:section.index("\n### ", 1) + 1]
+                  assert block.startswith("### OBAAF-SET-011") and ancestor.count(marker) == current.count(marker) == 1
+          
+                  def apply_to(source):
+                      return source.replace(marker, marker + block, 1)
+              else:
+                  row, = [line for line in incoming.splitlines(keepends=True) if line.startswith("| D-140 |")]
+                  heading = "### D-140 "
+                  assert incoming.count(heading) == 1
+                  tail = "\n" + incoming[incoming.index(heading):]
+          
+                  def apply_to(source):
+                      lines = source.splitlines(keepends=True)
+                      index = max(i for i, line in enumerate(lines) if line.startswith("| D-"))
+                      lines.insert(index + 1, row)
+                      return "".join(lines) + tail
+              assert apply_to(ancestor) == incoming, path
+              merged = apply_to(current)
+              assert merged.count("### D-139 ") == current.count("### D-139 ")
+              if path == "DECISIONS.md":
+                  assert merged.index("| D-139 |") < merged.index("| D-140 |")
+                  assert merged.index("### D-139 ") < merged.index("### D-140 ")
+              Path(path).write_bytes(merged.encode())
+              git("add", "--", path)
+          git("-c", "user.name=Verification Runner", "-c", "user.email=verification@localhost", "commit", "--no-edit")
+          assert git("show", "-s", "--format=%P").decode().strip() == f"{ours} {target}"
+          print("Resolved documentation on", ours, "tree", git("rev-parse", "HEAD^{tree}").decode().strip(), flush=True)
+          PY
+          git worktree add --detach "$RUNNER_TEMP/flagship-383" fdb77411e0f2e6ef78f47b78d631e5d246d9d23d
+          (cd "$RUNNER_TEMP/flagship-383" && python "$RUNNER_TEMP/resolve-383.py" fc822e79bac911c0573c7d38f10ea95b7ece9c2c)
+          python "$RUNNER_TEMP/resolve-383.py" fc822e79bac911c0573c7d38f10ea95b7ece9c2c
           test "$(git show -s --format=%P)" = "2f8474ed1cbe75cfe1197633502c9e1204bb1817 fc822e79bac911c0573c7d38f10ea95b7ece9c2c"
           git show --no-patch --format='Native merge %H parents %P tree %T'
           git merge-base --is-ancestor fc822e79bac911c0573c7d38f10ea95b7ece9c2c HEAD
