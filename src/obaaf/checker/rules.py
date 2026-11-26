@@ -2383,7 +2383,7 @@ class WorkflowRules:
         # What is put in is bounded for the whole workflow too (flagship slice 2d.17), on the step's own number.
         put_ins = step.put_ins
         cheap = [(text, agent_flags.put_in_cheaply(text, scopes, put_ins.names if put_ins is not None else None,
-                                                   (step.seq, tool, n))) for n, (text, _b) in enumerate(parts)
+                                                   (step.seq, n))) for n, (text, _b) in enumerate(parts)
                  if "$" in text and "=" in text]
         named_unread = any(put is None and agent_flags.names_when_put_in(text, scopes, programs, packages)
                            for text, put in cheap)
@@ -2401,9 +2401,11 @@ class WorkflowRules:
         reading = agent_flags.Reading()
         # One budget for every script of the step that is read (flagship slice 2d.16, from the review): a value
         # may be put in eight times in the step, not eight times in each of its `env` values and inputs. What it
-        # makes is settled on the workflow's ledger too, for this step and this tool (2d.17): each tool's reading
-        # makes and reads the text again (#380), so each counts; the second pass reads the same and adds nothing.
-        budget = PutInBudget(put_ins.options if put_ins is not None else None, (step.seq, tool))
+        # makes is settled on the workflow's ledger too, by the step (2d.17): another tool's reading of it and the
+        # second pass settle the same texts again and add nothing. Each tool's reading still makes and lexes them
+        # again (#380); charging each tool instead gave false "cannot tell" findings where a prompt only holds
+        # tools' names in its words ("decline" holds cline; found by the third review).
+        budget = PutInBudget(put_ins.options if put_ins is not None else None, step.seq)
         for text, bash in parts:
             variables, unread = known[id(text)]
             if bash:

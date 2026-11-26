@@ -674,10 +674,10 @@ def _substitute(text: str, variables: dict, budget: PutInBudget | None = None) -
     (64 KB of YAML) was read as 256,000,000 characters. `budget` is the step's, which every nested script
     shares (`bash -c '... $P ...'` read again; found by the review); a new one by default. None too when the
     values put in would take its workflow's OBAAF-GHA-026 put-ins past their bound (the budget's `ledger`,
-    flagship slice 2d.17). The text is settled there by the budget's `place` (the step's number and the tool
-    it is read for), the script, the values put in and how many times the same text has been made in this
-    reading, so the same reading again in the second pass is counted once, and a script written twice in it
-    (`bash -c '...'` twice) is counted twice (found by the review)."""
+    flagship slice 2d.17). The text is settled there by the budget's `place` (the step's number), the
+    script, the values put in and how many times the same text has been made in this reading of the step, so
+    the same step read again for another tool or in the second pass is counted once (though made again), and
+    a script written twice in it (`bash -c '...'` twice) is counted twice (found by the review)."""
     if not variables or "$" not in text:
         return text
     budget = PutInBudget() if budget is None else budget
@@ -1707,8 +1707,7 @@ def put_in_cheaply(text: str, scopes: list, ledger=None, place=0) -> str | None:
     `${NAME}`, by a regular expression: only to decide whether the step names the tool. None, as
     `_substitute` gives, when the values put in would make a text longer than the checker reads (flagship
     slice 2d.16), or would take its workflow's past their bound (`ledger`, a `PutInLedger`, with `place` the
-    step's number, the tool and which of its scripts this is; flagship slice 2d.17); `names_when_put_in` then
-    decides."""
+    step's number and which of its scripts this is; flagship slice 2d.17); `names_when_put_in` then decides."""
     values = _cheap_values(text, scopes)
     if not values:
         return text

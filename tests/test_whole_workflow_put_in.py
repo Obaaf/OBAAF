@@ -354,6 +354,19 @@ class OBAAFGHA026AcrossStepsTest(unittest.TestCase):
         self.assertEqual(kinds, ["command-option"] * 48)
         self.assertEqual(result.errors, [])
 
+    def test_a_prompt_that_holds_other_tools_names_is_counted_once(self):
+        """From the third review: a prompt in plain words that holds other tools' names ("decline" holds cline,
+        "kilobytes" kilo, and "Codex", "Copilot") has the step read once for each of them. Each reading is the
+        same text and counts once, so no step gets a "cannot tell" the base did not give (charging each tool
+        gave 25 on 30 steps)."""
+        words = "Review the diff, decline changes over a few kilobytes, and compare with what Codex or Copilot would say. "
+        prompt = (words * (40_000 // len(words) + 1))[:40_000].strip()
+        text = workflow_level(48, 1, before="claude -p", value=prompt, after="--dangerously-skip-permissions --model m")
+        with TempDir() as tmp:
+            result, took = timed(tmp, text)
+        self.assertLess(took, 15)
+        self.assertEqual([(f.kind, f.severity) for f in self.gha026(result)], [("command-option", "high")] * 48)
+
     def test_the_second_pass_through_local_actions_counts_nothing_again(self):
         """Where a job uses a local action, every rule reads the workflow again on a copy: its steps keep their
         numbers, so the prompt above, read twice, is counted once and still read in every step."""

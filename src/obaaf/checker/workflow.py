@@ -1980,8 +1980,8 @@ class PutInBudget:
     more time `value` is put in and is False once the times past `ENV_PUT_IN_TIMES` of each value, by their
     lengths, come to more than `ENV_PUT_IN_EXTRA` characters. A value is counted by the object it is, so a
     value YAML gives under many names through aliases is one value. `ledger` and `place` (flagship slice
-    2d.17): the workflow's `PutInLedger` that each text made with this budget is settled on, and which
-    reading it is (OBAAF-GHA-026's: the step's number, `Step.seq`, and the tool); `made` counts how many times each text has been made with it,
+    2d.17): the workflow's `PutInLedger` that each text made with this budget is settled on, and the number
+    of the step it is made for (`Step.seq`); `made` counts how many times each text has been made with it,
     so that the same text made twice in one reading is two readings."""
 
     def __init__(self, ledger: "PutInLedger | None" = None, place: int = 0) -> None:
@@ -2006,10 +2006,10 @@ class PutInBudget:
 # put in at most `ENV_PUT_IN_WORKFLOW` characters of values altogether, every time a value is put in counted
 # by its length. A step's reading is counted once however often it is read: `Step.env_put_in` keeps the text
 # it made, so the six or so readings of an agent job's steps add nothing. OBAAF-GHA-026 settles each text it
-# makes by the step's number, the tool it reads the step for and how many times that text has been made in that
-# reading, so the second pass through local actions adds nothing, while each tool's reading counts (each makes
-# and reads the text again, #380) and a text made twice in one reading (`bash -c '...'` written twice) counts
-# twice (both found by the review). Each step is counted, even where YAML makes it of the same mapping as
+# makes by the step's number and how many times that text has been made in the step's reading, so another
+# tool's reading or the second pass through local actions adds nothing (though each makes and lexes the text
+# again, #380), and a text made twice in one reading (`bash -c '...'` written twice) counts twice (found by the
+# review). Each step is counted, even where YAML makes it of the same mapping as
 # another, because what the reading finds is handed on, step by step, to the rules (found by the review). Past
 # the bound the text is not made: for the lanes the step is an error of its file, as past a step's bound; for
 # OBAAF-GHA-026 its options are "cannot tell".
@@ -2053,7 +2053,7 @@ class PutIns:
     slice 2d.17): one for each reader, since each makes its own text. `lanes` is `Step.env_put_in`'s (the
     step's `env`, read by `agent_text`, the lanes and the egress controls); `options` is OBAAF-GHA-026's
     `agent_flags._substitute`, and `names` its `put_in_cheaply`, both of which put in the job's and the
-    workflow's `env` too, once for each tool they read a step for. `number()` gives each step its own number
+    workflow's `env` too. `number()` gives each step its own number
     (`Step.seq`), which a copy of the step keeps. `unread` is what a step past the lanes' bound is told."""
 
     def __init__(self, unread: str = ENV_PUT_IN_WORKFLOW_UNREAD) -> None:
