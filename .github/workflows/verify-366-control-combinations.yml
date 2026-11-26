@@ -1,0 +1,67 @@
+name: Verify item 7 across producer and consumer egress controls
+on:
+  push:
+    branches: [lead/verify-366-control-combinations-d0e32ca]
+permissions:
+  contents: read
+jobs:
+  reports:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: d0e32ca5ff8b79068a778984a80e03ce20097f2a
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Inspect text and JSON on static workflows
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = d0e32ca5ff8b79068a778984a80e03ce20097f2a
+          export TMPDIR="$(mktemp -d "$RUNNER_TEMP/obaaf-output.XXXXXX")"
+          if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          python -m pip install -q --constraint actions/setup-obaaf/constraints.txt .
+          PYTHONPATH=tests python - <<'PY'
+          from itertools import product
+          from pathlib import Path
+          import json
+          import subprocess
+          import tempfile
+          from test_egress_recognised import CHECKOUT, FIREWALL, REVIEWED_PIN, SHA, keyed, workflow
+          from test_egress_artifact_producers import upload
+
+          routes = {
+              "action": ("ubuntu-24.04", CHECKOUT + "\n" + keyed(ref=REVIEWED_PIN)),
+              "firewall": ("ubuntu-24.04-firewall", "      - run: $TOOL -p review\n        env: {TOOL: claude}"),
+          }
+          limits = ("This verdict covers the producing job", "other repositories", "caches and job outputs")
+          for route, (runner, steps) in routes.items():
+              for reader_runner, command in product(("ubuntu-24.04", "ubuntu-24.04-firewall"), ("sh", "cat")):
+                  with tempfile.TemporaryDirectory() as directory:
+                      root = Path(directory)
+                      gh = root / ".github"
+                      (gh / "workflows").mkdir(parents=True)
+                      (gh / "CODEOWNERS").write_text("* @example/maintainers\n")
+                      (gh / "egress-firewall.yaml").write_text(FIREWALL)
+                      producer = workflow(steps + "\n" + upload(), runs_on=runner).replace("  agent:\n", "  build:\n", 1)
+                      consumer = (f"  reader:\n    needs: build\n    runs-on: {reader_runner}\n    steps:\n"
+                                  f"      - uses: actions/download-artifact@{SHA}\n"
+                                  "        with: {name: report, path: result}\n"
+                                  f"      - name: inspect\n        run: {command} result/report.txt\n")
+                      (gh / "workflows/pipeline.yml").write_text(producer + consumer)
+                      args = ["obaaf", "check", ".", "--fail-on", "never", "--format"]
+                      data = json.loads(subprocess.check_output(args + ["json"], cwd=root, text=True))
+                      output = subprocess.check_output(args + ["text"], cwd=root, text=True)
+                      lines = [line for line in output.splitlines() if "fixed: OBAAF-GHA-020 " in line and "[job build]" in line]
+                      fixed = [f for f in data.get("fixed", []) if f["rule"] == "OBAAF-GHA-020" and f["job"] == "build"]
+                      found = [(f["job"], f["step"], f["severity"], f["state"]) for f in data["findings"] if f["rule"] == "OBAAF-GHA-027"]
+                      wanted = [("reader", "inspect", "medium", "new")] if command == "sh" else []
+                      print(route, reader_runner, command, "producer rows text/json", len(lines), len(fixed), "consumer", found, flush=True)
+                      assert len(lines) == len(fixed) == 1
+                      control, = fixed[0]["controls"]
+                      assert all(x in lines[0] and x in control["detail"] for x in limits)
+                      assert found == wanted
+                      print("Scope and detection limits present in text row and JSON control detail.", flush=True)
+          PY
