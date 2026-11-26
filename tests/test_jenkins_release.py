@@ -169,6 +169,13 @@ class JenkinsReleaseLaneTest(unittest.TestCase):
         self.assertEqual(after.approvals, ["carol"])
         self.assertEqual(after.artifacts[0]["tier"], "B")
 
+    def test_pre_approval_with_no_approvals_required_still_needs_full_verification(self):
+        self.policy.write_text(self.policy.read_text().replace("min_approvals: 1", "min_approvals: 0"))
+        result = self.verify(self.write_records(), release_run=tag_build(self.rev), pre_approval=True)
+        self.assertTrue(result.ok, result.blocks)
+        self.assertEqual(result.to_text().splitlines()[0],
+                         "Pre-approval checks: PASSED, full verification is still required")
+
     def test_raw_r_s_signatures_from_a_key_service_are_accepted(self):
         self.assertTrue(self.verify(self.write_records(p1363=True), pre_approval=True).ok)
 
