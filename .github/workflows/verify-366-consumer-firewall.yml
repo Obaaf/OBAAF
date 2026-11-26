@@ -1,0 +1,69 @@
+name: Check item 118(c) on the published artifact-consumer draft
+on:
+  push:
+    branches: [lead/verify-366-consumer-firewall-0abb334]
+permissions:
+  contents: read
+jobs:
+  reports:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 0abb33442b3a98ffbe80e8be7df36ed9e073d2c4
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Check the installed CLI on four static workflow variants
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 0abb33442b3a98ffbe80e8be7df36ed9e073d2c4
+          export TMPDIR="$(mktemp -d "$RUNNER_TEMP/obaaf-output.XXXXXX")"
+          if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          python -m pip install -q --constraint actions/setup-obaaf/constraints.txt .
+          python - <<'PY'
+          import json
+          import subprocess
+          import tempfile
+          from pathlib import Path
+          import yaml
+
+          pin = "b" * 40
+          for runner in ("ubuntu-24.04", "ubuntu-24.04-firewall"):
+              for command in ("sh", "cat"):
+                  with tempfile.TemporaryDirectory() as tmp:
+                      root = Path(tmp)
+                      gh = root / ".github"
+                      workflows = gh / "workflows"
+                      workflows.mkdir(parents=True)
+                      (gh / "egress-firewall.yaml").write_text("mode: enforce\nallow:\n  - api.example.com\n")
+                      (gh / "CODEOWNERS").write_text("* @example/maintainers\n")
+                      producer = {
+                          "runs-on": "ubuntu-24.04-firewall",
+                          "steps": [
+                              {"run": "$TOOL -p review", "env": {"TOOL": "claude"}},
+                              {"uses": f"actions/upload-artifact@{pin}", "with": {"name": "report", "path": "report.txt"}},
+                          ],
+                      }
+                      reader = {
+                          "needs": "build",
+                          "runs-on": runner,
+                          "permissions": {"contents": "read"},
+                          "steps": [
+                              {"uses": f"actions/download-artifact@{pin}", "with": {"name": "report", "path": "result"}},
+                              {"name": "inspect", "run": f"{command} result/report.txt"},
+                          ],
+                      }
+                      workflow = {"on": "workflow_dispatch", "permissions": {"contents": "read"}, "jobs": {"build": producer, "reader": reader}}
+                      (workflows / "pipeline.yml").write_text(yaml.safe_dump(workflow, sort_keys=False))
+                      result = subprocess.run(["obaaf", "check", ".", "--fail-on", "never", "--format", "json"],
+                                              cwd=root, check=True, capture_output=True, text=True)
+                      data = json.loads(result.stdout)
+                      fixed = [(f["rule"], f["job"]) for f in data.get("fixed", []) if f["rule"] == "OBAAF-GHA-020"]
+                      assert fixed == [("OBAAF-GHA-020", "build")], fixed
+                      found = [(f["job"], f["step"], f["severity"], f["state"]) for f in data["findings"] if f["rule"] == "OBAAF-GHA-027"]
+                      print("consumer runner", runner, "command", command, "findings", found, flush=True)
+                      assert found == ([("reader", "inspect", "medium", "new")] if command == "sh" else []), found
+          PY
