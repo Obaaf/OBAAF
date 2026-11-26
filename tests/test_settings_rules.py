@@ -427,7 +427,7 @@ class SecretRulesTest(unittest.TestCase):
 
     def test_a_secret_stored_for_every_job_is_passed_whole(self):
         # The called job reads what it is passed (slice 2b.9: before, it read PACKAGE_INDEX_TOKEN, which the caller
-        # does not pass, and which is now a finding of its own: see test_the_caller_passes_nothing_the_called_job_reads).
+        # does not pass, and which is now a finding of its own: see test_settings_reusable_secrets.TheIncidentTest).
         reads_key = workflow("  workflow_call:\n", job("upload", "", "      - run: ./u\n        env:\n"
                                                                     "          T: ${{ secrets.key }}\n"))
         found = assess_files(ADMIN, {"r.yml": self.caller("\n      key: ${{ secrets.MODEL_API_KEY }}"),

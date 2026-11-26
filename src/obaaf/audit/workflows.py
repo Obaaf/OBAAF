@@ -246,25 +246,52 @@ def _plain_secret(value) -> str | None:
 def _passed_by_name(passed) -> tuple[dict, bool]:
     """What a calling job's ``secrets:`` mapping passes, by the name the called workflow reads it under (upper
     case, as GitHub compares secret names): for each, the secret it plainly passes (`plain`, see _plain_secret)
-    and every secret its value reads (`reads`, `all` for one that can read any). The second value is True when
-    the mapping holds a key this reader does not take as a plain name (not text, empty, with space round it,
-    or two keys that differ only in letter case) or is neither a mapping nor `inherit`: whether a name is
-    passed is then not known."""
+    and every secret its value reads (`reads`, `all` for one that can read any). Two keys that differ only in
+    letter case are kept as one entry marked `ambiguous`, with what both read, because which of them GitHub
+    takes is not established (the review of slice 2b.9: the answer depended on their order). The second
+    value is True when the mapping holds a key this reader does not take as a plain name (not text, empty,
+    or with space round it), or ``secrets:`` is neither a mapping nor exactly ``inherit`` (the checker reads
+    any other text as inherit, the widest reading; GitHub's syntax has only ``inherit``): what such a key
+    passes, and under which name, is not known."""
     keys: dict = {}
-    if passed is None or isinstance(passed, str):
+    if passed is None:
         return keys, False
+    if isinstance(passed, str):
+        return keys, passed != "inherit"
     if not isinstance(passed, dict):
         return keys, True
     odd = False
     for key, value in passed.items():
-        if not isinstance(key, str) or not key or key != key.strip() or key.upper() in keys:
+        if not isinstance(key, str) or not key or key != key.strip():
             odd = True
             continue
         reads = wf_mod.secret_names(value)
-        keys[key.upper()] = {"plain": _plain_secret(value),
-                             "reads": sorted(n.upper() for n in reads if not n.startswith("*")),
-                             "all": expr_mod.ALL in reads}
+        entry = {"plain": _plain_secret(value), "reads": sorted({n.upper() for n in reads if not n.startswith("*")}),
+                 "all": expr_mod.ALL in reads}
+        earlier = keys.get(key.upper())
+        if earlier is not None:
+            entry = {"plain": None, "reads": sorted(set(earlier["reads"]) | set(entry["reads"])),
+                     "all": earlier["all"] or entry["all"], "ambiguous": True}
+        keys[key.upper()] = entry
     return keys, odd
+
+
+def _call_secrets(workflow) -> dict:
+    """The secrets a reusable workflow declares under ``on.workflow_call.secrets``, upper case, each with
+    whether it is marked required: True only for the literal ``required: true``, False for ``false`` or no
+    ``required``, None for anything else. GitHub's page on reusing workflows: "To make the workflow run fail
+    instead, set `required: true` for the secret in `on.workflow_call.secrets`" (slice 2b.9)."""
+    config = workflow.triggers.get("workflow_call")
+    declared = config.get("secrets") if isinstance(config, dict) else None
+    if not isinstance(declared, dict):
+        return {}
+    out = {}
+    for name, spec in declared.items():
+        if not isinstance(name, str):
+            continue
+        required = spec.get("required", False) if isinstance(spec, dict) else (False if spec is None else None)
+        out[name.strip().upper()] = required if isinstance(required, bool) else None
+    return out
 
 
 def _job(job: wf_mod.Job) -> dict:
@@ -319,6 +346,7 @@ def _file(path: str, text: str) -> dict:
         return {"path": path, "error": wf_mod.one_line(f"{refused}, and GitHub refuses such a file", 200),
                 "problems": [], "triggers": {}, "jobs": []}
     triggers = {event: _filters(config) for event, config in workflow.triggers.items()}
+    call_secrets = _call_secrets(workflow)
     problems = [wf_mod.one_line(p, 200) for p in workflow.problems]
     if workflow.has_merge_key and not any("merge key" in p for p in problems):
         problems.append("uses a YAML merge key (<<), which this reader merges and a YAML 1.2 reader does not")
@@ -330,6 +358,8 @@ def _file(path: str, text: str) -> dict:
             # Why GitHub may refuse the file, which it otherwise reads as the audit does (slice 2b.7): its jobs
             # are never counted as reporting a check, but what their triggers say still counts.
             "may_refuse": _odd_job_ids(workflow),
+            # The secrets it declares for its callers, and whether each is required (slice 2b.9).
+            "call_secrets": call_secrets,
             "triggers": triggers, "jobs": [_job(job) for job in workflow.jobs.values()]}
 
 

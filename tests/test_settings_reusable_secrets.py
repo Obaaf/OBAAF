@@ -57,9 +57,10 @@ class TheIncidentTest(unittest.TestCase):
         self.assertEqual((result["state"], result["severity"], result["subject"]),
                          ("finding", "medium", "job .github/workflows/bench.yml#case"))
         self.assertIn('without passing "HELDOUT_TOKEN"', result["message"])
-        self.assertIn('Its job "propose" declares an environment that holds it, but the caller must still pass the '
-                      'secret', result["message"])
-        self.assertIn("empty value", result["message"])
+        self.assertIn('Its job "propose" declares an environment that holds "HELDOUT_TOKEN", but the caller must still '
+                      'pass a secret for the job to get it.', result["message"])
+        self.assertIn('"HELDOUT_TOKEN" is empty in the called workflow, and the run shows no error',
+                      result["message"])
 
     def test_one_finding_for_the_call_with_every_secret_and_job_it_concerns(self):
         # jit.yml's propose and revise jobs each read MODEL_API_KEY and HELDOUT_TOKEN: one finding, not four.
@@ -100,8 +101,50 @@ class TheIncidentTest(unittest.TestCase):
     def test_a_call_to_a_workflow_that_reads_no_secret_and_is_passed_none_does_not_apply(self):
         files = {"bench.yml": caller(), "w.yml": workflow("  workflow_call:\n", job("plan"))}
         self.assertEqual(status(assess_files(ADMIN, files), "OBAAF-SET-011"), "not-applicable")
-        remote = {"bench.yml": caller(uses="octo-org/shared/.github/workflows/p.yml@" + "a" * 40)}
-        self.assertEqual(status(assess_files(ADMIN, remote), "OBAAF-SET-011"), "not-applicable")
+
+    def test_a_workflow_that_was_not_read_and_is_passed_nothing_is_cannot_tell(self):
+        # The review of slice 2b.9: a job there may read a secret an environment holds, which it would get empty.
+        for uses in ("octo-org/shared/.github/workflows/p.yml@" + "a" * 40, "./.github/workflows/W.yml"):
+            files = {"bench.yml": caller(uses=uses), "w.yml": called("secrets.HELDOUT_TOKEN", "    environment: main-only\n")}
+            result = one(files)
+            self.assertEqual(result["state"], "cannot-tell", uses)
+            self.assertIn("which was not read", result["message"], uses)
+
+    def test_a_caller_that_passes_other_secrets_but_not_the_one_read_is_a_finding(self):
+        # The shape test_a_secret_stored_for_every_job_is_passed_whole had before slice 2b.9.
+        files = {"bench.yml": caller("    secrets:\n      key: ${{ secrets.MODEL_API_KEY }}\n"),
+                 "w.yml": called("secrets.PACKAGE_INDEX_TOKEN")}
+        result = one(files)
+        self.assertEqual(result["state"], "finding")
+        self.assertIn('without passing "PACKAGE_INDEX_TOKEN"', result["message"])
+
+    def test_the_message_names_only_the_secrets_each_job_s_environment_holds(self):
+        two = workflow("  workflow_call:\n",
+                       job("j1", "    environment: main-only\n",
+                           "      - run: ./x\n        env:\n          A: ${{ secrets.HELDOUT_TOKEN }}\n")
+                       + job("j2", "", "      - run: ./x\n        env:\n          B: ${{ secrets.PACKAGE_INDEX_TOKEN }}\n"))
+        message = one({"bench.yml": caller(), "w.yml": two})["message"]
+        self.assertIn('Its job "j1" declares an environment that holds "HELDOUT_TOKEN",', message)
+        self.assertNotIn('"j2" declares', message)
+
+    def test_a_secret_marked_required_makes_the_run_fail_rather_than_be_empty(self):
+        declared = workflow("  workflow_call:\n    secrets:\n      HELDOUT_TOKEN:\n        required: true\n",
+                            job("propose", "    environment: main-only\n",
+                                "      - run: ./x\n        env:\n          A: ${{ secrets.HELDOUT_TOKEN }}\n"))
+        message = one({"bench.yml": caller(), "w.yml": declared})["message"]
+        self.assertIn('GitHub fails the run at its start for "HELDOUT_TOKEN", which the called workflow marks required',
+                      message)
+        self.assertNotIn("empty in the called workflow", message)
+
+    def test_a_named_secret_is_weighed_beside_every_secret(self):
+        # The review of slice 2b.9: `toJSON(secrets)` beside a named secret hid the named one.
+        both = workflow("  workflow_call:\n", job("propose", "    environment: main-only\n",
+                                                  "      - run: ./x\n        env:\n          A: ${{ secrets.HELDOUT_TOKEN }}\n"
+                                                  "          B: ${{ toJSON(secrets) }}\n"))
+        states = sorted(r[0] for r in results({"bench.yml": caller(), "w.yml": both}))
+        self.assertEqual(states, ["cannot-tell", "finding"])
+        alone = {"bench.yml": caller(), "w.yml": called("toJSON(secrets)", "    environment: main-only\n")}
+        self.assertEqual([r[0] for r in results(alone)], ["cannot-tell"])
 
 
 class PassedByNameTest(unittest.TestCase):
@@ -121,14 +164,53 @@ class PassedByNameTest(unittest.TestCase):
         files["w.yml"] = called("secrets.PACKAGE_INDEX_TOKEN", "    environment: main-only\n")
         self.assertEqual(results(files)[0][:2], ("finding", "medium"))
 
-    def test_under_another_name_the_environment_must_hold_that_name(self):
-        # T is what the called job reads; main-only holds HELDOUT_TOKEN, not T, so T is what the caller passed:
-        # empty, because the caller cannot read HELDOUT_TOKEN.
+    def test_under_another_name_to_a_job_whose_environment_holds_the_secret_is_cannot_tell(self):
+        # The review of slice 2b.9: the page says a secret may be passed by name "even if it only exists in the
+        # environment", and documents only NAME: ${{ secrets.NAME }}; what T gets here is not documented.
         files = {"r.yml": caller("    secrets:\n      T: ${{ secrets.HELDOUT_TOKEN }}\n"),
                  "w.yml": called("secrets.T", "    environment: main-only\n")}
         result = one(files)
+        self.assertEqual(result["state"], "cannot-tell")
+        self.assertIn("not documented", result["message"])
+
+    def test_under_another_name_to_a_job_with_no_such_environment_is_a_finding(self):
+        # release holds neither T nor HELDOUT_TOKEN: T is what the caller passed, which it could not read.
+        files = {"r.yml": caller("    secrets:\n      T: ${{ secrets.HELDOUT_TOKEN }}\n"),
+                 "w.yml": called("secrets.T", "    environment: release\n")}
+        result = one(files)
         self.assertEqual(result["state"], "finding")
         self.assertIn('as "T"', result["message"])
+
+    def test_two_keys_in_two_letter_cases_are_cannot_tell_in_either_order(self):
+        for first, second in (("TOKEN", "token"), ("token", "TOKEN")):
+            files = {"r.yml": caller(f"    secrets:\n      {first}: ${{{{ secrets.MODEL_API_KEY }}}}\n"
+                                     f"      {second}: ${{{{ secrets.HELDOUT_TOKEN }}}}\n"),
+                     "w.yml": called("secrets.TOKEN")}
+            self.assertEqual(one(files)["state"], "cannot-tell", first)
+
+    def test_secrets_written_as_other_text_than_inherit_is_cannot_tell(self):
+        for text in ("Inherit", "inheritt", "' inherit '"):
+            files = {"r.yml": caller(f"    secrets: {text}\n"),
+                     "w.yml": called("secrets.HELDOUT_TOKEN", "    environment: main-only\n")}
+            self.assertEqual(one(files)["state"], "cannot-tell", text)
+
+    def test_an_environment_not_written_as_a_plain_name_is_cannot_tell(self):
+        for environment in ("    environment: ' main-only '\n", "    environment:\n      url: https://example.com\n",
+                            "    environment: ${{ inputs.e }}\n"):
+            files = {"r.yml": caller("    secrets: inherit\n"), "w.yml": called("secrets.HELDOUT_TOKEN", environment)}
+            result = one(files)
+            self.assertEqual(result["state"], "cannot-tell", environment)
+            self.assertNotIn("with an expression", result["message"], environment)
+
+    def test_a_file_github_may_read_otherwise_is_cannot_tell(self):
+        # A YAML merge key that gives the called job its environment: the audit merges it, GitHub may not.
+        merged = ("name: W\non:\n  workflow_call:\npermissions:\n  contents: read\n"
+                  "x-env: &env\n  environment: main-only\njobs:\n  propose:\n    <<: *env\n    runs-on: ubuntu-latest\n"
+                  "    steps:\n      - run: ./x\n        env:\n          A: ${{ secrets.HELDOUT_TOKEN }}\n")
+        files = {"r.yml": caller("    secrets: inherit\n"), "w.yml": merged}
+        result = one(files)
+        self.assertEqual(result["state"], "cannot-tell")
+        self.assertIn("GitHub may read the files otherwise", result["message"])
 
     def test_under_its_own_name_with_another_value_is_cannot_tell(self):
         # The page documents what a job that declares the environment gets only for NAME: ${{ secrets.NAME }}.
@@ -170,6 +252,13 @@ class PassedByNameTest(unittest.TestCase):
 
 
 class SecondCallTest(unittest.TestCase):
+
+    def test_a_called_job_that_passes_every_secret_on_from_a_caller_that_passed_none_is_cannot_tell(self):
+        # The review of slice 2b.9: it gave no finding.
+        middle = workflow("  workflow_call:\n", "  relay:\n    uses: ./.github/workflows/last.yml\n    secrets: inherit\n")
+        last = called("secrets.HELDOUT_TOKEN", "    environment: main-only\n")
+        found = results({"r.yml": caller(), "w.yml": middle, "last.yml": last})
+        self.assertIn(("cannot-tell", None, "job .github/workflows/r.yml#case"), found)
 
     def test_a_called_job_that_passes_it_on_is_followed_as_a_caller_of_its_own(self):
         middle = workflow("  workflow_call:\n", "  relay:\n    uses: ./.github/workflows/last.yml\n    secrets:\n"
