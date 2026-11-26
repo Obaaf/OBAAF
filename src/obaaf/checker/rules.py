@@ -22,6 +22,7 @@ from obaaf import agent_tools
 from obaaf.catalog import Catalog
 from obaaf.checker import agent_flags
 from obaaf.checker import egress as egress_mod
+from obaaf.checker import env_expr
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
@@ -2329,25 +2330,72 @@ class WorkflowRules:
             return "python"
         return words[0] if words else shell_name
 
+    def _env_expressions_worked(self, job: Job, step: Step, text: str) -> str:
+        """`text`, a command line of `step` that GitHub works out before it runs, with its `${{ }}` expressions
+        that read `env` worked out as the lanes work them out (`Step.env_expressions_text`, flagship slices
+        2d.19b and 2d.19c), where the checker knows every value they can read; `text` as written otherwise. It
+        knows them when every reference names one name (`env.NAME`, `env['NAME']`), each name is set, as text,
+        in the `env` of the step, its job or its workflow under the runner's comparison of names, no `env` is
+        one expression, and no step before this one may set a variable for later steps (`GITHUB_ENV`,
+        `exportVariable`), which the `env` context then holds. A name not set is not taken for empty: a step
+        the checker does not read may set it. Worked out once for the step and the text."""
+        if not isinstance(text, str) or not env_expr.may_read_env(text):
+            return text
+        cache = self.__dict__.setdefault("_env_worked_cache", {})
+        key = (step.seq, id(step.raw), id(job), text)
+        if key in cache:
+            return cache[key][0]
+        worked = text
+        index = next((n for n, other_step in enumerate(job.steps) if other_step is step), 0)
+        if not any(n < index for n in self._later_writes(job)):
+            try:
+                names = env_expr.names_read(text)
+            except RecursionError:
+                names = None
+            if names:
+                env = env_expr.Env(step._env_scopes(), env_expr.env_case(step.job))
+                if all(value is not None and value is not env_expr.UNKNOWN
+                       for name in names for value in env.lookup(name)):
+                    made = step.env_expressions_text(text)
+                    if made is not None:
+                        worked = made
+        # The step and the job are kept with the text, so that their ids stay theirs.
+        cache[key] = (worked, step, job)
+        return worked
+
     def _agent_command(self, job: Job, step: Step, tool: str, name: str, flags: list, programs: list,
                        packages: list) -> None:
         # What the step gives a shell, and in what language: (text, read as bash, the step names the tool).
         parts: list = []
         languages: dict = {}
+        # The texts as the step writes them, by identity, so that another input holding the same text (a YAML
+        # alias) is not read again as an input below.
+        written: set = set()
+        # `${{ }}` expressions that read `env` in the step's command lines (its `run`, a github-script script, the
+        # command OBAAF's egress action runs) are worked out as GitHub works them out before the shell or the
+        # script starts, where the checker knows every value they read (flagship slice 2d.19c,
+        # `_env_expressions_worked`): `claude ${{ env.FLAGS }}` with `FLAGS: --dangerously-skip-permissions` is
+        # read as `claude --dangerously-skip-permissions`. Otherwise the text is read as written: "cannot tell".
         if step.run:
+            written.add(id(step.run))
             shell_name = self._step_shell(job, step)
-            # cmd takes a `^` out before the program sees the word (`claude ^--yolo`).
+            run = self._env_expressions_worked(job, step, step.run)
+            # cmd takes a `^` out before the program sees the word (`claude ^--yolo`), after GitHub has put the
+            # expressions' values in, so from those values too.
             # A caret at a line's end continues the line (found by slice 2d.5c2c's review).
-            parts.append((re.sub(r"\^[ \t]*\r?\n", " ", step.run).replace("^", "")
-                          if shell_name in ("cmd", "cmd.exe") else step.run, shell_name in ("bash", "sh")))
+            parts.append((re.sub(r"\^[ \t]*\r?\n", " ", run).replace("^", "")
+                          if shell_name in ("cmd", "cmd.exe") else run, shell_name in ("bash", "sh")))
             languages[id(parts[-1][0])] = self._step_language(job, step, shell_name)
         given = step.with_ if step.uses else {}
         script = given.get("script") if step.uses_action("actions/github-script") else None
         if isinstance(script, str):
-            parts.append((script, False))
-            languages[id(script)] = "github-script"
+            written.add(id(script))
+            worked_script = self._env_expressions_worked(job, step, script)
+            parts.append((worked_script, False))
+            languages[id(worked_script)] = "github-script"
         if step.confines and isinstance(given.get("run"), str):
-            parts.append((given["run"], True))
+            written.add(id(given["run"]))
+            parts.append((self._env_expressions_worked(job, step, given["run"]), True))
         # A `shell` is itself a command line GitHub runs (`shell: claude ... {0}`), the step's or the default.
         if step.run:
             for shell in (step.raw.get("shell"), *(d.get("run", {}).get("shell") for d in (
@@ -2356,7 +2404,7 @@ class WorkflowRules:
                 if isinstance(shell, str):
                     parts.append((shell.replace("{0}", "script.sh"), True))
                     break
-        own = {id(text) for text, _bash in parts}
+        own = {id(text) for text, _bash in parts} | written
         # (text, whether its input's name says it is a command): other inputs, `env` values, and a
         # `docker://` step's entrypoint and arguments, which GitHub hands the container as one command line.
         others = [(v, k in self._COMMAND_INPUTS) for k, v in given.items() if isinstance(v, str) and id(v) not in own
