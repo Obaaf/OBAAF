@@ -3141,7 +3141,8 @@ OBAAF-GHA-026's cheap put-in is tried on every script with a `$` (decision D-139
 **Review** (one Opus 5.5 sub-agent that did not write it, six passes, each run through the checker against `660f824`):
 
 - *First pass* (77 attempts on `032a527`: 29 ways past, 15 of them in the slice's scope; 10 false errors; 4 costs).
-  All four blocking findings were in a first version that also worked out `${{ }}` expressions reading `env`. The
+  Four of its five blocking findings were in a first version that also worked out `${{ }}` expressions reading `env`;
+  the fifth was an old test (below). The
   readings of every `||` in a step were multiplied together, so five `${{ env.X || 'd' }}` were an error of the file.
   `toJSON(env.AGENT)`, `join(env.AGENT, '')`, `(env).AGENT` and `env[env.KEY]` were read as empty. A file's author
   could make the check 4 to 65 times slower (about 627 s against 9.6 s). That part was taken out and is slice 2d.19,
