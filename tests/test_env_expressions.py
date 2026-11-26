@@ -112,6 +112,15 @@ class TheFormsOfTheEntryTest(unittest.TestCase):
         self.assertEqual(lane(flow("${{ toJSON(env) }} -p x", job_env="{AGENT: claude}")), "agent")
         self.assertEqual(lane(flow("${{ format('{0} -p x', env.*) }}", job_env="{AGENT: claude}")), "agent")
 
+    def test_join_over_the_whole_env_gives_the_values_joined_and_each(self):
+        # `echo "${{ join(env.*, ' ') }}"` is in an older test of OBAAF-GHA-010 as an ordinary form: no error.
+        # (With '' the step's model key, whose value the checker does not know, would follow `ude`.)
+        text = flow("${{ join(env.*, '') }} -p x", job_env="{a: cla, b: ude}").replace(
+            f"          ANTHROPIC_API_KEY: {KEY}\n", "          NOTHING: ''\n")
+        self.assertEqual(lane(text), "agent")
+        self.assertEqual(lane(flow("${{ join(env.*, ' ') }} -p x", job_env="{a: x, b: claude}")), "agent")
+        self.assertEqual(problems(flow("echo \"${{ join(env.*, ' ') }}\"", job_env="{a: x}")), [])
+
     def test_the_value_is_then_read_by_the_shell(self):
         # An expression's value that holds `$NAME` is put in first, then the shell's variables (2d.18).
         self.assertEqual(lane(flow("${{ env.CMD }} -p x", job_env="{CMD: $AGENT, AGENT: claude}")), "agent")
@@ -226,11 +235,6 @@ class FailsClosedTest(unittest.TestCase):
     def assert_unread(self, text, why):
         found = problems(text)
         self.assertTrue(any(UNREAD in p and why in p for p in found), found)
-
-    def test_join_over_the_whole_env(self):
-        self.assert_unread(flow("${{ join(env.*, ' ') }} -p x", job_env="{a: npx, b: claude}"),
-                           "joins the whole `env`")
-        self.assert_unread(flow("${{ join(env, '') }}", job_env="{a: cla}"), "joins the whole `env`")
 
     def test_a_function_the_checker_does_not_know(self):
         self.assert_unread(flow("${{ case(env.A, 'x') }} -p x", job_env="{A: claude}"),
@@ -358,12 +362,12 @@ class CostTest(unittest.TestCase):
         text = ("on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-24.04\n"
                 f"    env: {env}\n    steps:\n      - &s\n        run: |\n{body}      - *s\n      - *s\n")
         calls = []
-        real = env_expr.put_in
+        real = env_expr.plan
 
         def counting(text_, env_):
             calls.append(1)
             return real(text_, env_)
-        with mock.patch.object(env_expr, "put_in", counting):
+        with mock.patch.object(env_expr, "plan", counting):
             problems(text)
         self.assertEqual(len(calls), 1)
 
@@ -376,6 +380,100 @@ class CostTest(unittest.TestCase):
         self.assertTrue(any(wf.ENV_PUT_IN_WORKFLOW_UNREAD in p for p in found), found[:2])
         # Steps before the bound are read; the first is not an error.
         self.assertFalse(any("step 'step 1'" in p for p in found))
+
+
+
+class FromTheReviewTest(unittest.TestCase):
+    """The first review of slice 2d.19 (on `0fcffb3`): each case failed there."""
+
+    def test_nine_defaults_in_one_continued_command_are_no_error(self):
+        sets = " \\\n".join("  --set k%d=${{ inputs.k%d || env.K }}" % (n, n) for n in range(9))
+        self.assertEqual(problems(flow("helm upgrade app ./chart \\\n" + sets, job_env="{K: v}")), [])
+        args = " ".join("--build-arg K%d=${{ matrix.k || env.K }}" % n for n in range(9))
+        self.assertEqual(problems(flow(f"docker build {args} .", job_env="{K: v}")), [])
+        sets = " ".join("--k%d ${{ github.event.inputs.k != '' && github.event.inputs.k || env.K }}" % n
+                        for n in range(9))
+        self.assertEqual(problems(flow(f"tool {sets}", job_env="{K: v}")), [])
+
+    def test_a_default_still_finds_the_agent(self):
+        self.assertEqual(lane(flow("${{ inputs.tool || env.AGENT }} -p x", job_env="{AGENT: claude}")), "agent")
+
+    def test_an_index_of_many_unknown_keys_builds_every_value_once(self):
+        calls = []
+        real = env_expr.Env.every
+
+        def counting(self):
+            calls.append(1)
+            return real(self)
+        env = "{" + ", ".join(f"J{n}: '{{\"a\": {n}}}'" for n in range(300)) + "}"
+        with mock.patch.object(env_expr.Env, "every", counting):
+            problems(flow("echo ${{ env[fromJSON(env[matrix.k])] }}", job_env=env))
+        self.assertLessEqual(len(calls), 3)
+
+    def test_from_json_parses_each_text_once(self):
+        big = json.dumps({f"k{n}": f"v{n}" for n in range(2000)})
+        run = "\n".join("echo ${{ fromJSON(env.BIG).k%d }}" % n for n in range(300))
+        calls = []
+        real = env_expr.json.loads
+
+        def counting(text):
+            calls.append(len(text))
+            return real(text)
+        with mock.patch.object(env_expr.json, "loads", counting):
+            found = problems(flow(run, job_env="{BIG: '" + big.replace("'", "''") + "'}"))
+        self.assertEqual(found, [])
+        self.assertEqual(len(calls), 1)
+
+    def test_from_json_has_a_bound(self):
+        env = env_expr.Env([{f"B{n}": f"[{n}," + "1," * 100_000 + "1]" for n in range(30)}], "exact")
+        body = " || ".join(f"fromJSON(env.B{n})[0]" for n in range(30))
+        self.assertRaises(env_expr.Unread, env_expr.put_in, "${{ " + body + " }}", env)
+
+    def test_copies_are_counted_for_the_workflow_before_they_are_made(self):
+        env = "{" + ", ".join(f"V{n}: value{n}" for n in range(1000)) + "}"
+        steps = "".join(f"      - run: echo {n} ${{{{ env }}}} {'x' * 400}\n" for n in range(40))
+        text = ("on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-24.04\n"
+                f"    env: {env}\n    steps:\n{steps}")
+        made = []
+        real = env_expr.build
+
+        def counting(text_, plan_):
+            out = real(text_, plan_)
+            made.append(len(out))
+            return out
+        with mock.patch.object(env_expr, "build", counting):
+            found = problems(text)
+        self.assertTrue(any(wf.ENV_EXPRESSIONS_WORKFLOW_UNREAD in p for p in found), found[:1])
+        self.assertLessEqual(sum(made), wf.ENV_PUT_IN_WORKFLOW + max(made))
+
+    def test_letter_case_outside_ascii(self):
+        # GitHub compares texts letter by letter without regard to case (.NET's ordinal comparison): `ß` is not
+        # `SS`, and the Kelvin sign is not `k`. Outside ASCII the comparison may go either way here.
+        for value, other in (("ß", "SS"), ("\u212a", "k")):
+            with self.subTest(value=value):
+                run = "${{ env.M == '%s' && 'echo' || env.AGENT }} -p x" % other
+                self.assertEqual(lane(flow(run, job_env="{AGENT: claude, M: '%s'}" % value)), "agent")
+                run = "${{ env.M != '%s' && env.AGENT || 'echo' }} -p x" % other
+                self.assertEqual(lane(flow(run, job_env="{AGENT: claude, M: '%s'}" % value)), "agent")
+        text = flow("${{ env.SS }} -p x", job_env="{SS: claude}", step_env="{ß: echo}", runs_on="windows-latest")
+        self.assertEqual(lane(text), "agent")
+        self.assertEqual(env_expr.fold("straße"), "STRAßE")
+
+    def test_names_yaml_reads_as_other_than_text(self):
+        for key, form in (("1", "env['1']"), ("true", "env.true"), ("null", "env['']"), ("1.5", "env['1.5']"),
+                          ("0o7", "env['7']")):
+            with self.subTest(key=key):
+                self.assertEqual(lane(flow("${{ %s }} -p x" % form, job_env="{%s: claude}" % key)), "agent")
+
+    def test_a_number_index_is_taken_whole(self):
+        self.assertEqual(lane(flow("${{ fromJSON(env.L)[1.9] }} -p x", job_env="{L: '[\"echo\",\"claude\"]'}")),
+                         "agent")
+
+    def test_a_template_the_checker_does_not_know(self):
+        self.assertEqual(lane(flow("${{ format(inputs.fmt, env.AGENT) }} -p x", job_env="{AGENT: claude}")), "agent")
+
+    def test_a_negative_number(self):
+        self.assertEqual(problems(flow("echo ${{ env.RETRIES || -1 }}")), [])
 
 
 if __name__ == "__main__":

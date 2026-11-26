@@ -2028,6 +2028,11 @@ ENV_PUT_IN_ACTIONS_UNREAD = ("its env values, put into the command lines it runs
                              f"it reads (more than {ENV_PUT_IN_WORKFLOW:,} characters of values)")
 
 
+ENV_EXPRESSIONS_WORKFLOW_UNREAD = ("its command lines hold `${{ }}` expressions that read `env` whose readings would "
+                                   "take the lines the checker copies for its workflow past what it reads (more than "
+                                   f"{ENV_PUT_IN_WORKFLOW:,} characters)")
+
+
 class PutInLedger:
     """What one reader's put-ins may still make for a whole workflow (flagship slice 2d.17). `settle(key,
     size)` counts a reading once: `key` says which reading it is, `size` the characters of values it puts in.
@@ -2064,6 +2069,9 @@ class PutIns:
         self.lanes = PutInLedger()
         self.options = PutInLedger()
         self.names = PutInLedger()
+        # Flagship slice 2d.19: the lines the lanes copy where `${{ }}` expressions that read `env` make several
+        # readings of one line (`env_expr.Plan.copies`), each step's counted before they are made.
+        self.copies = PutInLedger()
         self.unread = unread
         self._numbered = 0
 
@@ -2333,18 +2341,29 @@ class Step:
         made = put_ins.lanes.made.get(key) if put_ins is not None else None
         if made is None:
             try:
-                text, size, readings = env_expr.put_in(own, env_expr.Env(scopes, case))
+                plan = env_expr.plan(own, env_expr.Env(scopes, case))
                 why = None
             except env_expr.Unread as error:
-                text, size, readings = None, None, 1
+                plan = None
                 why = (f"its command lines hold an expression that reads `env` which the checker does not work out "
                        f"(one {error})")
             # The scopes' values are kept with the reading, so that their ids, which the key holds, stay theirs.
             kept = tuple(tuple(scope.values()) if isinstance(scope, dict) else scope for scope in scopes)
-            made = (text, size, readings, why, kept)
+            made = [plan, None, why, kept]
             if put_ins is not None:
                 put_ins.lanes.made[key] = made
-        return made[0], made[1], made[2], made[3]
+        plan, text, why = made[0], made[1], made[2]
+        if plan is None:
+            return None, None, 1, why
+        if not plan.units:
+            return own, 0, 1, None
+        # The lines a step's readings copy are counted for the whole workflow before they are made, each step
+        # once (found by the review: 600 steps each copying 2 MB took 1.2 GB).
+        if put_ins is not None and not put_ins.copies.settle((self.seq, key), plan.copies):
+            return None, None, 1, ENV_EXPRESSIONS_WORKFLOW_UNREAD
+        if text is None:
+            text = made[1] = env_expr.build(own, plan)
+        return text, plan.size, plan.readings, None
 
     def _env_put_in_reading(self, own: str) -> tuple:
         """(made, text, why) for `env_put_in`: `made` the `_MadeText` (None where nothing is put in, and then

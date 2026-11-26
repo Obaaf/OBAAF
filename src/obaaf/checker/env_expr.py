@@ -43,7 +43,7 @@ from obaaf.checker import expr as expr_mod
 
 # Readings of one line where two or more of its expressions give several values (their combinations), and where
 # only one does (its values: `echo "${{ toJSON(env) }}"` with a large `env` is ordinary).
-LINE_READINGS = 256
+LINE_READINGS = 1024
 SINGLE_READINGS = 4096
 # Values one expression may give; more is an error of the file.
 EXPRESSION_VALUES = 4096
@@ -51,6 +51,8 @@ EXPRESSION_VALUES = 4096
 # put in, which the workflow's ledger counts).
 COPIES_TEXT = 2_000_000
 MAX_DEPTH = 64
+# Characters `fromJSON` may parse for one step, each text once.
+PARSE_TEXT = 4_000_000
 
 # A quick test: a text that cannot hold an expression reading `env` is not read at all.
 _MAY_READ_ENV = re.compile(r"\benv\b", re.I)
@@ -129,29 +131,44 @@ class Env:
         self.unknown_scope = any(scope is not None and not isinstance(scope, dict) for scope in scopes)
         exact: dict = {}
         folded: dict = {}
+        # Values under a name the checker may not spell as GitHub does: a key YAML gives as a number, a boolean
+        # or null (GitHub names it by its text, not checked here), or a text key that YAML 1.2, which GitHub reads,
+        # may read as one (`0o7`, `yes` is text to both). Every lookup may give them (found by the review of 2d.19).
+        self.odd: list = []
         for scope in scopes:
             if not isinstance(scope, dict):
                 continue
             for name, value in scope.items():
-                if not isinstance(name, str):
-                    continue
                 text = _scalar_text(value)
+                if not isinstance(name, str) or _YAML12_SCALAR.fullmatch(name):
+                    if text is not None:
+                        self.odd.append(text)
+                    if not isinstance(name, str):
+                        continue
                 if text is None:
                     # Not text (a mapping, a list): GitHub refuses it, or gives what the checker does not know.
                     exact.pop(name, None)
-                    folded.pop(name.upper(), None)
+                    folded.pop(fold(name), None)
                     continue
                 exact[name] = text
-                folded[name.upper()] = text
+                folded[fold(name)] = text
         self.exact, self.folded = exact, folded
+        self.parsed: dict = {}
+        self.parse_room = PARSE_TEXT
+        self.fields: dict = {}
+        self.kept: list = []
 
     def lookup(self, name: str) -> list:
         """The values `env.NAME` can give (None for a name `env` does not hold)."""
         out = []
-        if self.case in ("exact", "both"):
+        # A name outside ASCII may fold otherwise on Windows than here (.NET's ordinal comparison maps letter by
+        # letter: `ß` is not `SS`), so there both tables are read.
+        case = "both" if self.case == "folded" and not name.isascii() else self.case
+        if case in ("exact", "both"):
             out.append(self.exact.get(name))
-        if self.case in ("folded", "both"):
-            out.append(self.folded.get(name.upper()))
+        if case in ("folded", "both"):
+            out.append(self.folded.get(fold(name)))
+        out.extend(self.odd)
         if self.unknown_scope:
             out.append(UNKNOWN)
         return _unique(out)
@@ -163,10 +180,20 @@ class Env:
             values.extend(self.exact.values())
         if self.case in ("folded", "both"):
             values.extend(self.folded.values())
+        values.extend(self.odd)
         values.append(None)
         if self.unknown_scope:
             values.append(UNKNOWN)
         return _unique(values)
+
+    def joined(self, sep: str) -> list:
+        """`join(env.*, sep)`: the values in the order the workflow writes them, in each table."""
+        out = []
+        if self.case in ("exact", "both"):
+            out.append(sep.join(self.exact.values()))
+        if self.case in ("folded", "both"):
+            out.append(sep.join(self.folded.values()))
+        return out
 
     def as_dict(self) -> list:
         """The object(s) `toJSON(env)` serialises."""
@@ -177,6 +204,24 @@ class Env:
                 k.upper() for k in self.exact}):
             out.append(dict(self.folded))
         return out
+
+
+_YAML12_SCALAR = re.compile(r"~|null|Null|NULL|true|True|TRUE|false|False|FALSE"
+                            r"|[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+"
+                            r"|[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
+                            r"|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)")
+
+
+def fold(name: str) -> str:
+    """A name as a Windows runner compares it: each letter by its own upper case where that is one letter (.NET's
+    ordinal comparison without regard to case maps letter by letter), so `ß` stays `ß`."""
+    if name.isascii():
+        return name.upper()
+    out = []
+    for ch in name:
+        up = ch.upper()
+        out.append(up if len(up) == 1 else ch)
+    return "".join(out)
 
 
 def _scalar_text(value) -> str | None:
@@ -210,10 +255,7 @@ def _key(value):
     if value is UNKNOWN or value is ENV_OBJECT or value is ALL_VALUES:
         return ("special", id(value))
     if isinstance(value, (dict, list)):
-        try:
-            return ("json", json.dumps(value, sort_keys=True))
-        except (TypeError, ValueError):
-            return ("id", id(value))
+        return ("id", id(value))
     return (type(value).__name__, value)
 
 
@@ -358,6 +400,10 @@ class _Reader:
     def unary(self, depth: int) -> list:
         if depth > MAX_DEPTH:
             raise Unread("is nested too deeply to read")
+        if self.peek() == ("op", "-") and self.peek(1) is not None and self.peek(1)[0] == "num":
+            self.pos += 2
+            number = _number(self.toks[self.pos - 1][1])
+            return [UNKNOWN if number is UNKNOWN else -number]
         if self.op("!"):
             values = self.unary(depth + 1)
             out = []
@@ -397,8 +443,11 @@ class _Reader:
         """What `value.KEY` or `value[KEY]` gives for each key the index can be."""
         if value is UNKNOWN:
             return [UNKNOWN]
+        if len(keys) > EXPRESSION_VALUES:
+            raise Unread(f"has an index that can give more than {EXPRESSION_VALUES:,} values")
         if value is ENV_OBJECT:
             out: list = []
+            every = False
             for key in keys:
                 if isinstance(key, str):
                     out.extend(self.env.lookup(key))
@@ -407,31 +456,51 @@ class _Reader:
                 elif key is None:
                     out.append(None)        # `env[null]`, as `env[env.UNSET]`: no name, no value
                 else:
-                    # A key the checker does not know (another context, an object): any name.
-                    out.extend(self.env.every())
+                    # A key the checker does not know (another context, an object): any name, once however many
+                    # such keys there are (found by the review: 4,000 of them built 16,000,000 values).
+                    every = True
+                if len(out) > 4 * EXPRESSION_VALUES:
+                    out = _unique(out)
+            if every:
+                out.extend(self.env.every())
             return out
         if value is ALL_VALUES:
             # `env.*[0]`: some value, in an order the checker does not know.
             return self.env.every()
         if isinstance(value, dict):
             out = []
+            every = False
+            # The fields by their names in upper case, made once for each object (found by the review: 5,000
+            # fields read from one object of 5,000 compared every name each time).
+            index = self.env.fields.get(id(value))
+            if index is None:
+                index = {}
+                for k, v in value.items():
+                    if isinstance(k, str):
+                        index.setdefault(k.upper() if k.isascii() else k, []).append(v)
+                self.env.fields[id(value)] = index
+                self.env.kept.append(value)
             for key in keys:
-                if isinstance(key, str):
-                    found = [v for k, v in value.items() if isinstance(k, str) and k.lower() == key.lower()]
-                    out.extend(found or [None])
+                if isinstance(key, str) and key.isascii():
+                    out.extend(index.get(key.upper()) or [None])
                 else:
-                    out.extend(list(value.values()) + [None])
+                    every = True        # a key outside ASCII, or one the checker does not know: any field
+            if every:
+                out.extend(list(value.values()) + [None])
             return out
         if isinstance(value, list):
             out = []
+            every = False
             for key in keys:
-                if isinstance(key, (int, float)) and not isinstance(key, bool) and float(key).is_integer() \
-                        and 0 <= int(key) < len(value):
-                    out.append(value[int(key)])
-                elif isinstance(key, (int, float)) and not isinstance(key, bool):
-                    out.append(None)
+                if isinstance(key, (int, float)) and not isinstance(key, bool) and not math.isnan(key) \
+                        and not math.isinf(key):
+                    # GitHub takes the whole part of a number given as an index (`[1.9]` is `[1]`).
+                    n = math.floor(key)
+                    out.append(value[n] if 0 <= n < len(value) else None)
                 else:
-                    out.extend(list(value) + [None])
+                    every = True
+            if every:
+                out.extend(list(value) + [None])
             return out
         return [None]       # a field of text, a number, true or null is null
 
@@ -521,10 +590,18 @@ class _Reader:
             out = []
             for value in args[0]:
                 if isinstance(value, str):
-                    try:
-                        out.append(json.loads(value))
-                    except (ValueError, RecursionError):
-                        out.append(None)        # GitHub fails the step: nothing runs
+                    # One parse of each text for the whole step, the characters parsed counted (found by the
+                    # review: 5,000 references to one 380 KB value parsed it 5,000 times).
+                    memo = self.env.parsed
+                    if value not in memo:
+                        self.env.parse_room -= len(value)
+                        if self.env.parse_room < 0:
+                            raise Unread(f"gives fromJSON more than {PARSE_TEXT:,} characters to read")
+                        try:
+                            memo[value] = json.loads(value)
+                        except (ValueError, RecursionError):
+                            memo[value] = None      # GitHub fails the step: nothing runs
+                    out.append(memo[value])
                 elif value is ENV_OBJECT or value is ALL_VALUES:
                     raise Unread("passes the whole `env` to fromJSON")
                 else:
@@ -537,7 +614,12 @@ class _Reader:
             out = []
             for value in args[0]:
                 if value is ENV_OBJECT or value is ALL_VALUES:
-                    raise Unread("joins the whole `env`, in an order the checker does not know")
+                    # The values joined in the order the workflow writes them, as GitHub keeps them (not checked
+                    # on GitHub), and each value on its own.
+                    for sep in seps:
+                        out.extend(env.joined("" if sep is UNKNOWN else sep))
+                    out.extend(text_of(ALL_VALUES, env))
+                    continue
                 if isinstance(value, list):
                     pieces = []
                     for item in value:
@@ -565,6 +647,12 @@ class _Reader:
                 if count > EXPRESSION_VALUES:
                     raise Unread(f"can give more than {EXPRESSION_VALUES:,} values")
             out = []
+            if UNKNOWN in pieces[0]:
+                # A template the checker does not know may give any argument, or all of them together.
+                for arg in pieces[1:]:
+                    out.extend(arg)
+                if all(len(arg) == 1 for arg in pieces[1:]):
+                    out.append("".join("" if a[0] is UNKNOWN else a[0] for a in pieces[1:]))
             for choice in _product(pieces):
                 if any(p is UNKNOWN for p in choice):
                     out.append(UNKNOWN)
@@ -635,8 +723,11 @@ def _compared(op: str, left: list, right: list) -> list:
     GitHub compares them (texts without regard to case), and otherwise it may be either."""
     if len(left) == 1 and len(right) == 1:
         a, b = left[0], right[0]
-        if isinstance(a, str) and isinstance(b, str) and op in ("==", "!="):
-            same = a.casefold() == b.casefold()
+        if isinstance(a, str) and isinstance(b, str) and op in ("==", "!=") and a.isascii() and b.isascii():
+            # GitHub compares texts without regard to case, letter by letter (.NET's ordinal comparison); outside
+            # ASCII Python's mapping differs from it (`ß` and `SS`), so there the answer may be either (found by
+            # the review of 2d.19).
+            same = a.upper() == b.upper()
             return [same if op == "==" else not same]
         if (isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool)
                 and not isinstance(b, bool)):
@@ -695,10 +786,21 @@ def may_read_env(text: str) -> bool:
     return expr_mod.OPEN in text and _MAY_READ_ENV.search(text) is not None
 
 
-def put_in(text: str, env: Env) -> tuple:
-    """(text, size, readings): `text` with each expression that reads `env` worked out, line by line, the
-    characters of values put in (what the workflow's ledger counts), and the most readings made of one line. Raises `Unread` (its text says why) where the checker does
-    not work an expression out, or the readings would pass what it reads."""
+class Plan:
+    """What `put_in` will make of a text, worked out before any of it is made (found by the review of 2d.19:
+    readings made first, and counted after, kept 1.2 GB for 600 steps past the workflow's bound): the units of the
+    text with the values of their expressions, the characters of values put in (`size`), the characters of the
+    readings beyond the text as written (`copies`), and the most readings of one line (`readings`)."""
+
+    __slots__ = ("units", "size", "copies", "readings")
+
+    def __init__(self, units, size, copies, readings) -> None:
+        self.units, self.size, self.copies, self.readings = units, size, copies, readings
+
+
+def plan(text: str, env: Env) -> Plan:
+    """The `Plan` for `text`. Raises `Unread` (its text says why) where the checker does not work an expression
+    out, or the readings would pass what it reads for one step."""
     try:
         found = spans(text)
     except expr_mod.TooComplex as error:
@@ -720,27 +822,25 @@ def put_in(text: str, env: Env) -> tuple:
         texts: list = []
         for value in values:
             texts.extend(text_of(value, env))
-        texts = _unique([text[start:end] if t is UNKNOWN else t for t in texts])
-        work.append((start, end, texts))
+        known = _unique([t for t in texts if t is not UNKNOWN])
+        # A value the checker does not know is the expression as written, which the lanes read anyway in the
+        # lines as written; where the expression also has values it knows, only those are made into readings, so
+        # the default idiom `${{ inputs.k || env.K }}` gives one reading, not two (found by the review: nine of
+        # them in one `helm` command were an error).
+        work.append((start, end, known or [text[start:end]]))
     if not work:
-        return text, 0, 1
-    # Lines: a line, the lines a backslash at its end continues, and the lines an expression spans, read as one.
-    units = _units(text, [(start, end) for start, end, _texts in work])
-    out: list = []
-    size = 0
-    copies = 0
+        return Plan([], 0, 0, 1)
+    units_ = _units(text, [(start, end) for start, end, _texts in work])
+    planned: list = []
+    size = copies = 0
     most = 1
-    pos = 0
     w = 0
-    for u_start, u_end in units:
+    for u_start, u_end in units_:
         here = []
         while w < len(work) and work[w][0] < u_end:
             here.append(work[w])
             w += 1
-        out.append(text[pos:u_start])
-        pos = u_end
         if not here:
-            out.append(text[u_start:u_end])
             continue
         several = [item for item in here if len(item[2]) > 1]
         count = 1
@@ -751,6 +851,30 @@ def put_in(text: str, env: Env) -> tuple:
             raise Unread(f"holds expressions that read `env` which together give more than {limit:,} readings of "
                          "one line")
         most = max(most, count)
+        # The readings' length, worked out without making them: each holds the line's text outside its
+        # expressions, and each value of an expression is in count / (its number of values) of them.
+        outside = (u_end - u_start) - sum(end - start for start, end, _texts in here)
+        values = 0
+        for _start, _end, texts in here:
+            values += sum(len(t) for t in texts) * (count // len(texts))
+        size += values
+        # The copies are the line's text outside its expressions made again for each reading past the first; the
+        # values, in every reading, are on the workflow's lanes ledger (D-138) through `size`.
+        copies += (count - 1) * (outside + 1)
+        if copies > COPIES_TEXT:
+            raise Unread(f"holds expressions that read `env` whose readings come to more than {COPIES_TEXT:,} "
+                         "characters")
+        planned.append((u_start, u_end, here))
+    return Plan(planned, size, copies, most)
+
+
+def build(text: str, made: Plan) -> str:
+    """The text a `Plan` says: each unit replaced by its readings, one per line."""
+    out: list = []
+    pos = 0
+    for u_start, u_end, here in made.units:
+        out.append(text[pos:u_start])
+        pos = u_end
         readings = []
         for choice in _product([item[2] for item in here]):
             pieces = []
@@ -758,17 +882,21 @@ def put_in(text: str, env: Env) -> tuple:
             for (start, end, _texts), value in zip(here, choice):
                 pieces.append(text[at:start])
                 pieces.append(value)
-                size += len(value)
                 at = end
             pieces.append(text[at:u_end])
             readings.append("".join(pieces))
-        copies += sum(len(r) for r in readings) - (u_end - u_start)
-        if copies > COPIES_TEXT:
-            raise Unread(f"holds expressions that read `env` whose readings come to more than {COPIES_TEXT:,} "
-                         "characters")
         out.append("\n".join(readings))
     out.append(text[pos:])
-    return "".join(out), size, most
+    return "".join(out)
+
+
+def put_in(text: str, env: Env) -> tuple:
+    """(text, size, readings): `text` with each expression that reads `env` worked out, line by line, the
+    characters of values put in, and the most readings made of one line (`plan` and `build`)."""
+    made = plan(text, env)
+    if not made.units:
+        return text, 0, 1
+    return build(text, made), made.size, made.readings
 
 
 def _units(text: str, spans_: list) -> list:
