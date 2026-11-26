@@ -264,14 +264,22 @@ class VerifierBlocksTest(unittest.TestCase):
             r = build_release(tmp)
             args = ["verify", "release", "--policy", r.policy, "--artifacts", r.dist, "--dsse", r.attestations,
                     "--actor", "releaser", "--repo-dir", r.repo, "--range", r.range, "--source-revision", r.head]
-            code, out, _ = run_cli(*args, "--approvals", r.approvals)
-            self.assertEqual(code, 0, out)
-            self.assertIn("PASSED", out)
-            code, out, _ = run_cli(*args)
-            self.assertEqual(code, 1)
-            self.assertIn("BLOCKED", out)
-            code, out, _ = run_cli(*args, "--pre-approval")
-            self.assertEqual(code, 0, out)
+            # Each heading is the console's first line and the step summary's first line under its title
+            # (review of #393: the approver reads the pre-approval job's summary in obaaf-publish.yml).
+            cases = (([*args, "--approvals", r.approvals], 0, "Release verification: PASSED, upload may proceed"),
+                     (args, 1, "Release verification: BLOCKED, do not upload"),
+                     ([*args, "--pre-approval"], 0,
+                      "Pre-approval checks: PASSED, release approval is still required"))
+            for i, (case, expected_code, heading) in enumerate(cases):
+                summary = tmp / f"summary-{i}.md"
+                with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
+                    code, out, _ = run_cli(*case)
+                self.assertEqual(code, expected_code, out)
+                self.assertEqual(out.splitlines()[0], heading)
+                self.assertEqual(summary.read_text(encoding="utf-8").splitlines()[:3],
+                                 ["## OBAAF release verification", "", "```"])
+                self.assertEqual(summary.read_text(encoding="utf-8").splitlines()[3], heading)
+            self.assertIn("no release approvals were supplied", run_cli(*args)[1])
 
     def test_cli_no_longer_trusts_unverified_gh_output(self):
         with TempDir() as tmp:

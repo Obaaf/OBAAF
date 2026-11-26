@@ -163,7 +163,10 @@ class JenkinsReleaseLaneTest(unittest.TestCase):
         # What the publish template runs before anyone approves.
         before = self.verify(envelopes, release_run=tag_build(self.rev), pre_approval=True)
         self.assertTrue(before.ok, before.blocks)
-        self.assertFalse(self.verify(envelopes, release_run=tag_build("b" * 40), pre_approval=True).ok)
+        blocked = self.verify(envelopes, release_run=tag_build("b" * 40), pre_approval=True)
+        self.assertFalse(blocked.ok)
+        # A pre-approval run that blocks never says PASSED (review of #393).
+        self.assertEqual(blocked.to_text().splitlines()[0], "Release verification: BLOCKED, do not upload")
         after = self.verify(envelopes, approvals=publish_run(), release_run=tag_build(self.rev))
         self.assertTrue(after.ok, after.blocks)
         self.assertEqual(after.approvals, ["carol"])
@@ -194,6 +197,8 @@ class JenkinsReleaseLaneTest(unittest.TestCase):
         code, out, err = run_cli(*args, "--source-revision", self.rev)
         self.assertEqual(code, 1, err or out)
         self.assertEqual(out.splitlines()[0], "Release verification: BLOCKED, do not upload")
+        # Blocked for the missing approval itself, not only for the missing publishing build's JSON.
+        self.assertIn("no Jenkins approvals were supplied", out)
         args += ["--approvals", self.tmp / "publish-run.json"]
         revision_file = self.tmp / "release-sha.txt"
         revision_file.write_text(self.rev + "\n", encoding="ascii")
