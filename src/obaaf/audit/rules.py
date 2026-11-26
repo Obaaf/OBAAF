@@ -1638,10 +1638,10 @@ def _missing_finding(run: _Run, subject: str, target: str, missing: dict, kept: 
     # A secret passed that the called workflow does not declare: by a GitHub community thread ("Invalid secret,
     # ... is not defined in the referenced workflow"), not by the page, the run may then fail at its start.
     refused = whole and any(k not in listed for k in passes["keys"])
-    required = sorted(missing[k]["name"] for k in missing if listed.get(k) is True)
+    # Only a declaration read whole says what GitHub does; otherwise every one of them is "either".
+    required = sorted(missing[k]["name"] for k in missing if whole and not refused and listed.get(k) is True)
     unsure = sorted(missing[k]["name"] for k in missing
-                    if listed.get(k) is not True and (refused or (k in listed and listed[k] is None)
-                                                      or (k not in listed and not whole)))
+                    if not whole or refused or (k in listed and listed[k] is None))
     empty = sorted(set(names) - set(required) - set(unsure))
     outcome = []
     if required:
@@ -1667,29 +1667,50 @@ def _missing_finding(run: _Run, subject: str, target: str, missing: dict, kept: 
 
 
 def _call_graph_parts(run: _Run) -> dict:
-    """For each workflow file joined by calls to one in a cycle or in a chain deeper than GitHub allows (by
-    _call_graph_doubts), why: such a run GitHub may refuse whole, so no job in it may run at all (the second
-    review of slice 2b.9: a finding there said "the run shows no error")."""
+    """For each workflow file whose own calls reach a file in a cycle or a chain deeper than GitHub allows (by
+    _call_graph_doubts), itself included, why: a run of it GitHub may refuse whole, so no job in it may run at
+    all (the second review of slice 2b.9: a finding there said "the run shows no error"). Only what a file's
+    own calls reach counts, never another caller of the same workflow (the third review: one cyclic file made
+    every caller of a shared workflow "cannot tell"). One pass up the calls from every such file at once."""
     files = run.files()
     read = {file["path"] for file in files}
     calls = {file["path"]: [t for t in (called_path(job) for job in file["jobs"]) if t is not None] for file in files}
     doubts = _call_graph_doubts(calls, read)
     if not doubts:
         return {}
-    linked: dict = {}
+    callers: dict = {}
     for path, targets in calls.items():
-        for target in targets:
-            if target in read:
-                linked.setdefault(path, set()).add(target)
-                linked.setdefault(target, set()).add(path)
-    out: dict = {}
-    for start, why in doubts.items():
-        seen, frontier = {start}, [start]
-        while frontier:
-            frontier = [n for p in frontier for n in linked.get(p, ()) if n not in seen]
-            seen.update(frontier)
-        for path in seen:
-            out.setdefault(path, [f"{plain(start, 120)}: {why}"])
+        for target in dict.fromkeys(targets):
+            callers.setdefault(target, []).append(path)
+    out = {path: [f"{plain(path, 120)}: {why}"] for path, why in doubts.items()}
+    frontier = list(out)
+    while frontier:
+        reached = []
+        for target in frontier:
+            for path in callers.get(target, ()):
+                if path not in out:
+                    out[path] = out[target]
+                    reached.append(path)
+        frontier = reached
+    # A file that runs only when called runs only inside its callers' runs: when every caller in this repository
+    # is a run GitHub may refuse, so is each of its own (the third review: a chain a→b→c→d→e, whose files below
+    # `a` run only from it). Each file is settled once, when its last caller is.
+    only_called = {f["path"] for f in files if f.get("triggers") and set(f["triggers"]) <= {"workflow_call"}}
+    left = {path: len(set(callers.get(path, ()))) for path in only_called}
+    frontier = list(out)
+    settled = set(out)
+    while frontier:
+        reached = []
+        for path in frontier:
+            for target in dict.fromkeys(calls.get(path, ())):
+                if target in left and target not in settled:
+                    left[target] -= 1
+                    if left[target] == 0:
+                        out[target] = [f"{plain(target, 120)}: it runs only when called, and every workflow here "
+                                       f"that calls it is one GitHub may refuse ({out[path][0]})"]
+                        settled.add(target)
+                        reached.append(target)
+        frontier = reached
     return out
 
 
@@ -1703,6 +1724,79 @@ def _weighed_call(run: _Run, job: dict) -> bool:
         return True
     local = _called(run, job)
     return local is None or any(j["secrets"] or j["all_secrets"] or j["passes"] for j in local["jobs"])
+
+
+def _weigh_call(run: _Run, file: dict, job: dict, kept: _Secrets, listed: str, graph: dict) -> None:
+    """OBAAF-SET-011 for one calling job."""
+    subject = f"job {_job_label(file, job)}"
+    target = job["calls"] or ""
+    passes = job["passes"]
+    local = _called(run, job)
+    doubt = list(job.get("doubt") or []) + list(file.get("may_refuse") or []) + \
+        (list(local.get("may_refuse") or []) if local else []) + graph.get(file["path"], [])
+    if doubt:
+        # The caller's file, or the file it calls, may be read by GitHub otherwise than by this reader (a YAML
+        # merge key may give the environment or the secrets passed), or not run.
+        run.cannot_tell(subject, f"The job calls {_q(target, 120)}, and GitHub may read the files otherwise "
+                                 f"than the audit does ({_names(doubt, 2)}), so what the called jobs get for "
+                                 "the secrets they read is not known.")
+        return
+    # Handed over as an input, under `with:`: an input is not a secret, so no environment the called job
+    # declares stands in for it.
+    for name in passes["inputs"]:
+        if name.upper() in kept.only_env:
+            run.finding(subject, "medium",
+                        f"The job hands secrets.{plain(name, 60)} to {_q(target, 120)} as an input. "
+                        f"{_given([name.upper()], kept.only_env)}, and a job that calls a reusable workflow "
+                        "cannot declare an environment, so the called workflow cannot get its value that way, "
+                        "whatever it declares.")
+    if passes["inputs_all"]:
+        run.cannot_tell(subject, f"The job hands {_q(target, 120)} a secret it picks with an expression as an "
+                                 "input. Whether that is one stored only in an environment is not known.")
+    if local is None:
+        unread = "which was not read (it is in another repository, could not be parsed, or is not among the files read)"
+        said = len(run.results)
+        if passes["odd_keys"]:
+            run.cannot_tell(subject, f"The job calls {_q(target, 120)}, {unread}, and its secrets: holds a key "
+                                     "this reader does not take as a plain name, or is text other than inherit. "
+                                     "What a job there gets for a secret kept in an environment is not known.")
+        elif passes["inherit"]:
+            run.cannot_tell(subject, f"The job passes every secret to {_q(target, 120)}, {unread}. Whether a "
+                                     "job there reads a secret kept in an environment without declaring that "
+                                     f"environment ({listed or 'none is kept only in one'}) is not known.")
+        for name, key in sorted(passes["keys"].items()):
+            reads = sorted(set(key["reads"]) & kept.only_env_names)
+            if key["all"]:
+                run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)} as a secret it picks "
+                                         f"with an expression, {unread}. Whether that is one stored only in "
+                                         "an environment is not known.")
+            elif reads:
+                run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)}, {unread}. "
+                                         f"{_given(reads, kept.only_env)}: a job there gets a value for it only "
+                                         "if it declares an environment that holds it, and whether one does is "
+                                         "not known.")
+        if len(run.results) == said:
+            run.cannot_tell(subject, f"The job calls {_q(target, 120)}, {unread}. Whether a job there reads a "
+                                     "secret kept in an environment that this job does not pass, which it would "
+                                     "then get empty, is not known.")
+        return
+    missing: dict = {}
+    for called in local["jobs"]:
+        onward = called["passes"] and (called["passes"]["inherit"] or called["passes"]["all"])
+        if called["all_secrets"] or onward:
+            # It can read any secret, or passes them all on: which it relies on is not known.
+            run.cannot_tell(subject, f"The job calls {_q(target, 120)}, whose job {_q(called['id'])} "
+                                     + ("passes every secret on to another call" if onward and not
+                                        called["all_secrets"] else "can read any secret")
+                                     + ". Whether it relies on one kept in an environment, and what it gets "
+                                       "for it, is not known.")
+        # Each secret it names is still weighed, once in any letter case, as GitHub compares the names.
+        spelled: dict = {}
+        for name in called["secrets"]:
+            spelled.setdefault(name.upper(), name)
+        for name in spelled.values():
+            _reaches_called_job(run, subject, target, passes, called, name, kept, missing)
+    _missing_finding(run, subject, target, missing, kept, local.get("call_secrets") or {}, passes)
 
 
 def rule_011(run: _Run) -> None:
@@ -1727,78 +1821,10 @@ def rule_011(run: _Run) -> None:
     graph = _call_graph_parts(run)
     for file, job in callers:
         mark = len(run.results)
-        subject = f"job {_job_label(file, job)}"
-        target = job["calls"] or ""
-        passes = job["passes"]
-        local = _called(run, job)
-        doubt = list(job.get("doubt") or []) + list(file.get("may_refuse") or []) + \
-            (list(local.get("may_refuse") or []) if local else []) + graph.get(file["path"], [])
-        if doubt:
-            # The caller's file, or the file it calls, may be read by GitHub otherwise than by this reader (a YAML
-            # merge key may give the environment or the secrets passed), or not run.
-            run.cannot_tell(subject, f"The job calls {_q(target, 120)}, and GitHub may read the files otherwise "
-                                     f"than the audit does ({_names(doubt, 2)}), so what the called jobs get for "
-                                     "the secrets they read is not known.")
-            continue
-        # Handed over as an input, under `with:`: an input is not a secret, so no environment the called job
-        # declares stands in for it.
-        for name in passes["inputs"]:
-            if name.upper() in kept.only_env:
-                run.finding(subject, "medium",
-                            f"The job hands secrets.{plain(name, 60)} to {_q(target, 120)} as an input. "
-                            f"{_given([name.upper()], kept.only_env)}, and a job that calls a reusable workflow "
-                            "cannot declare an environment, so the called workflow cannot get its value that way, "
-                            "whatever it declares.")
-        if passes["inputs_all"]:
-            run.cannot_tell(subject, f"The job hands {_q(target, 120)} a secret it picks with an expression as an "
-                                     "input. Whether that is one stored only in an environment is not known.")
-        if local is None:
-            unread = "which was not read (it is in another repository, could not be parsed, or is not among the files read)"
-            said = len(run.results)
-            if passes["odd_keys"]:
-                run.cannot_tell(subject, f"The job calls {_q(target, 120)}, {unread}, and its secrets: holds a key "
-                                         "this reader does not take as a plain name, or is text other than inherit. "
-                                         "What a job there gets for a secret kept in an environment is not known.")
-            elif passes["inherit"]:
-                run.cannot_tell(subject, f"The job passes every secret to {_q(target, 120)}, {unread}. Whether a "
-                                         "job there reads a secret kept in an environment without declaring that "
-                                         f"environment ({listed or 'none is kept only in one'}) is not known.")
-            for name, key in sorted(passes["keys"].items()):
-                reads = sorted(set(key["reads"]) & kept.only_env_names)
-                if key["all"]:
-                    run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)} as a secret it picks "
-                                             f"with an expression, {unread}. Whether that is one stored only in "
-                                             "an environment is not known.")
-                elif reads:
-                    run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)}, {unread}. "
-                                             f"{_given(reads, kept.only_env)}: a job there gets a value for it only "
-                                             "if it declares an environment that holds it, and whether one does is "
-                                             "not known.")
-            if len(run.results) == said:
-                run.cannot_tell(subject, f"The job calls {_q(target, 120)}, {unread}. Whether a job there reads a "
-                                         "secret kept in an environment that this job does not pass, which it would "
-                                         "then get empty, is not known.")
-            continue
-        missing: dict = {}
-        for called in local["jobs"]:
-            onward = called["passes"] and (called["passes"]["inherit"] or called["passes"]["all"])
-            if called["all_secrets"] or onward:
-                # It can read any secret, or passes them all on: which it relies on is not known.
-                run.cannot_tell(subject, f"The job calls {_q(target, 120)}, whose job {_q(called['id'])} "
-                                         + ("passes every secret on to another call" if onward and not
-                                            called["all_secrets"] else "can read any secret")
-                                         + ". Whether it relies on one kept in an environment, and what it gets "
-                                           "for it, is not known.")
-            # Each secret it names is still weighed, once in any letter case, as GitHub compares the names.
-            spelled: dict = {}
-            for name in called["secrets"]:
-                spelled.setdefault(name.upper(), name)
-            for name in spelled.values():
-                _reaches_called_job(run, subject, target, passes, called, name, kept, missing)
-        _missing_finding(run, subject, target, missing, kept, local.get("call_secrets") or {}, passes)
+        _weigh_call(run, file, job, kept, listed, graph)
         if self_repository_call(job):
             # D-076 reads a `$/` call as this repository's, though whether GitHub takes `$/` in a job's `uses:` was
-            # not established: a finding then rests on that.
+            # not established: a finding then rests on that, wherever the weighing ended (the third review).
             for result in run.results[mark:]:
                 if result["state"] == "finding":
                     result["message"] += (" This holds if GitHub runs a call written with $/, which was not "

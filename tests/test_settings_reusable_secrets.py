@@ -308,6 +308,46 @@ class SecondReviewTest(unittest.TestCase):
         self.assertNotIn("passes every secret", message)
 
 
+class ThirdReviewTest(unittest.TestCase):
+    """What the third review of slice 2b.9 found."""
+
+    READS = "      - run: ./x\n        env:\n          A: ${{ secrets.HELDOUT_TOKEN }}\n"
+
+    def test_a_cyclic_file_elsewhere_does_not_silence_another_caller_of_a_shared_workflow(self):
+        lib = workflow("  workflow_call:\n", job("propose", "    environment: main-only\n", self.READS))
+        bad = workflow("  workflow_call:\n  workflow_dispatch:\n", "  again:\n    uses: ./.github/workflows/bad.yml\n"
+                       "  shared:\n    uses: ./.github/workflows/lib.yml\n")
+        found = assess_files(ADMIN, {"q.yml": caller(uses="./.github/workflows/lib.yml"), "lib.yml": lib, "bad.yml": bad})
+        mine = [r for r in of(found, "OBAAF-SET-011") if r["subject"] == "job .github/workflows/q.yml#case"]
+        self.assertEqual([r["state"] for r in mine], ["finding"])
+        theirs = {r["state"] for r in of(found, "OBAAF-SET-011") if "bad.yml" in r["subject"]}
+        self.assertEqual(theirs, {"cannot-tell"})
+
+    def test_a_deep_chain_elsewhere_does_not_silence_another_caller(self):
+        lib = workflow("  workflow_call:\n", job("propose", "    environment: main-only\n", self.READS))
+        files = {"q.yml": caller(uses="./.github/workflows/lib.yml"), "lib.yml": lib,
+                 "a.yml": caller(uses="./.github/workflows/b.yml", name="start")}
+        for here, there in (("b", "c"), ("c", "d"), ("d", "lib")):
+            files[f"{here}.yml"] = workflow("  workflow_call:\n", f"  next:\n    uses: ./.github/workflows/{there}.yml\n")
+        found = assess_files(ADMIN, files)
+        mine = [r["state"] for r in of(found, "OBAAF-SET-011") if r["subject"] == "job .github/workflows/q.yml#case"]
+        self.assertEqual(mine, ["finding"])
+
+    def test_two_spellings_of_a_declared_name_are_either_whatever_required_says(self):
+        declared = ("  workflow_call:\n    secrets:\n      HELDOUT_TOKEN:\n        required: true\n"
+                    "      heldout_token:\n        required: false\n")
+        files = {"bench.yml": caller(),
+                 "w.yml": workflow(declared, job("propose", "    environment: main-only\n", self.READS))}
+        message = one(files)["message"]
+        self.assertIn("the run either fails at its start or gets an empty value", message)
+        self.assertNotIn("GitHub fails the run at its start for", message)
+
+    def test_the_dollar_slash_clause_reaches_a_call_to_a_file_that_was_not_read(self):
+        files = {"r.yml": caller("    with:\n      token: ${{ secrets.PACKAGE_INDEX_TOKEN }}\n", "$/.github/workflows/gone.yml")}
+        finding, = of(assess_files(ADMIN, files), "OBAAF-SET-011", "finding")
+        self.assertIn("This holds if GitHub runs a call written with $/", finding["message"])
+
+
 class SecondCallTest(unittest.TestCase):
 
     def test_a_called_job_that_passes_every_secret_on_from_a_caller_that_passed_none_is_cannot_tell(self):

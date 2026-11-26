@@ -292,11 +292,14 @@ def _call_secrets(workflow) -> dict:
     names: dict = {}
     whole = True
     for name, spec in declared.items():
-        if not isinstance(name, str) or not name or name != name.strip() or name.upper() in names:
+        if not isinstance(name, str) or not name or name != name.strip():
             whole = False
             continue
         required = spec.get("required", False) if isinstance(spec, dict) else (False if spec is None else None)
-        names[name.upper()] = required if isinstance(required, bool) else None
+        required = required if isinstance(required, bool) else None
+        if name.upper() in names:
+            whole, required = False, None       # two spellings of one name: which GitHub takes is not established
+        names[name.upper()] = required
     return {"names": names, "whole": whole}
 
 
