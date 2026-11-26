@@ -1352,11 +1352,13 @@ def _action_inputs(raw: dict, given: dict) -> dict:
     return out
 
 
-def _put_in(text: str, inputs: dict, folder: str, problems: list, env: dict | None = None) -> str:
+def _put_in(text: str, inputs: dict, folder: str, problems: list, env: dict | None = None,
+            counts: list | None = None) -> str:
     """`text` with what the checker can work out put in: each expression that reads the action's
     inputs (every value it can give, one reading per line, when there are several) and the action's
     own folder for `github.action_path`. An expression that reads an input in a way the checker does
-    not work out is added to `problems`."""
+    not work out is added to `problems`. How many readings the text was made of is added to `counts`
+    (flagship slice 2d.18), where there are several."""
     text = _ACTION_PATH_EXPR_RE.sub(lambda _m: f"./{folder}", text)
     if "${{" not in text:
         return text
@@ -1376,30 +1378,34 @@ def _put_in(text: str, inputs: dict, folder: str, problems: list, env: dict | No
             problems.append(f"an expression that reads an input or the environment can give more than "
                             f"{_VALUE_LIMIT} texts, and the checker reads only {_VALUE_LIMIT} "
                             f"('{wf_mod.one_line(whole, 60)}')")
-    out = "\n".join(dict.fromkeys(readings))
+    unique = list(dict.fromkeys(readings))
+    out = "\n".join(unique)
     if len(out) > LOCAL_ACTION_TEXT:
         problems.append("its inputs, put in, make a text longer than the checker reads")
         return text
+    if counts is not None and len(unique) > 1:
+        counts.append(len(unique))
     return out
 
 
-def _put_inputs(value, inputs: dict, folder: str, problems: list, _done: dict | None = None, env: dict | None = None):
+def _put_inputs(value, inputs: dict, folder: str, problems: list, _done: dict | None = None, env: dict | None = None,
+                counts: list | None = None):
     """A step of a composite action with `_put_in` applied to every text it holds. A value YAML gives
     many times through an alias is worked on once (a file of a few kilobytes can name a million)."""
     done = {} if _done is None else _done
     if id(value) in done:
         return done[id(value)]
     if isinstance(value, str):
-        out = _put_in(value, inputs, folder, problems, env)
+        out = _put_in(value, inputs, folder, problems, env, counts)
     elif isinstance(value, dict):
         out = {}
         done[id(value)] = out
         for key, item in value.items():
-            out[key] = _put_inputs(item, inputs, folder, problems, done, env)
+            out[key] = _put_inputs(item, inputs, folder, problems, done, env, counts)
     elif isinstance(value, list):
         out = []
         done[id(value)] = out
-        out.extend(_put_inputs(item, inputs, folder, problems, done, env) for item in value)
+        out.extend(_put_inputs(item, inputs, folder, problems, done, env, counts) for item in value)
     else:
         out = value
     done[id(value)] = out
@@ -1473,7 +1479,8 @@ def _action_folder_script(root: Path, folder: str, run: str, workdir, commands: 
 
 def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions", commands: list, depth: int = 0,
                            seen: frozenset = frozenset(), cache: dict | None = None,
-                           given: dict | None = None, given_env: dict | None = None) -> _ActionReading:
+                           given: dict | None = None, given_env: dict | None = None,
+                           inherited_env: dict | None = None) -> _ActionReading:
     """Whether the local action `uses` (`./path`, `$/path` or `.\\path`) runs an agent (flagship slice
     2d.4a). A composite action's steps are read for an agent as a job's steps are, with more put in: an
     agent action; an agent CLI in any command line `Step.agent_text` reads, with each expression that
@@ -1509,6 +1516,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
         return out
     given = given or {}
     given_env = given_env or {}
+    inherited_env = inherited_env or {}
     cache = {} if cache is None else cache
     files_key = ("files", tuple(folders))
     if files_key not in cache:
@@ -1523,6 +1531,12 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
         size = sum(_action_size(root, folder) for folder in folders)
         cache[files_key] = (raws, missing, _inputs_read(raw for _, raw in raws), size)
     raws, missing, read_names, size = cache[files_key]
+    if inherited_env:
+        # The job's and the workflow's `env`, under the using step's own (flagship slice 2d.18), whole: a name the
+        # action's files never hold can still be made where its inputs are put in (`${{ inputs.a }}${{ inputs.b }}`
+        # with defaults `$TO` and `OLS`; found by the fourth review, after a filter by the files' words), so an
+        # action is read again for each job whose values differ, as for each set of inputs.
+        given_env = {**inherited_env, **given_env}
 
     def fixed(mapping, names=None):
         return tuple(sorted((str(name), wf_mod.as_text(value)) for name, value in mapping.items()
@@ -1572,6 +1586,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 continue
             problems: list = []
             put, done, ignored = {}, {}, {}
+            counts: list = []           # readings of each command field, where an input's expression gives several
             merged = _with_env(step_raw, given_env)
             # The step's `env` first, with its inputs put in, so `${{ env.T }}` elsewhere reads what GitHub
             # gives it (`T: ${{ inputs.tool }}`).
@@ -1582,7 +1597,11 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 if key_name == "env":
                     put[key_name] = step_env
                 elif key_name in _COMMAND_FIELDS:
-                    put[key_name] = _put_inputs(value, inputs, folder, problems, done, step_env)
+                    # Only the fields `Step.env_put_in` reads (the run script, and a github-script script or the
+                    # egress action's command among the inputs) widen its bound (found by the third review: 16
+                    # readings of `working-directory` made the bound of a one-reading `run` 16 times as wide).
+                    put[key_name] = _put_inputs(value, inputs, folder, problems, done, step_env,
+                                                counts if key_name in ("run", "with") else None)
                 else:
                     put[key_name] = _put_inputs(value, inputs, folder, [], ignored, step_env)
             # One ledger for every reading of a local action in the check (flagship slice 2d.17): the readings
@@ -1590,8 +1609,11 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             put_ins = cache.get(_PUT_INS)
             if put_ins is None:
                 put_ins = cache[_PUT_INS] = wf_mod.PutIns(wf_mod.ENV_PUT_IN_ACTIONS_UNREAD)
+            # A command line made of several readings holds each `$NAME` once in each, so the step's own bound
+            # (D-137) is that many times as wide (flagship slice 2d.18, from its second review: four `inputs.x ||
+            # 'default'` made 16 readings of `--prompt "$PROMPT"`, past the bound for a 13 KB prompt).
             step = wf_mod.Step(index=number - 1, raw=put, line=getattr(step_raw, "line", 0), put_ins=put_ins,
-                               seq=put_ins.number())
+                               seq=put_ins.number(), readings=max(counts, default=1))
             # What a caller hands the action (the text its inputs add) is worked on again at each reading,
             # so it is paid for too; the action's own text is in the size of its files.
             added = (sum(_text_size(put.get(name)) for name in _COMMAND_FIELDS)
@@ -1705,8 +1727,11 @@ def _apply_local_action_detection(workflow, root: Path | None, actions: "wf_mod.
             where = f"{workflow.path}: job '{wf_mod.one_line(job.id, 60)}' uses the local action {shown}, and"
             cache[_OWN] = LOCAL_ACTION_UNITS_PER_USE
             try:
+                # The `env` the using step runs with, its job's and its workflow's under its own, which the
+                # action's steps inherit (flagship slice 2d.18; before, the step's own alone).
+                inherited = {name: value for name, value in step.run_env.items() if name not in step.env}
                 reading = _agent_in_local_action(root, step.uses, actions, commands, cache=cache, given=step.with_,
-                                                 given_env=step.env)
+                                                 given_env=step.env, inherited_env=inherited)
             except _ActionFileError as exc:
                 errors.append(f"{where} {wf_mod.one_line(str(exc), 500)}, so the checker cannot tell whether an "
                               "agent runs in it")
@@ -2077,7 +2102,8 @@ def _local_steps(root: Path, uses: str, given: dict, given_env: dict, outer: dic
             # The workflow's ledgers bound what putting its variables in makes (flagship slice 2d.17), as for
             # the job's own steps; the step has a number of its own there, which its copies keep.
             step = wf_mod.Step(index=0, raw=put, line=top.line, via=top, shown_name=name, written=step_raw,
-                               put_ins=top.put_ins, seq=top.put_ins.number() if top.put_ins is not None else 0)
+                               put_ins=top.put_ins, seq=top.put_ins.number() if top.put_ins is not None else 0,
+                               inherited=top.inherited)
             out.append(step)
             unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             inner_uses = step_raw.get("uses")

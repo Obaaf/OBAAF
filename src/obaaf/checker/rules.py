@@ -2385,17 +2385,28 @@ class WorkflowRules:
         # An `env` written as one expression (`env: ${{ fromJSON(...) }}`) can set any name: none is known.
         scoped = not any(scope is not None and not isinstance(scope, dict) for scope in scopes)
         scopes = [scope if isinstance(scope, dict) else {} for scope in scopes]
-        # A name put together from variables the script sets (`a=cla; b=ude; $a$b`) is looked for only where
-        # the script has a `$` and an assignment, with a regular expression (kept cheap). Where the values put in
+        # A name put together from variables (`$a$b`, with `a=cla; b=ude` in the script or `a: cla` and `b: ude` in the
+        # `env` of the step, the job or the workflow) is looked for wherever the script has a `$`, with a regular
+        # expression (kept cheap). Before flagship slice 2d.18 (#377) only a script with an `=` was, so a name made
+        # from `env` values alone was not. Where the values put in
         # make a text longer than the checker reads (flagship slice 2d.16), whether they make the name is decided
         # without the text, and a step whose values may make it is read as one that names the tool, so that what
         # cannot be read there is "cannot tell", also where the name is somewhere else in the step (a token
         # named `CLAUDE_CODE_OAUTH_TOKEN` in the job's `env`; found by the review).
         # What is put in is bounded for the whole workflow too (flagship slice 2d.17), on the step's own number.
         put_ins = step.put_ins
-        cheap = [(text, agent_flags.put_in_cheaply(text, scopes, put_ins.names if put_ins is not None else None,
-                                                   (step.seq, n))) for n, (text, _b) in enumerate(parts)
-                 if "$" in text and "=" in text]
+        # Worked out once for the step, not once for each tool it is read for: without the `=` guard every script
+        # with a `$` is put in (found by CI: a test of 400 jobs using local actions took 25 % longer).
+        cheap_cache = self.__dict__.setdefault("_cheap_put_ins", {})
+        cheap = []
+        for n, (text, _b) in enumerate(parts):
+            if "$" not in text:
+                continue
+            key = (step.seq, id(step.raw), n, text)
+            if key not in cheap_cache:
+                cheap_cache[key] = agent_flags.put_in_cheaply(
+                    text, scopes, put_ins.names if put_ins is not None else None, (step.seq, n))
+            cheap.append((text, cheap_cache[key]))
         named_unread = any(put is None and agent_flags.names_when_put_in(text, scopes, programs, packages)
                            for text, put in cheap)
         if not named_unread and not any(agent_flags.appears(t, programs, packages) for t in named) and not any(
