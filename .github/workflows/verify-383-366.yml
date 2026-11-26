@@ -1,8 +1,8 @@
-name: Verify the settings audit with the artifact-consumer draft
+name: Verify the published consumer draft after the settings-audit merge
 
 on:
   push:
-    branches: [lead/verify-383-366-9a45195]
+    branches: [lead/verify-366-571aad0]
 
 permissions:
   contents: read
@@ -77,12 +77,16 @@ jobs:
           assert git("show", "-s", "--format=%P").decode().strip() == f"{ours} {target}"
           print("Resolved documentation on", ours, "tree", git("rev-parse", "HEAD^{tree}").decode().strip(), flush=True)
           PY
-          test "$(git merge-base HEAD 9a45195f137a7a17fc36b8c23d3dcce1b39a0ec3)" = fdb77411e0f2e6ef78f47b78d631e5d246d9d23d
-          python "$RUNNER_TEMP/resolve-383.py" 9a45195f137a7a17fc36b8c23d3dcce1b39a0ec3
-          test "$(git show -s --format=%P)" = "2f8474ed1cbe75cfe1197633502c9e1204bb1817 9a45195f137a7a17fc36b8c23d3dcce1b39a0ec3"
+          test "$(git merge-base HEAD 310ff028da1e3e9e3232b06a9e410055000d9e56)" = fdb77411e0f2e6ef78f47b78d631e5d246d9d23d
+          python "$RUNNER_TEMP/resolve-383.py" 310ff028da1e3e9e3232b06a9e410055000d9e56
+          test "$(git show -s --format=%P)" = "2f8474ed1cbe75cfe1197633502c9e1204bb1817 310ff028da1e3e9e3232b06a9e410055000d9e56"
           git show --no-patch --format='Native merge %H parents %P tree %T'
-          git merge-base --is-ancestor 9a45195f137a7a17fc36b8c23d3dcce1b39a0ec3 HEAD
+          git merge-base --is-ancestor 310ff028da1e3e9e3232b06a9e410055000d9e56 HEAD
           echo "Integrated review tree $(git rev-parse HEAD^{tree})"
+          test "$(git rev-parse HEAD^{tree})" = 3cc764f6b6a32810c3116c0fa3c4fbb5c6dbb17a
+          test "$(git rev-parse 571aad01e0fe838564b4355104010f7d3ccb8279^{tree})" = "$(git rev-parse HEAD^{tree})"
+          git checkout --detach 571aad01e0fe838564b4355104010f7d3ccb8279
+          test "$(git rev-parse HEAD)" = 571aad01e0fe838564b4355104010f7d3ccb8279
           git diff --check HEAD^1 HEAD
           worktemp="$(mktemp -d "$RUNNER_TEMP/obaaf-validation.XXXXXX")"
           if git -C "$worktemp" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
@@ -120,7 +124,7 @@ jobs:
               assert scan["files"] and not scan["errors"]
           print("Both audits preserved the saved observations; both settings-enabled checker reports matched.")
           PY
-      - name: Run the full suite on the combined PR heads
+      - name: Run the full suite on the published draft
         if: matrix.test == 'suite'
         shell: bash
         run: |
