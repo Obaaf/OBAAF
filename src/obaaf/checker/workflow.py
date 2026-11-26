@@ -1980,8 +1980,8 @@ class PutInBudget:
     more time `value` is put in and is False once the times past `ENV_PUT_IN_TIMES` of each value, by their
     lengths, come to more than `ENV_PUT_IN_EXTRA` characters. A value is counted by the object it is, so a
     value YAML gives under many names through aliases is one value. `ledger` and `place` (flagship slice
-    2d.17): the workflow's `PutInLedger` that each text made with this budget is settled on, and the number
-    of the step it is made for (`Step.seq`); `made` counts how many times each text has been made with it,
+    2d.17): the workflow's `PutInLedger` that each text made with this budget is settled on, and which
+    reading it is (OBAAF-GHA-026's: the step's number, `Step.seq`, and the tool); `made` counts how many times each text has been made with it,
     so that the same text made twice in one reading is two readings."""
 
     def __init__(self, ledger: "PutInLedger | None" = None, place: int = 0) -> None:
@@ -2005,13 +2005,14 @@ class PutInBudget:
 # reviewer's machine for a workflow-level value in 20 steps). Now each reader of a workflow (`PutIns`) may
 # put in at most `ENV_PUT_IN_WORKFLOW` characters of values altogether, every time a value is put in counted
 # by its length. A step's reading is counted once however often it is read: `Step.env_put_in` keeps the text
-# it made, and OBAAF-GHA-026 settles each text it makes by the step's number and how many times that text has
-# been made in the step's reading, so another tool's reading or the second pass through local actions adds
-# nothing, and a text made twice in one reading (`bash -c '...'` written twice) is counted twice (found by the
-# review). Each step is counted, even where YAML makes it of the same mapping as another, because what the
-# reading finds is handed on, step by step, to the rules (found by the review). Past the bound the reading is
-# not made: for the lanes the step is an error of its file, as past a step's bound; for OBAAF-GHA-026 its
-# options are "cannot tell".
+# it made, so the six or so readings of an agent job's steps add nothing. OBAAF-GHA-026 settles each text it
+# makes by the step's number, the tool it reads the step for and how many times that text has been made in that
+# reading, so the second pass through local actions adds nothing, while each tool's reading counts (each makes
+# and reads the text again, #380) and a text made twice in one reading (`bash -c '...'` written twice) counts
+# twice (both found by the review). Each step is counted, even where YAML makes it of the same mapping as
+# another, because what the reading finds is handed on, step by step, to the rules (found by the review). Past
+# the bound the text is not made: for the lanes the step is an error of its file, as past a step's bound; for
+# OBAAF-GHA-026 its options are "cannot tell".
 ENV_PUT_IN_WORKFLOW = 5_000_000
 ENV_PUT_IN_WORKFLOW_UNREAD = ("its env values, put into the command lines it runs, would take what the checker puts "
                               "into its workflow's command lines past what it reads (more than "
@@ -2052,8 +2053,8 @@ class PutIns:
     slice 2d.17): one for each reader, since each makes its own text. `lanes` is `Step.env_put_in`'s (the
     step's `env`, read by `agent_text`, the lanes and the egress controls); `options` is OBAAF-GHA-026's
     `agent_flags._substitute`, and `names` its `put_in_cheaply`, both of which put in the job's and the
-    workflow's `env` too. `number()` gives each step its own number (`Step.seq`), which a copy of the step
-    keeps. `unread` is what a step past the lanes' bound is told."""
+    workflow's `env` too, once for each tool they read a step for. `number()` gives each step its own number
+    (`Step.seq`), which a copy of the step keeps. `unread` is what a step past the lanes' bound is told."""
 
     def __init__(self, unread: str = ENV_PUT_IN_WORKFLOW_UNREAD) -> None:
         self.lanes = PutInLedger()
@@ -2068,10 +2069,10 @@ class PutIns:
 
 
 class _MadeText:
-    """What `Step.env_put_in` made of some command lines and `env` values (flagship slice 2d.17): the text, or
-    None where the step's own bound stops it; the characters of values it puts in; the values, kept so that
-    their ids, which the key holds, stay theirs; and what `agent_text` found in the text, by the patterns it
-    looked for."""
+    """What `Step.env_put_in` makes of some command lines and `env` values (flagship slice 2d.17): the
+    characters of values it puts in, or None where the step's own bound stops it; the text, made only once a
+    step's use of it fits the workflow's bound (None until then); the values, kept so that their ids, which the
+    key holds, stay theirs; and what `agent_text` found in the text, by the patterns it looked for."""
 
     __slots__ = ("text", "size", "kept", "found")
 
@@ -2275,7 +2276,9 @@ class Step:
         key = (own, tuple((name, id(value)) for name, value in env.items()))
         made = put_ins.lanes.made.get(key) if put_ins is not None else None
         if made is None:
-            # What would be put in is counted first, so a text past either bound is never made.
+            # What would be put in is counted first, and the text is made only once a step's use of it is
+            # settled, so a text past either bound is never made (found by the second review: 1,000 steps
+            # past the workflow's bound made and kept 800,000,000 characters).
             budget = PutInBudget()
             size = 0
             for match in _ENV_NAME_RE.finditer(own):
@@ -2286,14 +2289,15 @@ class Step:
                     size = None
                     break
                 size += len(value)
-            text = None if size is None else _ENV_NAME_RE.sub(lambda m: env.get(m.group(1), m.group(0)), own)
-            made = _MadeText(text, size, tuple(env.values()))
+            made = _MadeText(None, size, tuple(env.values()))
             if put_ins is not None:
                 put_ins.lanes.made[key] = made
-        if made.text is None:
+        if made.size is None:
             return made, None, ENV_PUT_IN_UNREAD
         if put_ins is not None and not put_ins.lanes.settle((self.seq, key), made.size):
             return made, None, put_ins.unread
+        if made.text is None:
+            made.text = _ENV_NAME_RE.sub(lambda m: env.get(m.group(1), m.group(0)), own)
         return made, made.text, None
 
     @property
