@@ -3203,3 +3203,25 @@ an `env` value; what an earlier step writes to `GITHUB_ENV`; pwsh `$env:X` and c
 D-139 on Windows still merges names as written; more than 1,024 readings of one line (eleven
 `${{ github.ref == 'refs/heads/main' && env.PROD || env.DEV }}` in one command) is an error.
 
+## 2d.19c: OBAAF-GHA-026 reads the options `${{ env }}` expressions give
+
+Slice 2d.19c (#382, the rest of 2d.19; D-143). One Opus 5.5 sub-agent that wrote none of it attacked `Rules._env_expressions_worked` in three passes, with a fourth check of the last fix: about 240 attempts, each run against the base (`flagship` `db6e0ed`) and the change, side by side. What GitHub does was read from its pages and the runner's behaviour as recorded in #387, not run.
+
+**First pass (d72ca60, the first version, which trusted any reading whose names were set): 6 blocking, about 117 attempts.** Ways past, each base medium and quiet with the change:
+
+- a value of another context beside a known one: `${{ inputs.flags || env.SAFE }}`, `format('{0} {1}', env.BASE, inputs.extra)`, `join(matrix.f, env.SEP)`, `matrix.f || env.EMPTY`, the same in github-script and the egress action's command (`env_expr` leaves out a value it does not know beside a known one, and reads one as empty inside `format` and `join`);
+- several readings of a line, read together: `startsWith(env.MODE, 'safe') && '--model sonnet' || '--dangerously-skip-permissions'` before a heredoc, so the second reading was inside the first's heredoc; and two letter cases on `runs-on: ${{ matrix.os }}`;
+- an `env` value that holds `${{ }}` (`"--model sonnet # ${{ vars.EXTRA }}"`), which GitHub works out first;
+- a local action's step given its caller's `${{ env.X }}` input, worked out with the action step's own `env`;
+- writers of the `env` context the older pattern misses: `${{ github.env }}`, `::set-env` with `ACTIONS_ALLOW_UNSECURE_COMMANDS`, a github-script step's `c['export' + 'Variable']`;
+- a crash: more than 4,096 values for one name (`Env.lookup` raised).
+
+Also a cost: 20 steps of ten two-valued expressions took 51 s against 3.6 s. **Fixed by class:** only expressions that read nothing but `env` and literals, with `format` and `join` as the only functions; one reading per line; no value holding `${{`; no local action's step; the wider writer pattern and any earlier github-script step; the reader's refusals caught.
+
+**Second pass (6b6bd85): 2 blocking, about 90 attempts.** `fromJSON` is parsed by Python's `json.loads`, stricter than the runner's reader (single quotes, names without quotes, comments, text after the value, trailing commas), and a refused text was read as empty: five forms quiet. Searching every earlier step's text for every step was quadratic and expanded YAML aliases: 75 s for 6,000 steps, and 1 GB and 60 s for a 1 KB alias bomb. **Fixed:** `fromJSON`, `toJSON` and every function but `format` and `join` refuse; the first step that may write is found once for the job, each mapping read once (`Rules._first_env_writer`); `_runner_file`, `set_env_`, `toJSON(github)` and `@actions/core` added to the pattern.
+
+**Third pass (bccc066): 0 blocking, about 30 attempts.** It found a writer in a job's or workflow's `defaults.run.shell` not read (not verified that the runner runs such a shell as written); fixed in 99e3058, which a fourth check confirmed (the two cases medium, the alias bomb 0.66 s against the base's 0.47 s, nothing else changed).
+
+**Held:** `toJSON(env.X)` before it was refused, values breaking out of quotes, a multi-line value carrying a second command, letter case on hosted Linux, macOS and Windows and on unknown runners, the composite precedence of a step's `env`, YAML aliases of `script` and `with.run`, 28 odd or invalid expressions (no new error), 6,000 steps at parity.
+
+**Stated limits (D-143):** a writer the checker cannot see (a script file the step runs, an action's own code or `pre:`) can set a name it takes as known, as for `$NAME` (D-139); a composite action's step that GitHub would run with the option stays medium; a 100 KB value read by eleven tools in one step costs what the same file written with `$V` costs (66 s against the base's 3.9 s for the expression, 51.6 s for `$V`).
