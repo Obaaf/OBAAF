@@ -1597,10 +1597,13 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             if out.agent is None and wf_mod.leaves_repository(step.uses):
                 out.agent = (f"uses {wf_mod.one_line(step.uses, 80)} in the local action {shown}, a path out of its "
                              "repository that can reach any action the job downloads")
+            unread_put_in = False
             if out.agent is None:
                 text = step.agent_text(commands)
                 if text and wf_mod.matches_any(commands, text):
                     out.agent = f"runs an agent CLI in {where}"
+                else:
+                    unread_put_in = step.env_put_in_unread
             if out.agent is None and step.run:
                 expand_problems: list = []
                 run = _ACTION_PATH_VAR_RE.sub(f"./{folder}", _expand_variables(step.run, step.env, expand_problems))
@@ -1609,6 +1612,10 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                     root, folder, run, step.raw.get("working-directory"), commands, cache)
                 if tok:
                     out.agent = f"runs an agent in the script {tok}, from {where}"
+            if out.agent is None and unread_put_in:
+                # `agent_text` did not read its env values put in (flagship slice 2d.16): an error, as for a
+                # workflow's step, since the action's author writes it as freely (found by the review).
+                raise _ActionFileError(f"in its step {number} {wf_mod.ENV_PUT_IN_UNREAD}")
             raw_uses = step_raw.get("uses")
             if _is_local_like(raw_uses) and "${{" in raw_uses:
                 out.unread.append((wf_mod.one_line(raw_uses, 120), "its path holds an expression"))

@@ -4,6 +4,17 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### A step's variables are put into its command lines only up to a bound
+
+Slice 2d.16, from #372; decision D-137. To find an agent named through a variable (`run: $AGENT -p x` with `env: {AGENT: claude}`), the checker reads a step's command lines with its `env` values put in, and OBAAF-GHA-026 does the same with the job's and the workflow's `env` and the script's own assignments. Nothing bounded those texts: a `run` of 2,000 `$P` with a 2,000-character `P`, 8 KB of YAML, was read as 4,000,000 characters several times in one check, and 64 KB was read as 256,000,000. The time and memory grew with the square of the step's size.
+
+- **Each value may now be put in eight times, whatever its length, and the times past the eighth may add up to 100,000 characters.** A value is counted by what it is, so one value YAML gives under many names through aliases is one value, and a value the text does not use gives no room. A long prompt used a few times is always read. Within the bound nothing changes.
+- **A step past the bound is an error of its file, which fails the check**, in a workflow or in a local action, because an agent named through its variables could go unseen: "its env values, put into the command lines it runs, make a text longer than the checker reads (...), so the checker cannot tell whether an agent runs in it". No baseline or `ignore` entry can accept an error.
+- **OBAAF-GHA-020's egress control and OBAAF-GHA-005's `key-out-of-reach` say "cannot tell"** for such a step outside the confined command or before the step that holds the key.
+- **OBAAF-GHA-026 reads such a script as written and says "cannot tell" for every option it warns about**, wherever the tool's name is in the step or the values it could not put in may make it (`a=cla; b=ude; $a$b ...`). Whether they may is decided without making the text.
+- **The bound is for one step, and for OBAAF-GHA-026 for each tool it reads the step for.** OBAAF-GHA-026 keeps one budget for every script of a step, its `env` values and inputs and nested ones such as `bash -c '...'` included. Where the step's scripts together pass the bound, an option given through a variable can be a "cannot tell" finding, medium at most, instead of the finding it gave before; an option written out is still found. A value that reaches many steps, through the job's or the workflow's `env` or a YAML alias, is still put in again in each step, up to eight times, as slowly as before: five steps that each put a 100 KB workflow-level value in eight times take about 11 s. A bound on the whole workflow is #376.
+- The timing test of #372 now runs at 4,000 by 4,000 and takes about 0.3 s; with either reading's bound removed it takes 6 or 12 s, so the test measures the bounds it names.
+
 ### A respelled runner label or action reference
 
 Slice 2d.15, from #148 and #245; decision D-136. Two ways of writing a workflow made the checker read less than GitHub may run. Whether GitHub trims space round a runner label, and whether it refuses `openai//codex-action` or runs `openai/codex-action`, are not established, so both now fail closed.

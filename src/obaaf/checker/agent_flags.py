@@ -47,7 +47,7 @@ import json
 import re
 from dataclasses import dataclass, field
 
-from obaaf.checker.workflow import _SHELLS, _command_positions, _sub_expressions, command_segments
+from obaaf.checker.workflow import PutInBudget, _SHELLS, _command_positions, _sub_expressions, command_segments
 
 _EXPR = "\x02"           # a `${{ }}` expression is held as \x02<n>\x02 while a script is read
 _HOLE = "\x03"           # an expansion whose value is not known is marked \x03...\x03 in a word's text
@@ -666,12 +666,16 @@ class _Lexer:
         return i + 1
 
 
-def _substitute(text: str, variables: dict) -> str:
+def _substitute(text: str, variables: dict, budget: PutInBudget | None = None) -> str | None:
     """The script with each `$NAME` and `${NAME}` whose value is known put in, outside single quotes (a plain
     value has no quote, expansion or backslash, so bash would read the result as it reads the variable:
-    split into words outside double quotes, one word inside them)."""
+    split into words outside double quotes, one word inside them). None when the `PutInBudget` runs out
+    (flagship slice 2d.16): before, `claude -p $P $P ...` with 16,000 `$P` and a 16,000-character `P`
+    (64 KB of YAML) was read as 256,000,000 characters. `budget` is the step's, which every nested script
+    shares (`bash -c '... $P ...'` read again; found by the review); a new one by default."""
     if not variables or "$" not in text:
         return text
+    budget = PutInBudget() if budget is None else budget
     out, i, n, quote = [], 0, len(text), ""
     while i < n:
         ch = text[i]
@@ -702,6 +706,8 @@ def _substitute(text: str, variables: dict) -> str:
             if m:
                 name = m.group(1) or m.group(2)
                 if name in variables:
+                    if not budget.take(variables[name]):
+                        return None
                     out.append(variables[name])
                     i = m.end()
                     continue
@@ -710,8 +716,17 @@ def _substitute(text: str, variables: dict) -> str:
     return "".join(out)
 
 
-def _lex(text: str, variables: dict) -> tuple[list, str]:
-    lexer = _Lexer(_substitute(text, variables), variables)
+# What reading a script says when its variables, put in, would make a text longer than it reads (2d.16).
+PUT_IN_UNREAD = "its variables, put in, make a text longer than the checker reads"
+
+
+def _lex(text: str, variables: dict, budget: PutInBudget | None = None) -> tuple[list, str]:
+    put = _substitute(text, variables, budget)
+    if put is None:
+        # Read as written, with nothing put in; `_read_text` makes every warned option "cannot tell".
+        lexer = _Lexer(text, {})
+        return lexer.commands(), PUT_IN_UNREAD
+    lexer = _Lexer(put, variables)
     commands = lexer.commands()
     return commands, lexer.problem
 
@@ -751,6 +766,8 @@ class _Context:
     depth: int = 0
     loose: bool = False             # the tool's name appears in the text at all, even inside a word
     prose: bool = False             # text that may be prose (another input, an `env` value, an argument)
+    # What putting variables in may still add, for the whole step, every nested script included (2d.16).
+    budget: PutInBudget = field(default_factory=PutInBudget)
 
     def cannot_tell(self, word: str) -> None:
         if self.mentioned:
@@ -818,8 +835,10 @@ def _read_text(text: str, ctx: _Context) -> None:
     if ctx.depth > _MAX_DEPTH:
         ctx.cannot_tell("nesting deeper than the checker reads: " + _fact_text(text))
         return
-    commands, problem = _lex(text, ctx.variables)
-    if problem and not ctx.prose:
+    commands, problem = _lex(text, ctx.variables, ctx.budget)
+    if problem == PUT_IN_UNREAD:
+        _put_in_unread(text, ctx)
+    elif problem and not ctx.prose:
         ctx.cannot_tell(f"{problem}: " + _fact_text(text))
     case_depth, pattern_next = 0, False
     for command in commands:
@@ -844,6 +863,15 @@ def _read_text(text: str, ctx: _Context) -> None:
         for w in command.words:
             for inner in w.inner:
                 _read_nested(inner, ctx)
+
+
+def _put_in_unread(text: str, ctx: _Context) -> None:
+    """Every warned option is "cannot tell" where the script's variables could not be put in (flagship slice
+    2d.16), whether or not the step names the tool and in prose too: the values left out may name it or hold
+    the option. A script is read only where the tool's name is somewhere in the step, or where the values
+    may make it (`names_when_put_in`)."""
+    for flag in ctx.flags:
+        ctx.reading.cannot_tell(flag, f"{PUT_IN_UNREAD}: " + _fact_text(text))
 
 
 def _fact_text(text: str) -> str:
@@ -1168,9 +1196,11 @@ def _start(words: list, bases: list, i: int, ctx: _Context, command: Command, ru
         if rest:
             target = rest[0]
             if target.inner and target.text.startswith("<("):
-                inner_commands, _p = _lex(target.inner[0], ctx.variables)
+                inner_commands, inner_problem = _lex(target.inner[0], ctx.variables, ctx.budget)
                 literal = _literal_output(inner_commands[-1]) if len(inner_commands) == 1 else None
-                if literal is None:
+                if inner_problem == PUT_IN_UNREAD:
+                    _put_in_unread(target.inner[0], ctx)
+                elif literal is None:
                     ctx.cannot_tell(target.shown)
                 else:
                     _read_nested(literal, ctx)
@@ -1567,14 +1597,15 @@ def _read_widest(text: str, programs: list, packages: list, flags: list, reading
 def read_script(text: str, programs: list, packages: list, flags: list, variables: dict | None = None,
                 mentioned: bool | None = None, bash: bool = True, unread: dict | None = None,
                 written_files: set | None = None, loose: bool | None = None, prose: bool = False,
-                language: str = "") -> Reading:
+                language: str = "", budget: PutInBudget | None = None) -> Reading:
     """Each warned flag a script gives the tool's program, and what the checker cannot read there.
     `mentioned`: whether the step names the tool anywhere (its script, its `env` values or the job's and
     workflow's); "cannot tell" about a command the checker cannot name is given only then. `bash` False:
     the script is in another shell or language, which is read only the widest way, and "cannot tell" where
     it names the tool and nothing is found; `language` (a shell's or an interpreter's name, or
     `github-script`) says how `agent_code` reads it by its tokens as well. `unread`: `env` values the checker
-    cannot read, shown with a word that uses them."""
+    cannot read, shown with a word that uses them. `budget`: the step's `PutInBudget`, shared by every
+    script of the step that is read (flagship slice 2d.16); a new one by default."""
     reading = Reading()
     if not text or not flags:
         return reading
@@ -1591,7 +1622,7 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
         written = set(written_files or ()) | {m.group(1) for m in re.finditer(
             r"(?:>>?|\btee(?:\s+-a)?)\s*['\"]?([^\s'\";&|<>]+)", held_text)}
         ctx = _Context(list(programs), packages, flags, dict(variables or {}), mentioned, written, reading,
-                       loose=loose, prose=prose)
+                       loose=loose, prose=prose, budget=PutInBudget() if budget is None else budget)
         _read_text(held_text, ctx)
         if held or unread:
             shown: dict = {}
@@ -1638,9 +1669,9 @@ def _fragments(text: str, flags: list, reading: Reading, where: str) -> None:
                     break
 
 
-def put_in_cheaply(text: str, scopes: list) -> str:
-    """A script with each plain assignment it makes and each plain `env` value put in for `$NAME` and
-    `${NAME}`, by a regular expression: only to decide whether the step names the tool."""
+def _cheap_values(text: str, scopes: list) -> dict:
+    """The values `put_in_cheaply` puts in: each plain `env` value, the nearest scope's, and each plain
+    assignment the script makes, its last."""
     values: dict = {}
     for scope in reversed(scopes):
         if isinstance(scope, dict):
@@ -1649,9 +1680,74 @@ def put_in_cheaply(text: str, scopes: list) -> str:
     for m in _LITERAL_ASSIGN_RE.finditer(text):
         value = m.group(2)
         values[m.group(1)] = value[1:-1] if value[:1] in "\"'" else value
+    return values
+
+
+_CHEAP_NAME_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+
+
+def put_in_cheaply(text: str, scopes: list) -> str | None:
+    """A script with each plain assignment it makes and each plain `env` value put in for `$NAME` and
+    `${NAME}`, by a regular expression: only to decide whether the step names the tool. None, as
+    `_substitute` gives, when the values put in would make a text longer than the checker reads (flagship
+    slice 2d.16); `names_when_put_in` then decides."""
+    values = _cheap_values(text, scopes)
     if not values:
         return text
-    return re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: values.get(m.group(1), m.group(0)), text)
+    budget = PutInBudget()
+
+    def put(match):
+        value = values.get(match.group(1))
+        if value is None:
+            return match.group(0)
+        if not budget.take(value):
+            raise OverflowError
+        return value
+
+    try:
+        return _CHEAP_NAME_RE.sub(put, text)
+    except OverflowError:
+        return None
+
+
+def names_when_put_in(text: str, scopes: list, programs: list, packages: list) -> bool:
+    """`appears(put_in_cheaply(text, scopes), programs, packages)`, decided without making the text, for
+    when it is longer than the checker reads (flagship slice 2d.16). `appears` takes quotes and
+    backslashes out and folds case, one character at a time, and decodes bash's `$'...'`, whose quotes and
+    escapes begin in the script's own text when no value it puts in has a `$`, `'` or backslash. So each
+    piece of the text and each value can be read on its own: a name is in a value, or it is in the text
+    made with each value longer than twice `width` cut to its first and last `width` characters, joined by a
+    character no name has (`width` is the longest name and 16 more, more than the eight characters an escape
+    such as `\\U0001F600` reads after its backslash, so a name that reaches the part cut out is in the value
+    as written). Where a value it puts in has a `$`, `'` or backslash,
+    the answer is yes: what bash's `$'...'` then decodes to is not worked out here. Only the values the text
+    puts in are read."""
+    names = [n.casefold() for n in programs + packages if n]
+    if not names:
+        return False
+    values = _cheap_values(text, scopes)
+    found = [m for m in _CHEAP_NAME_RE.finditer(text) if m.group(1) in values]
+    used = {m.group(1): values[m.group(1)] for m in found}
+    if any(ch in value for value in used.values() for ch in "$'\\"):
+        return True
+    width = max(len(n) for n in names) + 16
+
+    def folded(piece: str) -> str:
+        return re.sub(r"[\"'\\]", "", piece).casefold()
+
+    short: dict = {}
+    for name, value in used.items():
+        if any(n in folded(value) for n in names):
+            return True
+        short[name] = value if len(value) <= 2 * width else value[:width] + "\x00" + value[-width:]
+    pieces, at = [], 0
+    for m in found:
+        pieces.append(text[at:m.start()])
+        pieces.append(short[m.group(1)])
+        at = m.end()
+    pieces.append(text[at:])
+    joined = "".join(pieces)
+    return appears(joined, programs, packages)
 
 
 def appears(text: str, programs: list, packages: list) -> bool:
