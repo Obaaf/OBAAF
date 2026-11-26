@@ -1019,6 +1019,8 @@ An assessment concerns a literal secret and its required literal environment. Re
 
 **Correction (A4a2, #298).** A suggested `obaaf check` command in the full text or summary retains the explicitly selected snapshot path. Replaying the baseline-writing command then includes that path in the repository ownership check. Baseline migration receives only the options its command supports.
 
+**Proposed clarification (#385, 2026-11-26).** For environment evidence, a partial read still establishes the list of names when every recorded problem names a listed environment. A custom deployment protection rule is outside this control. A missing selected-branch policy leaves the named environment uncertain. A problem naming an unlisted environment leaves every assessment uncertain. The completeness requirement for secret-name inventories still applies.
+
 **Status.** Accepted, 2026-11-21. Proposed 2026-11-19 (A4a, #280). The 30-day limit was approved with the adoption design.
 
 ### D-105 Draft confinement for one agent job

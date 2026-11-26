@@ -89,6 +89,9 @@ class EvidenceTests(unittest.TestCase):
 
         other.update(deployment_branches="selected", branch_policies=None)
         problem.update(what="branch policies", reason="patterns unavailable")
+        # Earlier snapshots recorded branch-policy failures before the custom rules field existed.
+        for env in entry["value"]:
+            env.pop("custom_protection_rules", None)
         evidence = self.read()
         self.assertEqual(evidence.assess("PACKAGE_INDEX_TOKEN", "release").verdict, "not met")
         limited = evidence.assess("PACKAGE_INDEX_TOKEN", other["name"])
@@ -200,6 +203,17 @@ class EvidenceTests(unittest.TestCase):
             self.assertIn(self.data["taken_at"], finding["controls"][1]["detail"])
             self.assertFalse(any(f["rule"] == rule for f in complete["findings"]))
             self.assertEqual(complete["summary"]["fixed"], before["summary"]["fixed"] + 1)
+            envs = self.settings["environments"]
+            partial = copy.deepcopy(envs)
+            other = partial["value"][0]
+            other["custom_protection_rules"] = None
+            partial.update(status="partial", needs="read", problems=[
+                {"key": other["name"], "what": "custom rules", "reason_code": "forbidden", "reason": "read refused"}])
+            self.settings["environments"] = partial
+            snapshot.write(self.data, self.path)
+            self.assertTrue(any(f["rule"] == rule for f in report(*selected)["fixed"]))
+            self.settings["environments"] = envs
+            snapshot.write(self.data, self.path)
             # The PR workflow selects the target snapshot even when the PR changed or deleted it.
             def git(*arguments):
                 return subprocess.run(
