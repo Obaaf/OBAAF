@@ -440,3 +440,79 @@ jobs:
           assert os.environ["PATH"].startswith(os.path.join(tmp, "premise", "bin") + ":")
           assert os.environ.get("SHELLOPTS") == "noexec"
           assert ran and skipped
+
+  env-context-case-premise:
+    # What slice 2d.19 (#382) must know before the checker folds `env` names: on a GitHub-hosted runner,
+    # does `${{ env.NAME }}` in a step's `run` find a value set under another letter case, and which value
+    # does it give when the job's `env` and the step's own `env` set one name in two cases? The process
+    # environment is printed beside it. It checks nothing out, holds no secret and writes nothing. Plan
+    # slice 2d.19a (#387). Each system's answer is asserted as these runs showed it: Linux on ubuntu24
+    # 20261122.23.1 (run 45856719413), Windows on win25-vs2026 20261116.315.1 (run 45857766790) and macOS
+    # on macos26 20261123.0526.1 (run 45859375180, the first to show macOS and the first run of the
+    # asserting script on all three); run 45861795094 showed the rows for `ENV.` and `env['...']` too, on
+    # ubuntu-24.04, win25-vs2026 20261123.321.1 and macos26 20261117.0516.1:
+    # - Linux and macOS: the context is case-sensitive. Both spellings keep their own value, in the
+    #   context and in the process; a spelling nobody set is empty; `env['name']` reads as `env.name`
+    #   does, letter case included. `ENV.` reads the `env` context (probed only with a name set in the case it is read in).
+    # - Windows: it is not. The step's `premise_two_cases` replaces the job's `PREMISE_TWO_CASES`, the
+    #   one variable keeps the job's spelling, and every spelling gives the step's value.
+    # On every system the step's own value of one name wins over the job's. Not probed here: a name in
+    # the workflow's own `env` (it would reach every job of this file), and self-hosted runners. Only
+    # the Linux release is pinned; macOS and Windows images follow `-latest`, and a change on a new image
+    # turns that leg red (the run stays green, as for the job above), which is how it would be seen.
+    name: "Runner premise: letter case in the env context (2d.19, ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    # Advisory: it is not a required check of main, so its failure is reported and does not fail the
+    # run (OBAAF-SET-008). A maintainer may make it required.
+    continue-on-error: true
+    permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    env:
+      PREMISE_TWO_CASES: from-job
+      PREMISE_JOB_ONLY: job-only
+      PREMISE_SAME: same-from-job
+    steps:
+      - name: Read the env context in other letter cases
+        env:
+          premise_two_cases: from-step
+          PREMISE_SAME: same-from-step
+          PREMISE_SEEN_IN_STEP_ENV: ${{ env.premise_job_only }}
+        shell: pwsh
+        run: |
+          # A list of objects, not a hashtable: PowerShell's hashtables fold the case of their keys.
+          # `sensitive` is what Linux and macOS give, `folded` what Windows gives. The three rows that read
+          # `ENV.` and `env['...']` were added after the first runs; run 45861795094 shows them on all three.
+          $seen = @(
+            [pscustomobject]@{ read = 'env.PREMISE_TWO_CASES'; got = '${{ env.PREMISE_TWO_CASES }}'; sensitive = 'from-job'; folded = 'from-step' }
+            [pscustomobject]@{ read = 'env.premise_two_cases'; got = '${{ env.premise_two_cases }}'; sensitive = 'from-step'; folded = 'from-step' }
+            [pscustomobject]@{ read = 'env.Premise_Two_Cases'; got = '${{ env.Premise_Two_Cases }}'; sensitive = ''; folded = 'from-step' }
+            [pscustomobject]@{ read = "env['premise_two_cases']"; got = '${{ env['premise_two_cases'] }}'; sensitive = 'from-step'; folded = 'from-step' }
+            [pscustomobject]@{ read = 'env.premise_job_only'; got = '${{ env.premise_job_only }}'; sensitive = ''; folded = 'job-only' }
+            [pscustomobject]@{ read = 'ENV.premise_two_cases'; got = '${{ ENV.premise_two_cases }}'; sensitive = 'from-step'; folded = 'from-step' }
+            [pscustomobject]@{ read = "env['Premise_Two_Cases']"; got = '${{ env['Premise_Two_Cases'] }}'; sensitive = ''; folded = 'from-step' }
+            [pscustomobject]@{ read = "env['premise_job_only']"; got = '${{ env['premise_job_only'] }}'; sensitive = ''; folded = 'job-only' }
+            [pscustomobject]@{ read = 'env.PREMISE_SAME'; got = '${{ env.PREMISE_SAME }}'; sensitive = 'same-from-step'; folded = 'same-from-step' }
+            [pscustomobject]@{ read = 'step env: env.premise_job_only'; got = $env:PREMISE_SEEN_IN_STEP_ENV; sensitive = ''; folded = 'job-only' }
+          )
+          "image: $env:ImageOS $env:ImageVersion ($env:RUNNER_OS)"
+          $seen | Format-Table read, got -AutoSize | Out-String -Width 200
+          'process environment, names as the process holds them:'
+          $process = @(Get-ChildItem env: | Where-Object Name -like 'premise_*' | Sort-Object Name)
+          $process | Format-Table Name, Value -AutoSize | Out-String -Width 200
+          $folds = $env:RUNNER_OS -eq 'Windows'
+          foreach ($row in $seen) {
+            $expected = if ($folds) { $row.folded } else { $row.sensitive }
+            # `-ceq` and `-not`, not the case-sensitive "not equal" operator, whose letters OBAAF-GHA-026 reads
+            # as a tool's name in a script it cannot read to the end (#388).
+            if (-not ("$($row.got)" -ceq $expected)) { throw "$($row.read) gave '$($row.got)', expected '$expected'" }
+          }
+          $names = @($process | Where-Object Name -like 'premise_two_cases' | ForEach-Object { "$($_.Name)=$($_.Value)" })
+          $want = if ($folds) { @('PREMISE_TWO_CASES=from-step') } else { @('PREMISE_TWO_CASES=from-job', 'premise_two_cases=from-step') }
+          if (-not ((($names | Sort-Object -CaseSensitive) -join ',') -ceq (($want | Sort-Object -CaseSensitive) -join ','))) {
+            throw "the process held $($names -join ', '), expected $($want -join ', ')"
+          }
+          "$($env:RUNNER_OS): as recorded."
