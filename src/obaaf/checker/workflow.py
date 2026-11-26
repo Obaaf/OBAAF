@@ -2074,13 +2074,65 @@ class _MadeText:
     step's use of it fits the workflow's bound (None until then); the values, kept so that their ids, which the
     key holds, stay theirs; and what `agent_text` found in the text, by the patterns it looked for."""
 
-    __slots__ = ("text", "size", "kept", "found")
+    __slots__ = ("text", "size", "kept", "found", "base", "why")
 
     def __init__(self, text, size, kept) -> None:
         self.text, self.size, self.kept, self.found = text, size, kept, {}
+        # The command lines with their `${{ env.A }}` expressions worked out, until the text is made (slice 2d.18),
+        # and why the reading stopped where it did not fit.
+        self.base, self.why = None, None
 
 
 _ENV_NAME_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+# Flagship slice 2d.18 (#377): an expression in a step's command lines that reads `env` (`${{ env.AGENT }}`,
+# `${{ format('{0}{1}', env.a, env.b) }}`) is worked out with the `env` the step runs with, as GitHub does before
+# the shell starts, by the reader slice 2d.4a uses for a local action's inputs: literals, `||`, `&&`, `format()`
+# and each reference, at most 16 readings of the text and `ENV_EXPRESSION_TEXT` characters. A text past that, or
+# an expression too deep or too odd to read, makes the step an error of its file, as a put-in past D-137's bound.
+_ENV_WORD_RE = re.compile(r"\benv\b", re.I)
+ENV_EXPRESSION_TEXT = 200_000
+ENV_EXPRESSION_UNREAD = ("it runs an expression that reads `env` which the checker cannot work out within what it "
+                         f"reads (more than 16 readings or {ENV_EXPRESSION_TEXT:,} characters, nested too deeply, or "
+                         "too many unfinished `${{`)")
+
+
+def _env_bodies(text: str) -> list | None:
+    """The bodies of the `${{ }}` expressions in `text` that read `env`, longest first, so that an expression
+    holding `}}` in a string is put in whole before its shorter reading; None when the expression reader refuses
+    the text (`expr.TooComplex`)."""
+    if expr_mod.OPEN not in text:
+        return []
+    try:
+        found = expr_mod.bodies(text)
+    except expr_mod.TooComplex:
+        return None
+    return sorted((b for b in dict.fromkeys(found) if _ENV_WORD_RE.search(b)), key=len, reverse=True)
+
+
+def _env_expression_text(own: str, bodies: list | None, env: dict) -> tuple:
+    """(text, why): `own` with each expression of `bodies` worked out with `env`, one reading of the whole text
+    per line where an expression can give several texts (flagship slice 2d.18). (None, why) past what the
+    checker reads. A reference to a name `env` does not hold gives empty text, as GitHub's `env` context does."""
+    if bodies is None:
+        return None, ENV_EXPRESSION_UNREAD
+    from obaaf.checker import _VALUE_LIMIT, _capped, _token_values    # the local-action reader's (slice 2d.4a)
+    readings = [own]
+    for body in bodies:
+        whole = expr_mod.OPEN + body + expr_mod.CLOSE
+        if not any(whole in r for r in readings):
+            continue
+        cut: list = []
+        values = _token_values(expr_mod.tokens(body), {}, "", env=env, cut=cut)
+        if values is None or cut:
+            return None, ENV_EXPRESSION_UNREAD
+        # What the readings would come to is worked out before any is made.
+        if sum(len(r) + r.count(whole) * (len(v) - len(whole)) for r in readings for v in values) > (
+                ENV_EXPRESSION_TEXT * _VALUE_LIMIT) or len(readings) * len(values) > _VALUE_LIMIT * _VALUE_LIMIT:
+            return None, ENV_EXPRESSION_UNREAD
+        readings = _capped([r.replace(whole, v) for r in readings for v in values], cut)
+        if cut or sum(len(r) for r in readings) > ENV_EXPRESSION_TEXT:
+            return None, ENV_EXPRESSION_UNREAD
+    return "\n".join(readings), None
 
 
 @dataclass
@@ -2101,6 +2153,12 @@ class Step:
     # its own, which has only its own bound (`PutInBudget`).
     put_ins: "PutIns | None" = field(default=None, repr=False, compare=False)
     seq: int = field(default=0, repr=False, compare=False)
+    # Flagship slice 2d.18 (#377): the mappings whose `env` the step runs with under its own, nearest first (its
+    # job's, then its workflow's), read when asked, so a value put in later in place (D-084) is the one read.
+    # Empty for a step read on its own, and for a step of a local action read for an agent (2d.4a), whose
+    # caller's environment is put into its own `env` (`_with_env`). The steps the second pass reads through a
+    # local action (2d.4b2) run in the using step's job and have its mappings.
+    inherited: tuple = field(default=(), repr=False, compare=False)
 
     @property
     def name(self) -> str:
@@ -2147,6 +2205,26 @@ class Step:
     def env(self) -> dict:
         value = self.raw.get("env")
         return value if isinstance(value, dict) else {}
+
+    @property
+    def run_env(self) -> dict:
+        """The `env` the step runs with as the workflow writes it (flagship slice 2d.18): its own over its job's
+        over its workflow's, as GitHub gives them, text names with text values only. A scope written as one
+        expression (`env: ${{ fromJSON(...) }}`) adds nothing, as a step's own did before; a name a nearer scope
+        sets to a value that is not text (a number) is not put in, though an outer scope sets it to text; what an
+        earlier step writes to `GITHUB_ENV` is not read."""
+        out: dict = {}
+        scopes = [holder.get("env") if isinstance(holder, dict) else None for holder in reversed(self.inherited)]
+        for scope in [*scopes, self.raw.get("env")]:
+            if not isinstance(scope, dict):
+                continue
+            for name, value in scope.items():
+                if isinstance(name, str):
+                    if isinstance(value, str):
+                        out[name] = value
+                    else:
+                        out.pop(name, None)
+        return out
 
     @property
     def action(self) -> str | None:
@@ -2269,10 +2347,24 @@ class Step:
         the workflow's ledger, whichever step asks; each step's use of it is settled there once, by the step's
         number, because each step hands what is found in it on to the rules (found by the review: 300 steps
         that YAML makes of one mapping took 72 s when the text was counted once for all of them)."""
-        env = {k: v for k, v in self.env.items() if isinstance(k, str) and isinstance(v, str)}
-        if not env or not own or "$" not in own:
+        if not own or "$" not in own:
+            return None, own, None
+        # The `env` the step runs with: its own over its job's over its workflow's (flagship slice 2d.18; before,
+        # its own alone, so `$CLAUDE -p x` with `CLAUDE` in the workflow's `env` was in no agent lane). Only the
+        # names the lines use are kept, so a job's other values do not make each step's text a new one.
+        given = self.run_env
+        if not given:
+            return None, own, None
+        # `${{ env.A }}`, which GitHub works out before the shell starts, from the same `env` (2d.18).
+        bodies = _env_bodies(own)
+        expressions = bodies is None or bool(bodies)
+        env = {name: given[name] for name in dict.fromkeys(m.group(1) for m in _ENV_NAME_RE.finditer(own))
+               if name in given}
+        if not env and not expressions:
             return None, own, None
         put_ins = self.put_ins
+        if expressions:
+            env = given             # an expression reads a name in any letter case, and the shell then reads any
         key = (own, tuple((name, id(value)) for name, value in env.items()))
         made = put_ins.lanes.made.get(key) if put_ins is not None else None
         if made is None:
@@ -2280,24 +2372,32 @@ class Step:
             # settled, so a text past either bound is never made (found by the second review: 1,000 steps
             # past the workflow's bound made and kept 800,000,000 characters).
             budget = PutInBudget()
-            size = 0
-            for match in _ENV_NAME_RE.finditer(own):
-                value = env.get(match.group(1))
-                if value is None:
-                    continue
-                if not budget.take(value):
-                    size = None
-                    break
-                size += len(value)
+            size, base, why = 0, own, None
+            if expressions:
+                # The expressions' readings are made first, as GitHub works them out first; they are at most
+                # `ENV_EXPRESSION_TEXT` characters, and what they add counts as values put in.
+                base, why = _env_expression_text(own, bodies, given)
+                size = None if base is None else max(0, len(base) - len(own))
+            if size is not None:
+                for match in _ENV_NAME_RE.finditer(base):
+                    value = env.get(match.group(1))
+                    if value is None:
+                        continue
+                    if not budget.take(value):
+                        size = None
+                        break
+                    size += len(value)
             made = _MadeText(None, size, tuple(env.values()))
+            made.base, made.why = base, why
             if put_ins is not None:
                 put_ins.lanes.made[key] = made
         if made.size is None:
-            return made, None, ENV_PUT_IN_UNREAD
+            return made, None, made.why or ENV_PUT_IN_UNREAD
         if put_ins is not None and not put_ins.lanes.settle((self.seq, key), made.size):
             return made, None, put_ins.unread
         if made.text is None:
-            made.text = _ENV_NAME_RE.sub(lambda m: env.get(m.group(1), m.group(0)), own)
+            made.text = _ENV_NAME_RE.sub(lambda m: env.get(m.group(1), m.group(0)), made.base)
+            made.base = None
         return made, made.text, None
 
     @property
@@ -3598,6 +3698,8 @@ def _input_problem(step_raw: dict) -> str | None:
 def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
     """Flatten a job's steps, including the steps inside `parallel` groups, in order."""
     groups = 0
+    # Each step runs with its job's and its workflow's `env` under its own (flagship slice 2d.18).
+    inherited = (job.raw, workflow.raw)
 
     def inputs_checked(raw: dict, number: int) -> None:
         problem = _input_problem(raw)
@@ -3640,7 +3742,7 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
                     inputs_checked(sub, number)
                     job.steps.append(Step(index=len(job.steps), raw=sub, line=getattr(sub, "line", line),
                                           group=groups, background=True, put_ins=workflow.put_ins,
-                                          seq=workflow.put_ins.number()))
+                                          seq=workflow.put_ins.number(), inherited=inherited))
             continue
         inputs_checked(step_raw, number)
         if not ({"run", "uses"} & set(step_raw)) and not (CONTROL_STEP_KEYS & set(step_raw)):
@@ -3648,7 +3750,7 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
                                      "the checker knows, so it cannot check what the step does")
         background = as_text(step_raw.get("background", "")).strip().lower() not in ("", "false")
         job.steps.append(Step(index=len(job.steps), raw=step_raw, line=line, background=background,
-                              put_ins=workflow.put_ins, seq=workflow.put_ins.number()))
+                              put_ins=workflow.put_ins, seq=workflow.put_ins.number(), inherited=inherited))
 
 
 def declared_lane(value) -> str | None:

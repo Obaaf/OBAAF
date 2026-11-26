@@ -29,7 +29,7 @@ from obaaf.checker.workflow import (
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION, AgentActions, leaves_repository,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup, image_outputs_push, through_matrix,
     bounded, digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
-    LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, PutInBudget, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
+    LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, PutInBudget, _env_bodies, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -2374,8 +2374,10 @@ class WorkflowRules:
         # An `env` written as one expression (`env: ${{ fromJSON(...) }}`) can set any name: none is known.
         scoped = not any(scope is not None and not isinstance(scope, dict) for scope in scopes)
         scopes = [scope if isinstance(scope, dict) else {} for scope in scopes]
-        # A name put together from variables the script sets (`a=cla; b=ude; $a$b`) is looked for only where
-        # the script has a `$` and an assignment, with a regular expression (kept cheap). Where the values put in
+        # A name put together from variables (`$a$b`, with `a=cla; b=ude` in the script or `a: cla` and `b: ude` in the
+        # `env` of the step, the job or the workflow) is looked for wherever the script has a `$`, with a regular
+        # expression (kept cheap). Before flagship slice 2d.18 (#377) only a script with an `=` was, so a name made
+        # from `env` values alone was not. Where the values put in
         # make a text longer than the checker reads (flagship slice 2d.16), whether they make the name is decided
         # without the text, and a step whose values may make it is read as one that names the tool, so that what
         # cannot be read there is "cannot tell", also where the name is somewhere else in the step (a token
@@ -2384,11 +2386,29 @@ class WorkflowRules:
         put_ins = step.put_ins
         cheap = [(text, agent_flags.put_in_cheaply(text, scopes, put_ins.names if put_ins is not None else None,
                                                    (step.seq, n))) for n, (text, _b) in enumerate(parts)
-                 if "$" in text and "=" in text]
+                 if "$" in text]
         named_unread = any(put is None and agent_flags.names_when_put_in(text, scopes, programs, packages)
                            for text, put in cheap)
+        # `${{ env.a }}${{ env.b }}`, which GitHub works out with the `env` the step runs with (flagship slice 2d.18):
+        # the lanes' reading of the step's command lines (`Step.env_put_in`, bounded for the workflow and made once)
+        # works them out; where it names the tool, the step is read as one that names it, so what the script cannot
+        # read there (the expression) is "cannot tell". Past what the lanes read, the step is an error of its file
+        # already, and is read as one that may name the tool.
+        expressed: list = []
+        if scoped:
+            cache = self.__dict__.setdefault("_env_expressions", {})
+            key = (id(step.raw), step.run)
+            if key not in cache:
+                cache[key] = any(_env_bodies(text) != [] for text, _b in parts)
+            if cache[key]:
+                put = step.env_put_in()
+                if put is None:
+                    named_unread = True
+                else:
+                    expressed.append(put)
         if not named_unread and not any(agent_flags.appears(t, programs, packages) for t in named) and not any(
-                put is not None and agent_flags.appears(put, programs, packages) for _text, put in cheap):
+                put is not None and agent_flags.appears(put, programs, packages) for _text, put in cheap) and not any(
+                agent_flags.appears(put, programs, packages) for put in expressed):
             return                  # the tool's name is nowhere in the step (the common case, kept cheap)
         # A step before this one that can set a variable for later steps (GITHUB_ENV, `exportVariable`):
         # the job's and workflow's `env` values are then not known; the step's own `env` is.
@@ -2397,7 +2417,7 @@ class WorkflowRules:
         later = any(n < index for n in writes)
         trust_env = [scoped, scoped and not later, scoped and not later]
         known = {id(text): agent_flags.known_variables(scopes, text, trust_env) for text, _b in parts}
-        mentioned = named_unread or any(agent_flags.mentions(t, programs, packages) for t in named)
+        mentioned = named_unread or any(agent_flags.mentions(t, programs, packages) for t in named + expressed)
         reading = agent_flags.Reading()
         # One budget for every script of the step that is read (flagship slice 2d.16, from the review): a value
         # may be put in eight times in the step, not eight times in each of its `env` values and inputs. What it

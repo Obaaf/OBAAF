@@ -4,6 +4,16 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### An agent named through the `env` a step runs with
+
+Slice 2d.18, from #377; decision D-139. A step runs with its own `env` over its job's over its workflow's. The checker read less than that, so a job could run an agent and get no agent rule:
+
+- **The lanes put only the step's own `env` into its command lines.** `run: $CLAUDE -p review` with `CLAUDE: npx @anthropic-ai/claude-code@1.0.0` in the workflow's `env`, and a model key in the step's, put the job in no agent lane: no OBAAF-GHA-005, 020, 025 or any other agent rule. Now the lanes put in the `env` the step runs with, its own over its job's over its workflow's, and a local action read for an agent is given the `env` of the step that uses it the same way.
+- **No expression that reads `env` was worked out.** `run: ${{ env.AGENT }} -p review` with `AGENT: claude` in the step's own `env` was in no agent lane. GitHub works such an expression out before the shell starts; the lanes now do too, with the reader slice 2d.4a uses for a local action's inputs: literals, `||`, `&&`, `format()` and each reference, a name in any letter case. An expression that can give more than 16 texts or 200,000 characters, or that the expression reader refuses, makes the step an error of its file, which fails the check.
+- **OBAAF-GHA-026 put `env` values into a script only where the script also had an `=`.** `$a$b --dangerously-skip-permissions -p review` with `a: cla` and `b: ude` in any `env` got no finding. Now every script with a `$` is read with the plain `env` values put in, and a step whose `env` expressions name the tool is read as one that names it, so an option given beside the expression is "cannot tell".
+- **Not read, as before:** what an earlier step writes to `GITHUB_ENV`; an `env` written as one expression (`env: ${{ fromJSON(vars.E) }}`); a function other than `format()` in an expression (`join(fromJSON(env.L), '')`).
+- **On this repository and on the first adopter nothing changes:** text, JSON, SARIF, `--summary` and `--lanes` are byte-identical with `flagship` `660f824`.
+
 ### What putting variables in makes is bounded for a whole workflow
 
 Slice 2d.17, from #376; decision D-138. The bound of slice 2d.16 is for one step. A value given once and reached by many steps, through a YAML alias into many steps' `env`, through the job's or the workflow's `env`, or as a value a caller hands a reusable workflow, was put in again in each step, up to eight times each: 100 KB of YAML was read as 80,000,000 characters. Measured on the scheduled run's machine against `flagship` `2454e7c`: 100 steps that each put one aliased 100 KB value in eight times took 19.1 s and now take 4.3 s; 20 steps that each put a 100 KB workflow-level value in eight times took 21.6 s and now take 6.5 s; 50 steps that YAML makes of one such step took 67 s on the reviewer's run and now take 10 s.

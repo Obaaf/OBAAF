@@ -1704,8 +1704,10 @@ def _apply_local_action_detection(workflow, root: Path | None, actions: "wf_mod.
             where = f"{workflow.path}: job '{wf_mod.one_line(job.id, 60)}' uses the local action {shown}, and"
             cache[_OWN] = LOCAL_ACTION_UNITS_PER_USE
             try:
+                # The `env` the using step runs with, its job's and its workflow's under its own, which the
+                # action's steps inherit (flagship slice 2d.18; before, the step's own alone).
                 reading = _agent_in_local_action(root, step.uses, actions, commands, cache=cache, given=step.with_,
-                                                 given_env=step.env)
+                                                 given_env=step.run_env)
             except _ActionFileError as exc:
                 errors.append(f"{where} {wf_mod.one_line(str(exc), 500)}, so the checker cannot tell whether an "
                               "agent runs in it")
@@ -2076,7 +2078,8 @@ def _local_steps(root: Path, uses: str, given: dict, given_env: dict, outer: dic
             # The workflow's ledgers bound what putting its variables in makes (flagship slice 2d.17), as for
             # the job's own steps; the step has a number of its own there, which its copies keep.
             step = wf_mod.Step(index=0, raw=put, line=top.line, via=top, shown_name=name, written=step_raw,
-                               put_ins=top.put_ins, seq=top.put_ins.number() if top.put_ins is not None else 0)
+                               put_ins=top.put_ins, seq=top.put_ins.number() if top.put_ins is not None else 0,
+                               inherited=top.inherited)
             out.append(step)
             unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             inner_uses = step_raw.get("uses")
