@@ -146,9 +146,40 @@ jobs:
             Src="$source" PYTHONPATH="$source" python -c 'import os, obaaf.cli; from pathlib import Path; assert Path(obaaf.cli.__file__).resolve().is_relative_to(Path(os.environ["Src"]).resolve())'
             PYTHONPATH="$source" obaaf check . --format json --fail-on never > "$TMPDIR/$tag.json" 2> "$TMPDIR/$tag.stderr"
           done
+          cat > "$TMPDIR/count_calls.py" <<'PY'
+          from pathlib import Path
+          from unittest.mock import patch
+          from obaaf import checker
+          from obaaf.checker import agent_flags
+
+          with patch.object(agent_flags, "put_in_cheaply", wraps=agent_flags.put_in_cheaply) as expansion:
+              checker.check(Path.cwd(), config=checker.Config.from_data({}, "obaaf.yml"), catalog=checker.load())
+          for mark in ("--version", "--help"):
+              print(sum(mark in call.args[0] and "$FIRST" in call.args[0] for call in expansion.call_args_list))
+          PY
+          PYTHONPATH="$TMPDIR/previous/src" python "$TMPDIR/count_calls.py" > "$TMPDIR/counts-before"
+          PYTHONPATH="$GITHUB_WORKSPACE/src" python "$TMPDIR/count_calls.py" > "$TMPDIR/counts-after"
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          work = Path(os.environ["TMPDIR"])
+          before = list(map(int, (work / "counts-before").read_text().splitlines()))
+          after = list(map(int, (work / "counts-after").read_text().splitlines()))
+          print("Expansion calls for version and help jobs:", before, after)
+          assert len(before) == len(after) == 2
+          assert all(0 < new < old for old, new in zip(before, after))
+          PY
           cmp "$TMPDIR/before.json" "$TMPDIR/after.json"
           cmp "$TMPDIR/before.stderr" "$TMPDIR/after.stderr"
-          python -c 'import json, sys; findings=json.load(open(sys.argv[1]))["findings"]; jobs={f["job"] for f in findings if f.get("job")}; assert {"versions", "help"} <= jobs, jobs; print("Multi-tool comparison matched for both jobs")' "$TMPDIR/after.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = json.loads((Path(os.environ["TMPDIR"]) / "after.json").read_text())
+          assert any(path.endswith(".github/workflows/check.yml") for path in report["files"]), report["files"]
+          assert not report["errors"], report["errors"]
+          print("Two-job multi-tool reports and errors matched")
+          PY
       - name: Verify packaging, catalog, generated docs, site and medium gate
         if: matrix.test == 'suite'
         run: |
