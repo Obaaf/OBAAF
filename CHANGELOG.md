@@ -4,6 +4,15 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### OBAAF-GHA-026 reads the options that `${{ env }}` expressions give
+
+Slice 2d.19c, the rest of 2d.19 (#382); decision D-143. GitHub puts a `${{ }}` expression's value into a step's script before the shell starts. Since D-142 the lanes work out the ones that read `env`, but OBAAF-GHA-026 still read them as written: `claude ${{ env.FLAGS }} -p review` with `FLAGS: --dangerously-skip-permissions` in the job's `env` was its medium "cannot tell", not the high finding the option gets written out, and a harmless value was "cannot tell" too.
+
+- **Now the rule reads the worked-out text** in a `run` (bash, pwsh, cmd, the other shells), a github-script script and the egress action's command, where the checker knows the one text GitHub puts in: each reference names one name, nothing but `env` and literals is read, the only functions are `format` and `join`, each name is set to text in the step's, the job's or the workflow's `env` under the runner's comparison of names, every line comes to one reading, the step is not a local action's, and nothing before it names a way to write the `env` context (`GITHUB_ENV`, `github.env`, `exportVariable`, `set-env`, `@actions/core`, the runner's file commands, a github-script step, a default `shell`). In a cmd step `^` is taken out of the values too.
+- **Otherwise "cannot tell", as before:** `${{ inputs.f || env.SAFE }}`, `format('{0}', env.A, inputs.b)`, a name no `env` sets, `fromJSON(env.J)`, `toJSON`, `contains`, `env[matrix.k]`, a value holding `${{`, an `env` written as one expression, two letter cases on a runner that may be Windows.
+- **Can fail a gate that passed** (medium to high), or let one pass (a harmless value is no finding); a baseline entry that accepted the medium no longer matches. `docs/upgrading.md` says how. On this repository and on the first adopter the reports are byte-identical with `flagship` `db6e0ed`.
+- **Stated limits:** a writer the checker cannot see (a script file, an action's own code) can set a name it takes as known, as for `$NAME`; an expression in another action's inputs, an `env` value or a `shell` is not read.
+
 ### A passing pre-approval run no longer says the upload may proceed
 
 Issue #391. `obaaf verify release --pre-approval` runs before anyone approves a release, so the approver can read the result, and it skips the approvals. When it passed, its first line was `Release verification: PASSED, upload may proceed`, the line a full verification prints, while a warning further down said the approvals were not checked. The release manager reads this log, in Jenkins and in a GitHub run's summary, before deciding to approve.

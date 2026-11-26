@@ -22,6 +22,7 @@ from obaaf import agent_tools
 from obaaf.catalog import Catalog
 from obaaf.checker import agent_flags, artifact_consumers
 from obaaf.checker import egress as egress_mod
+from obaaf.checker import env_expr
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
 from obaaf.checker.workflow import (
@@ -2340,25 +2341,159 @@ class WorkflowRules:
             return "python"
         return words[0] if words else shell_name
 
+    # What can set a variable of the `env` context for the steps after it, read in an earlier step and in the job's
+    # and workflow's `env` the widest way (flagship slice 2d.19c, from its review): more than `_SETS_FOR_LATER_RE`,
+    # whose wider reading would change the `$NAME` put-in too.
+    _ENV_CONTEXT_WRITERS_RE = re.compile(r"GITHUB_ENV|github\s*\.\s*env\b|\[\s*['\"]env['\"]\s*\]|exportVariable"
+                                         r"|_runner_file|set_env_|set-env|ACTIONS_ALLOW_UNSECURE_COMMANDS"
+                                         r"|toJSON\s*\(\s*github\s*\)|@actions/core", re.I)
+    # The functions whose value `env_expr` works out as GitHub does for this purpose. `fromJSON` is parsed more
+    # strictly than the runner parses it (single quotes, comments, trailing commas: found by the second review),
+    # `toJSON` may escape otherwise, and the others give true or false: each refuses.
+    _ENV_ONLY_FUNCTIONS = frozenset({"format", "join"})
+    # The words that may stand at the head of a reference in an expression the checker works out for
+    # OBAAF-GHA-026: `env` and the literals. Any other context (`inputs`, `matrix`, `github`, `vars`, a step's
+    # output) is a value the checker does not know, which `env_expr` reads as empty inside `format` and `join`
+    # and leaves out beside a known value of `||` (found by the review of 2d.19c).
+    _ENV_ONLY_HEADS = frozenset({"env", "true", "false", "null", "nan", "infinity"})
+
+    def _env_expressions_worked(self, job: Job, step: Step, text: str) -> str:
+        """`text`, a command line of `step` that GitHub works out before it runs, with its `${{ }}` expressions
+        that read `env` worked out as the lanes work them out (`Step.env_expressions_text`, flagship slices
+        2d.19b and 2d.19c), where the checker knows the one text GitHub puts in; `text` as written otherwise,
+        which OBAAF-GHA-026 reads as "cannot tell". It knows it (`_env_expressions_known`) when each expression
+        that reads `env` reads nothing else, names each name it reads (`env.NAME`, `env['NAME']`), each such
+        name is set to text with no expression in it, in the `env` of the step, its job or its workflow, under
+        the runner's comparison of names, no `env` is one expression, no step before this one may set a
+        variable of the `env` context, the step is not a local action's (whose inputs its caller works out in
+        its own context), and every line comes to one reading. Worked out once for the step and the text."""
+        if not isinstance(text, str) or not env_expr.may_read_env(text):
+            return text
+        cache = self.__dict__.setdefault("_env_worked_cache", {})
+        key = (step.seq, id(step.raw), id(job), text)
+        if key in cache:
+            return cache[key][0]
+        worked = text
+        if self._env_expressions_known(job, step, text):
+            made, _size, readings, _why = step._env_expressions(text)
+            # Several readings of a line are several texts, of which GitHub runs one: read together, a heredoc
+            # the first opens can hold the second (found by the review), and the rule cannot say which runs.
+            if made is not None and readings == 1:
+                worked = made
+        # The step and the job are kept with the text, so that their ids stay theirs.
+        cache[key] = (worked, step, job)
+        return worked
+
+    def _first_env_writer(self, job: Job) -> int:
+        """The index of the job's first step that may set a variable of the `env` context for the steps after it
+        (`_ENV_CONTEXT_WRITERS_RE` in any text or key of the step, or a github-script step), -1 where the job's or
+        workflow's `env` or `defaults` names such a thing, and the number of steps where none does. Worked out once for the job,
+        each mapping and text read once, so a YAML alias is not read again (found by the second review: the
+        steps' texts read for every step took 75 s for 6,000 steps and 1 GB for a 1 KB alias bomb)."""
+        cache = self.__dict__.setdefault("_first_env_writer_cache", {})
+        key = id(job)
+        if key not in cache:
+            seen: set = set()
+
+            def writes(value) -> bool:
+                stack = [value]
+                while stack:
+                    item = stack.pop()
+                    if isinstance(item, str):
+                        if self._ENV_CONTEXT_WRITERS_RE.search(item):
+                            return True
+                        continue
+                    if not isinstance(item, (dict, list, tuple)) or id(item) in seen:
+                        continue
+                    seen.add(id(item))
+                    if isinstance(item, dict):
+                        stack.extend(k for k in item if isinstance(k, str))
+                        stack.extend(item.values())
+                    else:
+                        stack.extend(item)
+                return False
+
+            first = len(job.steps)
+            # A default `shell` is a command line every `run` step starts with (found by the third review).
+            if any(writes(where) for where in (job.raw.get("env"), self.wf.raw.get("env"), job.raw.get("defaults"),
+                                               self.wf.raw.get("defaults"))):
+                first = -1
+            else:
+                for n, other_step in enumerate(job.steps):
+                    if other_step.uses_action("actions/github-script") or writes(other_step.raw):
+                        first = n
+                        break
+            cache[key] = (first, job)
+        return cache[key][0]
+
+    def _env_expressions_known(self, job: Job, step: Step, text: str) -> bool:
+        """Whether every `${{ }}` expression of `text` that reads `env` gives a text the checker knows (see
+        `_env_expressions_worked`)."""
+        if step.via is not None:
+            return False
+        index = next((n for n, other_step in enumerate(job.steps) if other_step is step), 0)
+        if self._first_env_writer(job) < index:
+            return False
+        try:
+            found = env_expr.spans(text)
+            names = env_expr.names_read(text)
+            if not names:
+                return False
+            for _start, _end, body in found:
+                toks = expr_mod.tokens(body)
+                if not env_expr.head_reads_env(toks):
+                    continue
+                for i, (kind, word) in enumerate(toks):
+                    if kind != "id" or (i and toks[i - 1] == ("op", ".")):
+                        continue
+                    if i + 1 < len(toks) and toks[i + 1] == ("op", "("):
+                        if word.lower() not in self._ENV_ONLY_FUNCTIONS:
+                            return False
+                        continue
+                    if word.lower() not in self._ENV_ONLY_HEADS:
+                        return False
+            env = env_expr.Env(step._env_scopes(), env_expr.env_case(step.job))
+            for name in names:
+                for value in env.lookup(name):
+                    if not isinstance(value, str) or expr_mod.OPEN in value:
+                        return False
+        except (RecursionError, ValueError, env_expr.Unread):
+            return False
+        return True
+
     def _agent_command(self, job: Job, step: Step, tool: str, name: str, flags: list, programs: list,
                        packages: list) -> None:
         # What the step gives a shell, and in what language: (text, read as bash, the step names the tool).
         parts: list = []
         languages: dict = {}
+        # The texts as the step writes them, by identity, so that another input holding the same text (a YAML
+        # alias) is not read again as an input below.
+        written: set = set()
+        # `${{ }}` expressions that read `env` in the step's command lines (its `run`, a github-script script, the
+        # command OBAAF's egress action runs) are worked out as GitHub works them out before the shell or the
+        # script starts, where the checker knows every value they read (flagship slice 2d.19c,
+        # `_env_expressions_worked`): `claude ${{ env.FLAGS }}` with `FLAGS: --dangerously-skip-permissions` is
+        # read as `claude --dangerously-skip-permissions`. Otherwise the text is read as written: "cannot tell".
         if step.run:
+            written.add(id(step.run))
             shell_name = self._step_shell(job, step)
-            # cmd takes a `^` out before the program sees the word (`claude ^--yolo`).
+            run = self._env_expressions_worked(job, step, step.run)
+            # cmd takes a `^` out before the program sees the word (`claude ^--yolo`), after GitHub has put the
+            # expressions' values in, so from those values too.
             # A caret at a line's end continues the line (found by slice 2d.5c2c's review).
-            parts.append((re.sub(r"\^[ \t]*\r?\n", " ", step.run).replace("^", "")
-                          if shell_name in ("cmd", "cmd.exe") else step.run, shell_name in ("bash", "sh")))
+            parts.append((re.sub(r"\^[ \t]*\r?\n", " ", run).replace("^", "")
+                          if shell_name in ("cmd", "cmd.exe") else run, shell_name in ("bash", "sh")))
             languages[id(parts[-1][0])] = self._step_language(job, step, shell_name)
         given = step.with_ if step.uses else {}
         script = given.get("script") if step.uses_action("actions/github-script") else None
         if isinstance(script, str):
-            parts.append((script, False))
-            languages[id(script)] = "github-script"
+            written.add(id(script))
+            worked_script = self._env_expressions_worked(job, step, script)
+            parts.append((worked_script, False))
+            languages[id(worked_script)] = "github-script"
         if step.confines and isinstance(given.get("run"), str):
-            parts.append((given["run"], True))
+            written.add(id(given["run"]))
+            parts.append((self._env_expressions_worked(job, step, given["run"]), True))
         # A `shell` is itself a command line GitHub runs (`shell: claude ... {0}`), the step's or the default.
         if step.run:
             for shell in (step.raw.get("shell"), *(d.get("run", {}).get("shell") for d in (
@@ -2367,7 +2502,7 @@ class WorkflowRules:
                 if isinstance(shell, str):
                     parts.append((shell.replace("{0}", "script.sh"), True))
                     break
-        own = {id(text) for text, _bash in parts}
+        own = {id(text) for text, _bash in parts} | written
         # (text, whether its input's name says it is a command): other inputs, `env` values, and a
         # `docker://` step's entrypoint and arguments, which GitHub hands the container as one command line.
         others = [(v, k in self._COMMAND_INPUTS) for k, v in given.items() if isinstance(v, str) and id(v) not in own

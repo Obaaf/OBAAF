@@ -101,7 +101,7 @@ The program counts where a command starts (after `sudo`, `env`, `timeout`, `xarg
 
 **What is "cannot tell"** (a medium `command-computed` finding), in a step that names the tool:
 
-- a word of the program's command with a variable or substitution outside quotes, `"$@"` or `"${NAME[@]}"`, an unquoted glob, or a `${{ }}` expression;
+- a word of the program's command with a variable or substitution outside quotes, `"$@"` or `"${NAME[@]}"`, an unquoted glob, or a `${{ }}` expression. Since slice 2d.19c an expression that reads only `env` (`claude ${{ env.FLAGS }}`) is first worked out, in a `run`, a github-script script and the egress action's command, where the checker knows the one text it gives: each reference names one name (`env.NAME`, `env['NAME']`), the only functions are `format` and `join`, each name is set to text with no `${{` in it in the step's, the job's or the workflow's `env` under the runner's comparison of names, no `env` is one expression, every line comes to one reading, the step is not a local action's, and no step before it, nor the job's or workflow's `env` or `defaults`, names a way to write the `env` context (`GITHUB_ENV`, `github.env`, `exportVariable`, `set-env`, `@actions/core`, the runner's file commands, a github-script step). The option is then read as if written out (high for a warned one, nothing for a harmless one); otherwise the expression is "cannot tell" as before;
 - a quoted word that could start a warned option (`"--dangerously-$X"`, `"$EMPTY"--yolo`, `"${F:---yolo}"`);
 - a warned option that takes a value, given one the checker cannot read;
 - the program run by `xargs` or `parallel`;
