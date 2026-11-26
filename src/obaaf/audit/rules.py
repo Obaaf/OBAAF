@@ -31,7 +31,7 @@ import re
 from dataclasses import dataclass, field
 
 from obaaf.audit.github import plain, quoted
-from obaaf.audit.settings import BY_KEY, CLASSIC_TOP
+from obaaf.audit.settings import BY_KEY, CLASSIC_TOP, CUSTOM_RULES
 from obaaf.audit.workflows import HEAD_COMMIT_EVENTS, PULL_REQUEST_EVENTS
 from obaaf.audit.workflows import called_path, self_repository_call
 from obaaf.checker.workflow import PRIVILEGED_UNTRUSTED_TRIGGERS
@@ -77,7 +77,12 @@ RULES: tuple[Rule, ...] = (
          "A job names an environment, and the environment does not limit which branches may use it (or the "
          "limit is a pattern anyone with write access can match by naming a branch or pushing a tag). Anyone "
          "who can push a branch can add a job that names the environment and reads its secrets. With required "
-         "reviewers the only gate left is one person's approval; without them there is none. An environment a "
+         "reviewers the only gate left is one person's approval; without them there is none. A custom deployment "
+         "protection rule (a GitHub App that must approve the job) counts as reviewers do, and what it decides on "
+         "is not read: beside one, an environment any branch may use is medium (low with no secret), and a narrower "
+         "limit that reviewers "
+         "would make no finding is \"cannot tell\". Where such rules were not read (a snapshot an earlier version "
+         "took, or an answer that failed), the finding stands and says that it may overstate. An environment a "
          "job names that the settings do not have gets no protection from them. Not followed: who may bypass the "
          "rules of a branch the environment is limited to (OBAAF-SET-004), approvals a new push does not dismiss "
          "and approvals a workflow can give (OBAAF-SET-013), which branches GitHub counts as protected, what a "
@@ -85,8 +90,8 @@ RULES: tuple[Rule, ...] = (
          "In the environment's settings, limit deployment to selected branches and name the default branch. "
          "Add required reviewers where a person should decide; a wildcard or a tag pattern is reported until "
          "there are reviewers.",
-         why="Anyone who can push a branch may run a job in the environment, using its secrets or whatever trusts "
-             "it, with at most one reviewer's approval in the way."),
+         why="Anyone who can push a branch may run a job in the environment, using its secrets or what trusts it, "
+             "with at most a reviewer's and apps' approval in the way."),
     Rule("OBAAF-SET-002", "A job outsiders can start gets an environment that asks nobody", "high",
          ("environments", "environment_secrets", "repository"),
          "jobs started by pull_request_target, issue and comment events",
@@ -94,7 +99,9 @@ RULES: tuple[Rule, ...] = (
          "issue_comment, issues, workflow_run and the like) names an environment that has no required "
          "reviewers. Those events run as the default branch (pull_request_target too, since 2025-12-08), so a "
          "limit on which branches may deploy lets them through whenever it admits the default branch: nothing "
-         "stands between the event and the environment's secrets. Not followed: what a pattern in the limit matches, "
+         "stands between the event and the environment's secrets. An environment with a custom deployment "
+         "protection rule does ask someone, an app whose decisions are not read, so beside one this is \"cannot "
+         "tell\". Not followed: what a pattern in the limit matches, "
          "and the callers of a reusable workflow in another repository.",
          "Add required reviewers to the environment, or move the step that needs the secret to a workflow "
          "that only people with write access can start.",
@@ -107,8 +114,9 @@ RULES: tuple[Rule, ...] = (
          "also exists as a repository or organisation secret. A job that does not declare the environment "
          "gets that copy, on any branch, so the environment protects nothing. The same holds when the "
          "environment the configuration names does not exist, and for a copy in another environment that any "
-         "branch may use and that asks nobody. Not followed: a copy in an environment with a limit or reviewers, "
-         "and Dependabot or Codespaces secrets.",
+         "branch may use and that asks nobody; beside a custom deployment protection rule there, whose app's "
+         "decisions are not read, that copy is \"cannot tell\". Not followed: a copy in an environment with a "
+         "limit or reviewers, and Dependabot or Codespaces secrets.",
          "Delete the repository or organisation secret so that the environment holds the only copy, and "
          "create the environment the configuration names, limited to the default branch.",
          why="A job on any branch may read the secret without the environment meant to keep it, so whatever branch "
@@ -1175,6 +1183,57 @@ def _open_pattern(policy: dict) -> bool:
     return bool(policy["name"]) and set(policy["name"]) <= {"*", "/"}
 
 
+def _other_gates(env: dict) -> tuple[list[str], str]:
+    """What else an environment makes a job wait for besides its required reviewers (flagship slice 2b.9b), and
+    why that is not known in full.
+
+    The first is each enabled custom deployment protection rule, named by the GitHub App that runs it, and each
+    protection rule of a type this version does not know (``other_protection_rules``), named by its type. Each
+    is a gate whose decisions the audit cannot read: by GitHub's page on custom rules, the app is sent the run
+    and approves or rejects it, on whatever grounds it is written to use. So it is weighed as required reviewers
+    are where they leave a finding standing (an environment any branch may use: medium, naming the app), and
+    makes "cannot tell" of a finding they would have suppressed. The second is "" when the custom rules were
+    read, and otherwise why not: an environment of a snapshot an earlier version took has no such field, and
+    one whose answer failed has null. Then each rule keeps the finding it gives without such a gate, and says
+    that it may overstate."""
+    gates = [f"a custom deployment protection rule run by the app {_q(r['app'])}"
+             for r in env.get(CUSTOM_RULES) or () if r["enabled"] is True]
+    gates += [f"a protection rule of the type {_q(kind)}, which this version does not know and which may be such a gate"
+              for kind in env["other_protection_rules"]]
+    if CUSTOM_RULES not in env:
+        unread = ("its custom deployment protection rules were not read: the snapshot was taken by a version of "
+                  "obaaf that did not read them")
+    elif env[CUSTOM_RULES] is None:
+        unread = "its custom deployment protection rules could not be read"
+    else:
+        unread = ""
+    return gates, unread
+
+
+def _listed_whole(run: _Run) -> bool:
+    """Whether the list of environments is whole, so that an environment it does not hold does not exist.
+
+    The reader records a list it could not read as not read, and the whole setting as not read when an entry of
+    it has another shape. So a setting read in part is a whole list of which some environment's parts (its
+    branch patterns, its custom deployment protection rules) were not read, and those do not say that an
+    environment is missing. A problem keyed by a name the list does not hold, which only an edited file has, may
+    be an environment left out, and then the list is not whole (the review of slice 2b.9b: before it, any part
+    not read made every environment's existence "cannot tell", and the low finding of OBAAF-SET-003 vanish)."""
+    entry = run.settings["environments"]
+    if entry["status"] == "read":
+        return True
+    if entry["status"] != "partial":
+        return False
+    names = {env["name"] for env in entry["value"]}
+    return all(problem["key"] in names for problem in entry.get("problems", []))
+
+
+def _unread_gate_clause(unread: str) -> str:
+    """The sentence a finding ends with when an environment's custom deployment protection rules are not known."""
+    return (f" Whether a custom deployment protection rule also stands in the way is not known ({unread}); with one, "
+            "this finding may overstate what is open.") if unread else ""
+
+
 def _events(job: dict) -> set:
     """The events that reach the job, those of the jobs that call its workflow included."""
     return set(job["triggers"]) | set(job["called_from"])
@@ -1194,7 +1253,8 @@ def rule_001(run: _Run) -> None:
         if not run.results:
             run.idle = "no job names an environment"
         return
-    environments, whole = run.got("environments")
+    environments, _ = run.got("environments")
+    whole = _listed_whole(run)
     if environments is None:
         run.unread("environments", f"{_n(len(wanted), 'environment')} that jobs name could not be compared",
                    "environments")
@@ -1219,9 +1279,23 @@ def rule_001(run: _Run) -> None:
                             "Whatever protection the job counts on from it is not in the settings.")
             continue
         reviewers = bool(env["reviewers"])
-        gate = ("Its only protection is its required reviewers"
-                + {True: ", and self-review is prevented", False: ", and a reviewer may approve their own run"}.get(
-                    env["prevent_self_review"], "") + "." if reviewers else "It has no required reviewers.")
+        others, unread = _other_gates(env)
+        # A custom deployment protection rule counts as reviewers do (slice 2b.9b): beside a finding they leave
+        # standing it makes the finding medium and is named; a finding they would suppress is "cannot tell".
+        guarded = reviewers or bool(others)
+        self_review = {True: ", and self-review is prevented", False: ", and a reviewer may approve their own run"}.get(
+            env["prevent_self_review"], "")
+        if others:
+            gate = ((f"Its protection is its required reviewers{self_review}, and " if reviewers else
+                     "It has no required reviewers. Its protection is ")
+                    + f"{_names(others)}, whose decisions the audit does not read.")
+        else:
+            gate = (f"Its only protection is its required reviewers{self_review}." if reviewers
+                    else "It has no required reviewers.")
+        gate += _unread_gate_clause(unread)
+        # What a narrower finding becomes beside a gate the audit cannot read.
+        undecided = (f"Its protection is {_names(others)}, whose decisions the audit does not read, so whether a "
+                     "job there gets the environment without anyone's approval is not known.")
         # An environment read to hold no secret guards only what trusts its name (a deployment, an
         # identity token), which the audit does not read: the finding is then low and says so.
         empty = held.get(key) == []
@@ -1230,7 +1304,7 @@ def rule_001(run: _Run) -> None:
                  "A job on any such branch can name it and read whatever secrets it holds.")
         mode = env["deployment_branches"]
         if mode == "any":
-            run.finding(subject, "low" if empty else "medium" if reviewers else "high",
+            run.finding(subject, "low" if empty else "medium" if guarded else "high",
                         f"Any branch or tag may use the environment {_q(env['name'])}, a pull request's branch "
                         f"included, and {who}. {reach} {gate}")
         elif mode == "protected":
@@ -1252,23 +1326,30 @@ def rule_001(run: _Run) -> None:
             pushable = [p for p in named if gates.get(p["name"], ("",))[0] == "open"]
             unsure = [p for p in named if gates.get(p["name"], ("",))[0] == "unknown"]
             if wide:
-                run.finding(subject, "low" if empty else "medium" if reviewers else "high",
+                run.finding(subject, "low" if empty else "medium" if guarded else "high",
                             f"The environment {_q(env['name'])} is limited to the branch pattern "
                             f"{_q(wide[0]['name'])}, which lets nearly every branch through, and {who}. "
                             f"{reach} {gate}")
             elif loose and not reviewers:
                 shown = _names(f"{'tag' if p['type'] == 'tag' else 'branch'} pattern {_q(p['name'])}" for p in loose)
-                run.finding(subject, "low" if empty else "medium",
-                            f"The environment {_q(env['name'])} may be used from {shown}, it has no required "
-                            f"reviewers, and {who}. Anyone with write access can push a branch or tag with such "
-                            "a name from any commit, unless a ruleset restricts creating them, which this rule "
-                            "does not read.")
+                said = (f"The environment {_q(env['name'])} may be used from {shown}, it has no required "
+                        f"reviewers, and {who}. Anyone with write access can push a branch or tag with such "
+                        "a name from any commit, unless a ruleset restricts creating them, which this rule "
+                        "does not read.")
+                if others:
+                    run.cannot_tell(subject, f"{said} {undecided}")
+                else:
+                    run.finding(subject, "low" if empty else "medium", said + _unread_gate_clause(unread))
             elif pushable and not reviewers:
-                run.finding(subject, "low" if empty else "medium",
-                            f"The environment {_q(env['name'])} may be used from the branch "
-                            f"{_names(_q(p['name']) for p in pushable)}, it has no required reviewers, and {who}. "
-                            f"{gates[pushable[0]['name']][1]} Anyone with write access can push a job there that "
-                            "names the environment, so the limit stops nobody who can push.")
+                said = (f"The environment {_q(env['name'])} may be used from the branch "
+                        f"{_names(_q(p['name']) for p in pushable)}, it has no required reviewers, and {who}. "
+                        f"{gates[pushable[0]['name']][1]} Anyone with write access can push a job there that "
+                        "names the environment")
+                if others:
+                    run.cannot_tell(subject, f"{said}. {undecided}")
+                else:
+                    run.finding(subject, "low" if empty else "medium",
+                                f"{said}, so the limit stops nobody who can push.{_unread_gate_clause(unread)}")
             elif (other or unsure) and not reviewers:
                 parts = ([f"{_names(_q(p['name']) for p in other)}, which was not audited (name it with --branch to "
                           "have its rules read)"] if other else []) + [
@@ -1341,7 +1422,8 @@ def rule_002(run: _Run) -> None:
         if not run.results:
             run.idle = "no job that outsiders' events can start names an environment"
         return
-    environments, whole = run.got("environments")
+    environments, _ = run.got("environments")
+    whole = _listed_whole(run)
     repository, _ = run.got("repository")
     if environments is None or repository is None:
         run.unread("environments", f"{_do(len(exposed), 'job', 'that', 'that')} outsiders' events can start "
@@ -1380,10 +1462,17 @@ def rule_002(run: _Run) -> None:
                  "the default branch, so the limit does not stop them." if admitted else
                  "These events run as the default branch; whether its limit on which branches may deploy "
                  "admits the default branch was not read or rests on a pattern.")
-        run.finding(subject, "high",
-                    f"The job can be started by {_names(events)}, which people without write access can cause, "
-                    f"and it names the environment {_q(name)}, {what}. The environment has no required "
-                    f"reviewers. {limit}")
+        said = (f"The job can be started by {_names(events)}, which people without write access can cause, "
+                f"and it names the environment {_q(name)}, {what}. The environment has no required reviewers")
+        others, unread = _other_gates(env)
+        if others:
+            # Slice 2b.9b: an app's rule is asked first, so "asks nobody" would be false; what it decides on is
+            # not read.
+            run.cannot_tell(subject, f"{said}, but its protection is {_names(others)}, whose decisions the audit "
+                                     "does not read, so whether such an event gets the environment without anyone's "
+                                     "approval is not known.")
+            continue
+        run.finding(subject, "high", f"{said}. {limit}{_unread_gate_clause(unread)}")
 
 
 def _called(run: _Run, job: dict):
@@ -1397,7 +1486,8 @@ def rule_003(run: _Run) -> None:
     env_secrets, env_whole = run.got("environment_secrets")
     repo, repo_whole = run.got("repository_secrets")
     org, org_whole = run.got("organization_secrets")
-    environments, envs_whole = run.got("environments")
+    environments, _ = run.got("environments")
+    envs_whole = _listed_whole(run)
     read_by_jobs = {name.upper() for _, job in run.jobs() for name in job["secrets"]}
     # A job that can read every secret (toJSON(secrets), a computed index, `secrets: inherit`) reads each.
     reads_all = any(job["all_secrets"] or (job["passes"] and (job["passes"]["inherit"] or job["passes"]["all"]))
@@ -1439,19 +1529,36 @@ def rule_003(run: _Run) -> None:
         if env and environments is not None:
             # A copy in another environment that any branch may use and that asks nobody is a copy every job
             # can reach: it only has to name that environment (slice 2d.2g).
-            open_envs = {e["name"].lower(): e["name"] for e in environments
+            open_envs = {e["name"].lower(): e for e in environments
                          if not e["reviewers"] and e["name"].lower() != env.lower() and (
                              e["deployment_branches"] == "any" or any(
                                  p["type"] != "tag" and _open_pattern(p) for p in e.get("branch_policies") or []))}
             for name in sorted(n for n in in_env if fnmatch.fnmatchcase(n, pattern) and n not in reported):
-                copies = sorted(open_envs[e.lower()] for e in in_env[name] if e.lower() in open_envs)
+                found = [open_envs[e.lower()] for e in in_env[name] if e.lower() in open_envs]
+                # Slice 2b.9b: a copy behind a custom deployment protection rule (or a protection rule of a type
+                # this version does not know) waits for an app whose decisions the audit does not read.
+                copies = sorted((e for e in found if not _other_gates(e)[0]), key=lambda e: e["name"])
+                gated = sorted((e for e in found if _other_gates(e)[0]), key=lambda e: e["name"])
                 if copies:
                     reported.add(name)
+                    unread = "; ".join(dict.fromkeys(u for u in (_other_gates(e)[1] for e in copies) if u))
                     run.finding(f"secret {_q(name)}", "high",
                                 f"{_q(name)} matches the protected_secrets entry {_q(pattern)}, which says it must stay "
                                 f"in {_q(env)}, and it is also stored in the environment "
-                                f"{_names(_q(c) for c in copies)}, which any branch may use and which has no required "
-                                "reviewers. A job on any branch can name that environment and read the copy.")
+                                f"{_names(_q(c['name']) for c in copies)}, which any branch may use and which has no "
+                                "required reviewers. A job on any branch can name that environment and read the copy."
+                                + _unread_gate_clause(unread))
+                elif gated:
+                    reported.add(name)
+                    run.cannot_tell(f"secret {_q(name)}",
+                                    f"{_q(name)} matches the protected_secrets entry {_q(pattern)}, which says it must "
+                                    f"stay in {_q(env)}, and it is also stored in the environment "
+                                    f"{_names(_q(e['name']) for e in gated)}, which any branch may use and which has no "
+                                    "required reviewers. Its protection is "
+                                    f"{_names(dict.fromkeys(g for e in gated for g in _other_gates(e)[0]))}, whose "
+                                    "decisions the "
+                                    "audit does not read, so whether a job on any branch can read the copy is not "
+                                    "known.")
         if env and env_secrets is not None and envs_whole and env_whole:
             kept = [n for n in in_env if fnmatch.fnmatchcase(n, pattern)
                     and env.lower() in {e.lower() for e in in_env[n]}]
@@ -1459,6 +1566,12 @@ def rule_003(run: _Run) -> None:
                 run.finding(f"protected_secrets entry {_q(pattern)}", "low",
                             f"No secret that matches {_q(pattern)} is stored in the environment {_q(env)}, "
                             "which the configuration names for it. The entry protects nothing that is there.")
+        elif env and env_secrets is not None and env_whole and environments is not None:
+            # The list of environments may not be whole: whether the entry protects anything is not known, and
+            # that is said, never left out (the review of slice 2b.9b).
+            run.unread(f"protected_secrets entry {_q(pattern)}",
+                       f"whether a secret that matches {_q(pattern)} is stored in the environment {_q(env)} is not "
+                       "known, because the list of environments may not be whole", "environments")
     for name in sorted(set(in_env) & set(stored_wide) - reported):
         if name in read_by_jobs or reads_all:
             run.finding(f"secret {_q(name)}", "medium",

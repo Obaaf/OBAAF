@@ -30,7 +30,7 @@ import re
 from collections import Counter
 
 from obaaf.audit.github import plain, quoted
-from obaaf.audit.settings import BY_KEY, SETTINGS, check_branches
+from obaaf.audit.settings import BY_KEY, CUSTOM_RULES, SETTINGS, check_branches
 
 RULE = "OBAAF-DRIFT-001"
 FORMAT = "obaaf-settings-drift/v0.1"
@@ -67,6 +67,16 @@ SHAPES: dict[str, tuple] = {
 ELEMENT_KEYS = (("id",), ("name",), ("context",), ("type", "ruleset_id"), ("type",), ("ruleset_id",),
                 ("actor_type", "actor_id"))
 SIMPLE = re.compile(r"[A-Za-z0-9_-]{1,60}\Z")
+# Fields of an environment that can be not read while the rest of it is read: null when their answer failed
+# (the reader then lists a problem under the environment's name). Where both snapshots read an environment only
+# in part, such a field is left out of the comparison whenever either side did not read it, so that "not read"
+# is never reported as a change. The custom deployment protection rules (slice 2b.9b) are also absent from an
+# environment of a snapshot taken by an earlier version, which did not read them; that environment counts as
+# read only in part on that side.
+PARTLY_READ_FIELDS = ("branch_policies", CUSTOM_RULES)
+NOT_RECORDED = {"reason_code": "not_recorded",
+                "reason": "this snapshot was taken by a version of obaaf that did not read custom deployment "
+                          "protection rules"}
 
 
 class DriftError(ValueError):
@@ -270,6 +280,39 @@ RETAKE = ("Take the expected snapshot again, with the token this check uses, so 
           "read.")
 
 
+def _not_recorded(key: str, held: dict) -> dict[str, dict]:
+    """The environments of a snapshot taken before custom deployment protection rules were read: each is known
+    only in part on that side, so it is not compared with one read in full (slice 2b.9b)."""
+    if key != "environments":
+        return {}
+    return {ident: dict(NOT_RECORDED) for ident, part in held.items()
+            if isinstance(part, dict) and CUSTOM_RULES not in part}
+
+
+def _unread_field(part: dict, name: str) -> bool:
+    """Whether an environment's field was not read: null, or (for the custom rules) absent."""
+    return part.get(name) is None and (name in part or name == CUSTOM_RULES)
+
+
+def _both_read(key: str, expected, live) -> tuple:
+    """Two parts that both snapshots read only in part, as (expected, live, neither, one_side): the parts without
+    the fields that either side did not read, the fields neither side read, and the fields only one side read,
+    each with the side that did not ("expected" or "live"). A field only one side read is not compared and is
+    never "no change": the caller lists it as not compared."""
+    if key != "environments" or not isinstance(expected, dict) or not isinstance(live, dict):
+        return expected, live, [], []
+    neither, one_side = [], []
+    for name in PARTLY_READ_FIELDS:
+        missing = [side for side, part in (("expected", expected), ("live", live)) if _unread_field(part, name)]
+        if len(missing) == 2:
+            neither.append(name)
+        elif missing:
+            one_side.append((name, missing[0]))
+    dropped = set(neither) | {name for name, _ in one_side}
+    return ({k: v for k, v in expected.items() if k not in dropped},
+            {k: v for k, v in live.items() if k not in dropped}, neither, one_side)
+
+
 def _branch_gaps(key: str, snap: dict, names: set[str]) -> dict[str, dict]:
     """For a setting kept by branch, which of ``names`` a snapshot did not audit: it knows nothing of them, so
     a branch only one side audited is not compared, never "new" or "gone"."""
@@ -346,8 +389,8 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
         l_parts = {} if l_status == "not_applicable" else parts(key, ours.get("value"), our_side)
         e_problems, l_problems = _problem_keys(theirs), _problem_keys(ours)
         names = set(e_parts) | set(l_parts) | set(e_problems) | set(l_problems)
-        e_unknown = {**_branch_gaps(key, expected, names), **e_problems}
-        l_unknown = {**_branch_gaps(key, live, names), **l_problems}
+        e_unknown = {**_branch_gaps(key, expected, names), **_not_recorded(key, e_parts), **e_problems}
+        l_unknown = {**_branch_gaps(key, live, names), **_not_recorded(key, l_parts), **l_problems}
         for ident in sorted(set(e_parts) | set(l_parts) | set(e_unknown) | set(l_unknown)):
             what = label(key, ident, e_parts.get(ident), l_parts.get(ident))
             here = {"setting": key, "item": ident, "what": f"{setting.title}: {what}"}
@@ -357,12 +400,37 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
                     # what was read is compared, and a difference in it counts. What was not read is listed
                     # as not covered whether or not the rest differs.
                     parts_compared += 1
-                    found = changes(e_parts[ident], l_parts[ident])
+                    left, right, neither, one_side = _both_read(key, e_parts[ident], l_parts[ident])
+                    found = changes(left, right)
                     if found:
                         differences.append({"setting": key, "item": ident, "what": what, "changes": found})
-                    not_covered.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
-                                        "why": unknown(e_unknown[ident], "both read it only in part, and the rest was "
-                                                                         "compared; not read by the expected one: ")})
+                    for field, absent in one_side:
+                        # Read by one side only (slice 2b.9b): whether it changed is not known, which is a failure.
+                        lacking = e_parts[ident] if absent == "expected" else l_parts[ident]
+                        side = (NOT_RECORDED if field not in lacking else
+                                e_unknown[ident] if absent == "expected" else l_unknown[ident])
+                        held = (f"both read it only in part, and its {field} was read now and not by the expected "
+                                "snapshot: " if absent == "expected" else
+                                f"both read it only in part, and its {field} is in the expected snapshot and could not "
+                                "be read now: ")
+                        not_compared.append({**here, "reason_code": side.get("reason_code"),
+                                             "why": unknown(side, held) + (". " + RETAKE if absent == "expected" else "")})
+                    if neither or not one_side:
+                        not_covered.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
+                                            "why": unknown(e_unknown[ident], "both read it only in part, and the rest "
+                                                                             "was compared; not read by the expected "
+                                                                             "one: ")})
+                    continue
+                if (ident in e_parts) != (ident in l_parts):
+                    # One side holds what it read of it and the other holds nothing (an environment a file marks
+                    # as not read and leaves out, against one this run read in part): whether it changed is not
+                    # known, which is a failure, never "neither read it" (the second review of slice 2b.9b).
+                    held = ("it was read only in part now, and the expected snapshot holds none of it: "
+                            if ident in l_parts else
+                            "the expected snapshot holds part of it, and none of it could be read now: ")
+                    side = e_unknown[ident] if ident in l_parts else l_unknown[ident]
+                    not_compared.append({**here, "reason_code": side.get("reason_code"),
+                                         "why": unknown(side, held) + (". " + RETAKE if ident in l_parts else "")})
                     continue
                 not_covered.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
                                     "why": unknown(e_unknown[ident], "neither snapshot read it; the expected one: ")})

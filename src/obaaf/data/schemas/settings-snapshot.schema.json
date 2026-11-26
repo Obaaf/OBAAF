@@ -270,6 +270,16 @@
         },
         "prevent_self_review": {"$ref": "#/$defs/flag_or_null"},
         "other_protection_rules": {"$ref": "#/$defs/names"},
+        "custom_protection_rules": {
+          "description": "The environment's custom deployment protection rules, each the GitHub App that runs it: a list (empty when there is none), or null when it could not be read. A snapshot taken before this field existed has none, which means not read.",
+          "type": ["array", "null"],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["app", "app_id", "enabled"],
+            "properties": {"app": {"type": "string"}, "app_id": {"type": ["integer", "null"]}, "enabled": {"type": "boolean"}}
+          }
+        },
         "can_admins_bypass": {"$ref": "#/$defs/flag_or_null"}
       },
       "if": {"properties": {"deployment_branches": {"const": "selected"}}},

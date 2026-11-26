@@ -3,7 +3,7 @@
   "repository": "Obaaf/OBAAF",
   "api": "https://api.github.com",
   "api_version": "2026-03-10",
-  "taken_at": "2026-11-13T03:22:04Z",
+  "taken_at": "2026-11-26T12:50:16Z",
   "tool": "obaaf 0.4.0.dev0",
   "viewer": {
     "authenticated": true,
@@ -127,7 +127,8 @@
               "name": "main",
               "type": "branch"
             }
-          ]
+          ],
+          "custom_protection_rules": []
         },
         {
           "name": "pypi",
@@ -158,7 +159,8 @@
               "name": "v*",
               "type": "tag"
             }
-          ]
+          ],
+          "custom_protection_rules": []
         }
       ]
     },
@@ -255,7 +257,15 @@
       "status": 200
     },
     {
+      "path": "/repos/Obaaf/OBAAF/environments/github-pages/deployment_protection_rules?per_page=100",
+      "status": 200
+    },
+    {
       "path": "/repos/Obaaf/OBAAF/environments/pypi/deployment-branch-policies?per_page=100",
+      "status": 200
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/environments/pypi/deployment_protection_rules?per_page=100",
       "status": 200
     },
     {
