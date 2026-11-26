@@ -385,7 +385,10 @@ class OBAAFGHA026AcrossStepsTest(unittest.TestCase):
         self.assertEqual({f.kind for f in found}, {"command-computed"})
         unread = [f for f in found if any(agent_flags.PUT_IN_UNREAD in w for w in f.facts["words"])]
         self.assertEqual(len(unread), 20 - FIT)
-        self.assertEqual(result.errors, [])          # the lanes do not read the workflow's `env`
+        # Since slice 2d.18 (D-139) the lanes put in the workflow's `env` too, under the same bound: the steps past
+        # it are errors of the file, as steps past it with their own `env` are (before, there was no error).
+        self.assertEqual(len(result.errors), 20 - FIT)
+        self.assertTrue(all(WORKFLOW_ERROR in error for error in result.errors), result.errors)
 
     def test_a_long_workflow_level_prompt_used_once_by_a_few_dozen_steps_is_read(self):
         """The first case #376 says must pass: a 40 KB prompt, used once by each of 48 steps, with a warned
