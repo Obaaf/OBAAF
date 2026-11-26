@@ -6,7 +6,7 @@
 
 The checker puts each job in every lane it belongs to (untrusted, agent, effect, release; a job in none of them is trusted) and runs each lane's rules on the jobs in that lane. A job that runs an agent and publishes is in the agent lane and in the release lane, and gets the rules of both. The agent controls run only on jobs in the agent lane. It recognizes an agent by the action a job `uses:`, or by an agent CLI in a `run:` script. The recognized actions and commands are the entries of `agent_tools` in `src/obaaf/data/detection.yaml`, one for each tool ([below](#the-agent-tools-the-checker-knows)).
 
-An agent CLI named through a variable the step's own `env` sets (`run: $AGENT -p x` with `env: {AGENT: claude}`) is found too: the step's command lines are also read with those values put in. The job's and the workflow's `env` are not put in. Since flagship slice 2d.16 (decision D-137) that text is made only while the values put in, counted each time, come to no more than every `env` value counted once and 100,000 characters more, so a long prompt put in once is always read. A step past that bound is an error of its file, which fails the check, because the checker cannot tell whether an agent runs in it; in a local action it is named in the note below. OBAAF-GHA-026 reads options with the same bound.
+An agent CLI named through a variable the step's own `env` sets (`run: $AGENT -p x` with `env: {AGENT: claude}`) is found too: the step's command lines are also read with those values put in. The job's and the workflow's `env` are not put in. Since flagship slice 2d.16 (decision D-137) each value may be put in eight times, whatever its length, and the times past the eighth may add up to 100,000 characters, so a long prompt used a few times is always read. A step past that bound, in a workflow or in a local action, is an error of its file, which fails the check, because the checker cannot tell whether an agent runs in it. OBAAF-GHA-026 reads options with the same bound.
 
 ### The agent tools the checker knows
 
@@ -192,7 +192,7 @@ runs:
 - a JavaScript or Docker action;
 - an action with no `action.yml` or `action.yaml` in the repository (an earlier step may make one);
 - a path that leads outside the repository or holds an expression;
-- an expression that reads an input or the environment nested more than 64 parentheses deep, or more than eight `||`, `&&` or `format()` deep, or that can give more than 16 texts; or an input or `env` value that, put in, makes a text longer than 200,000 characters, or `env` values that, put into a step's command lines to find an agent, add more than 100,000 characters to the lines and the values together;
+- an expression that reads an input or the environment nested more than 64 parentheses deep, or more than eight `||`, `&&` or `format()` deep, or that can give more than 16 texts; or an input or `env` value that, put in, makes a text longer than 200,000 characters;
 - an action whose `runs.using` is not one it reads, whose `runs.steps` is not a list, or with a step that is not a mapping;
 - a chain of actions that comes back to itself or is more than ten deep;
 - every local action of a workflow checked on its own, whose repository the checker does not know.

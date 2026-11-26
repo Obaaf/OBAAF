@@ -1958,18 +1958,41 @@ def permissions_problem(raw: Any, where: str) -> str | None:
             "cannot tell what the token may do")
 
 
-# Flagship slice 2d.16 (#372): how much longer than the text it is made from a step's command lines may be read
-# as once its `env` values are put in (`Step.env_put_in`, read by `Step.agent_text`). The text it is made from
-# is the command lines and every `env` value, each counted once, so a value put in once is always read,
-# whatever its length, and values put in many times may add this many characters more. Before, nothing
-# bounded it: a `run` of 2,000 `$P` with a 2,000-character `P` (6 KB of YAML) was read as 4,000,000
-# characters, about half a second for each of the six times a check read the step, and the text grew with the
-# square of the file. Past the bound the text is not made, and the step is an error of its file
-# (`WorkflowRules.unread_put_ins`), or, in a local action, named as not read: the checker cannot tell whether
-# an agent runs in it.
+# Flagship slice 2d.16 (#372): how far a step's command lines may grow as its variables are put in (`Step.env_put_in`,
+# read by `Step.agent_text`, and OBAAF-GHA-026's `agent_flags._substitute` and `put_in_cheaply`). Each value, the
+# same object wherever it is given (a value YAML gives through aliases is one value), may be put in
+# `ENV_PUT_IN_TIMES` times whatever its length; each time more takes its length from `ENV_PUT_IN_EXTRA`
+# characters (`PutInBudget`). So a long prompt put in a few times is always read, and the text is at most eight
+# times the values it uses and 100,000 characters more. Before, nothing bounded it: a `run` of 2,000 `$P` with a
+# 2,000-character `P` (8 KB of YAML) was read as 4,000,000 characters, about half a second for each of the six
+# times a check read the step, and the text grew with the square of the file. Past the bound the text is not
+# made, and the step is an error of its file (`WorkflowRules.unread_put_ins`, or `_agent_in_local_action` for a
+# local action's step): the checker cannot tell whether an agent runs in it.
+ENV_PUT_IN_TIMES = 8
 ENV_PUT_IN_EXTRA = 100_000
-ENV_PUT_IN_UNREAD = (f"its env values, put into the command lines it runs, make a text longer than the checker reads "
-                     f"(more than {ENV_PUT_IN_EXTRA:,} characters longer than those lines and values together)")
+ENV_PUT_IN_UNREAD = ("its env values, put into the command lines it runs, make a text longer than the checker reads "
+                     f"(a value put in more than {ENV_PUT_IN_TIMES} times, and those times come to more than "
+                     f"{ENV_PUT_IN_EXTRA:,} characters)")
+
+
+class PutInBudget:
+    """What a text may still take as values are put into it (flagship slice 2d.16): `take(value)` counts one
+    more time `value` is put in and is False once the times past `ENV_PUT_IN_TIMES` of each value, by their
+    lengths, come to more than `ENV_PUT_IN_EXTRA` characters. A value is counted by the object it is, so a
+    value YAML gives under many names through aliases is one value."""
+
+    def __init__(self) -> None:
+        self.room = ENV_PUT_IN_EXTRA
+        self.times: dict = {}
+
+    def take(self, value: str) -> bool:
+        times = self.times.get(id(value), 0) + 1
+        self.times[id(value)] = times
+        if times > ENV_PUT_IN_TIMES:
+            self.room -= len(value)
+        return self.room >= 0
+
+
 _ENV_NAME_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 
 
@@ -2131,22 +2154,20 @@ class Step:
     def env_put_in(self, own: str | None = None) -> str | None:
         """The command lines `agent_text` reads as written (`own`, by default `_command_text()`), with each
         `$NAME` and `${NAME}` the step's `env` gives a text put in; the lines as written when the step's `env`
-        gives none or the lines have no `$`. None when the values put in, counted each time one is put in,
-        come to more than every `env` value counted once and `ENV_PUT_IN_EXTRA` characters more (flagship
-        slice 2d.16): the text is made only up to that bound, so what reading it costs grows with the step as
-        written, not with how often a value is put in."""
+        gives none or the lines have no `$`. None when a `PutInBudget` runs out (flagship slice 2d.16): the
+        text is made only up to that bound, so it is at most `ENV_PUT_IN_TIMES` times the values it uses and
+        `ENV_PUT_IN_EXTRA` characters more."""
         own = self._command_text() if own is None else own
         env = {k: v for k, v in self.env.items() if isinstance(k, str) and isinstance(v, str)}
         if not env or not own or "$" not in own:
             return own
-        room = [sum(len(v) for v in env.values()) + ENV_PUT_IN_EXTRA]
+        budget = PutInBudget()
 
         def put(match):
             value = env.get(match.group(1))
             if value is None:
                 return match.group(0)
-            room[0] -= len(value)
-            if room[0] < 0:
+            if not budget.take(value):
                 raise OverflowError
             return value
 

@@ -2373,20 +2373,18 @@ class WorkflowRules:
         # An `env` written as one expression (`env: ${{ fromJSON(...) }}`) can set any name: none is known.
         scoped = not any(scope is not None and not isinstance(scope, dict) for scope in scopes)
         scopes = [scope if isinstance(scope, dict) else {} for scope in scopes]
-        named_unread = False
-        if not any(agent_flags.appears(t, programs, packages) for t in named):
-            # A name put together from variables the script sets (`a=cla; b=ude; $a$b`) is looked for only
-            # where the script has a `$` and an assignment, with a regular expression (kept cheap). Where the
-            # values put in make a text longer than the checker reads (flagship slice 2d.16), whether they make
-            # the name is decided without the text, and a step whose values may make it is read as one that
-            # names the tool, so that what cannot be read there is "cannot tell".
-            cheap = [(text, agent_flags.put_in_cheaply(text, scopes)) for text, _b in parts
-                     if "$" in text and "=" in text]
-            named_unread = any(put is None and agent_flags.names_when_put_in(text, scopes, programs, packages)
-                               for text, put in cheap)
-            if not named_unread and not any(put is not None and agent_flags.appears(put, programs, packages)
-                                            for _text, put in cheap):
-                return              # the tool's name is nowhere in the step (the common case, kept cheap)
+        # A name put together from variables the script sets (`a=cla; b=ude; $a$b`) is looked for only where
+        # the script has a `$` and an assignment, with a regular expression (kept cheap). Where the values put in
+        # make a text longer than the checker reads (flagship slice 2d.16), whether they make the name is decided
+        # without the text, and a step whose values may make it is read as one that names the tool, so that what
+        # cannot be read there is "cannot tell", also where the name is somewhere else in the step (a token
+        # named `CLAUDE_CODE_OAUTH_TOKEN` in the job's `env`; found by the review).
+        cheap = [(text, agent_flags.put_in_cheaply(text, scopes)) for text, _b in parts if "$" in text and "=" in text]
+        named_unread = any(put is None and agent_flags.names_when_put_in(text, scopes, programs, packages)
+                           for text, put in cheap)
+        if not named_unread and not any(agent_flags.appears(t, programs, packages) for t in named) and not any(
+                put is not None and agent_flags.appears(put, programs, packages) for _text, put in cheap):
+            return                  # the tool's name is nowhere in the step (the common case, kept cheap)
         # A step before this one that can set a variable for later steps (GITHUB_ENV, `exportVariable`):
         # the job's and workflow's `env` values are then not known; the step's own `env` is.
         writes = self._later_writes(job)

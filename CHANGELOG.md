@@ -4,16 +4,16 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
-### A step's env values are put into its command lines only up to a bound
+### A step's variables are put into its command lines only up to a bound
 
-Slice 2d.16, from #372; decision D-137. To find an agent named through a variable (`run: $AGENT -p x` with `env: {AGENT: claude}`), the checker reads a step's command lines with its `env` values put in, and OBAAF-GHA-026 does the same with the job's and the workflow's `env` and the script's own assignments. Nothing bounded those texts: a `run` of 2,000 `$P` with a 2,000-character `P`, 6 KB of YAML, was read as 4,000,000 characters several times in one check, and 48 KB was read as 256,000,000. The time and memory grew with the square of the file.
+Slice 2d.16, from #372; decision D-137. To find an agent named through a variable (`run: $AGENT -p x` with `env: {AGENT: claude}`), the checker reads a step's command lines with its `env` values put in, and OBAAF-GHA-026 does the same with the job's and the workflow's `env` and the script's own assignments. Nothing bounded those texts: a `run` of 2,000 `$P` with a 2,000-character `P`, 8 KB of YAML, was read as 4,000,000 characters several times in one check, and 64 KB was read as 256,000,000. The time and memory grew with the square of the step.
 
-- **Each text is now made only while the values put in, counted each time, come to no more than every value counted once and 100,000 characters more.** A value put in once, such as a long prompt, is always read whatever its length. Within the bound nothing changes.
-- **A workflow's step past the bound is an error of its file, which fails the check**, because an agent named through its variables could go unseen: "its env values, put into the command lines it runs, make a text longer than the checker reads (...), so the checker cannot tell whether an agent runs in it". No baseline or `ignore` entry can accept an error.
-- **In a local action, such a step is named in the note on local actions not read through**, in the words already used when its environment, put into a script, is too long.
+- **Each value may now be put in eight times, whatever its length, and the times past the eighth may add up to 100,000 characters.** A value is counted by what it is, so one value YAML gives under many names through aliases is one value, and a value the text does not use gives no room. A long prompt used a few times is always read. Within the bound nothing changes.
+- **A step past the bound is an error of its file, which fails the check**, in a workflow or in a local action, because an agent named through its variables could go unseen: "its env values, put into the command lines it runs, make a text longer than the checker reads (...), so the checker cannot tell whether an agent runs in it". No baseline or `ignore` entry can accept an error.
 - **OBAAF-GHA-020's egress control and OBAAF-GHA-005's `key-out-of-reach` say "cannot tell"** for such a step outside the confined command or before the step that holds the key.
-- **OBAAF-GHA-026 reads such a script as written and says "cannot tell"** where the step names the tool, or where the values it could not put in may make the tool's name (`a=cla; b=ude; $a$b ...`). Whether they may is decided without making the text.
-- The timing test of #372 now runs at 4,000 by 4,000 and takes about 0.2 s; uncapped, either reading would take 6 to 12 s, so the test measures the bounds it names.
+- **OBAAF-GHA-026 reads such a script as written and says "cannot tell" for every option it warns about**, wherever the tool's name is in the step or the values it could not put in may make it (`a=cla; b=ude; $a$b ...`). Whether they may is decided without making the text.
+- Not changed: OBAAF-GHA-026 still reads the job's and the workflow's `env` values again for each step, so a long workflow-level value used by many steps still costs time for each.
+- The timing test of #372 now runs at 4,000 by 4,000 and takes about 0.3 s; with either reading's bound removed it takes 6 or 12 s, so the test measures the bounds it names.
 
 ### A respelled runner label or action reference
 

@@ -1,23 +1,21 @@
-"""Flagship slice 2d.16 (#372): a step's env values put into its command lines are read only up to a bound.
+"""Flagship slice 2d.16 (#372): a step's variables are put into its command lines only up to a bound.
 
 `Step.agent_text` reads a step's command lines with the step's `env` values put in (`run: $AGENT -p x` with
 `env: {AGENT: claude}` runs claude). Nothing bounded that text: a `run` of 2,000 `$P` with a 2,000-character
-`P` (6 KB of YAML) was read as 4,000,000 characters, six times in one check, and the text grew with the
+`P` (8 KB of YAML) was read as 4,000,000 characters, six times in one check, and the text grew with the
 square of the file. OBAAF-GHA-026's reading (`agent_flags._substitute` and `put_in_cheaply`) made the same
-text, with the job's and the workflow's `env` and the script's own assignments too: 48 KB of YAML was read
+text, with the job's and the workflow's `env` and the script's own assignments too: 64 KB of YAML was read
 as 256,000,000 characters.
 
-Now each text is made only while the values put in, counted each time one is put in, come to no more than
-every value counted once and `ENV_PUT_IN_EXTRA` characters more, so a value put in once is always read,
-whatever its length. Past the bound:
+Now each value, the same object wherever YAML gives it, may be put in eight times whatever its length, and
+the times past the eighth may add up to `ENV_PUT_IN_EXTRA` characters (`PutInBudget`). Past that:
 
-- a workflow's step is an error of its file, which fails the check: the checker cannot tell whether an
-  agent runs in it;
-- a local action's step is named as not read, in the words `_expand_variables` uses for the same;
+- a workflow's step, or a local action's, is an error of its file, which fails the check: the checker
+  cannot tell whether an agent runs in it;
 - the egress control (OBAAF-GHA-020) and `key-out-of-reach` (OBAAF-GHA-005) are "cannot tell" for such a
   step before or beside the agent;
-- OBAAF-GHA-026 is "cannot tell" where the step names the tool, or where the tool's name may be made by the
-  values the checker could not put in.
+- OBAAF-GHA-026 is "cannot tell" for every warned option of a tool whose name is somewhere in the step or
+  may be made by the values the checker could not put in.
 
 Within the bound nothing changes: `SameAsBeforeTest` compares `agent_text` with the reading it replaces.
 """
@@ -34,13 +32,15 @@ from test_local_composite_actions import ACTION_DIR, check, composite, job_using
 
 from obaaf.checker import agent_flags
 from obaaf.checker import workflow as wf
-from obaaf.checker.workflow import (ENV_PUT_IN_EXTRA, ENV_PUT_IN_UNREAD, Step, _first_word_forms, _readings,
-                                    command_segments, matches_any)
+from obaaf import checker as checker_mod
+from obaaf.checker.workflow import (ENV_PUT_IN_EXTRA, ENV_PUT_IN_TIMES, ENV_PUT_IN_UNREAD, PutInBudget, Step,
+                                    _first_word_forms, _readings, command_segments, matches_any)
 from obaaf.catalog import load as load_catalog
 
 AGENTS = [re.compile(p, re.M) for p in load_catalog().detection["agent_commands"]]
 UNREAD_ERROR = f"{ENV_PUT_IN_UNREAD}, so the checker cannot tell whether an agent runs in it"
-# The step as the error names it: `job 'a', step 'step 1': ...`.
+# A value of 1,000 characters fits this many times, and not once more.
+FITS = ENV_PUT_IN_TIMES + ENV_PUT_IN_EXTRA // 1000
 
 
 def step(run, env=None, **raw):
@@ -80,18 +80,37 @@ class TheBoundTest(unittest.TestCase):
         self.assertEqual(step("claude -p x", {"A": "b"}).env_put_in(), "claude -p x")
         self.assertEqual(step("$A -p x").env_put_in(), "$A -p x")
 
-    def test_the_bound_is_every_value_once_and_the_extra(self):
-        # A value of 1,000 characters may be put in 1 + ENV_PUT_IN_EXTRA / 1,000 times, and not once more.
-        times = 1 + ENV_PUT_IN_EXTRA // 1000
-        run, env = repeated(times)
-        self.assertEqual(len(step(run, env).env_put_in()), len("echo") + times * 1001)
-        run, env = repeated(times + 1)
+    def test_a_value_may_be_put_in_eight_times_and_then_the_extra(self):
+        run, env = repeated(FITS)
+        self.assertEqual(len(step(run, env).env_put_in()), len("echo") + FITS * 1001)
+        run, env = repeated(FITS + 1)
         self.assertIsNone(step(run, env).env_put_in())
         self.assertTrue(step(run, env).env_put_in_unread)
-        # Every value counts once, whether or not it is put in.
-        run, env = repeated(times + 1)
-        env["UNUSED"] = "b" * 1000
-        self.assertIsNotNone(step(run, env).env_put_in())
+        # A long value put in eight times is read whatever its length.
+        long = "a" * (3 * ENV_PUT_IN_EXTRA)
+        self.assertIsNotNone(step(" ".join(["$P"] * ENV_PUT_IN_TIMES), {"P": long}).env_put_in())
+        self.assertIsNone(step(" ".join(["$P"] * (ENV_PUT_IN_TIMES + 1)), {"P": long}).env_put_in())
+
+    def test_a_value_the_text_does_not_use_gives_no_room(self):
+        """Found by the review: counting every value let one unused value raise the bound of every step."""
+        run, env = repeated(FITS + 1)
+        env["UNUSED"] = "b" * 10 * ENV_PUT_IN_EXTRA
+        self.assertIsNone(step(run, env).env_put_in())
+
+    def test_one_value_under_many_names_is_one_value(self):
+        """Found by the review: 2,000 names given one 2,000-character value through YAML aliases (49 KB)
+        made a 4,000,000-character text with no error. Counted by the object, it is one value put in
+        2,000 times."""
+        shared = "a" * 2000
+        env = {f"K{n}": shared for n in range(2000)}
+        self.assertIsNone(step(" ".join(f"$K{n}" for n in range(2000)), env).env_put_in())
+        apart = {f"K{n}": "a" * 1999 + str(n) for n in range(10)}      # ten values (Python folds "a" * 2000 into one)
+        self.assertIsNotNone(step(" ".join(f"$K{n}" for n in range(10)) * 8, apart).env_put_in())
+
+    def test_the_budget(self):
+        budget, value = PutInBudget(), "x" * 10
+        self.assertTrue(all(budget.take(value) for _ in range(ENV_PUT_IN_TIMES + ENV_PUT_IN_EXTRA // 10)))
+        self.assertFalse(budget.take(value))
 
     def test_a_value_that_is_not_text_is_not_put_in(self):
         self.assertEqual(step("$A -p x", {"A": 1, 2: "claude"}).env_put_in(), "$A -p x")
@@ -114,7 +133,7 @@ class TheBoundTest(unittest.TestCase):
         self.assertIn("claude -p x --dangerously-skip-permissions", text)
 
     def test_agent_text_does_not_read_past_the_bound(self):
-        run, env = repeated(1 + ENV_PUT_IN_EXTRA // 1000 + 1, before="$A -p x")
+        run, env = repeated(FITS + 1, before="$A -p x")
         env["A"] = "claude"
         s = step(run, env)
         self.assertTrue(s.env_put_in_unread)
@@ -181,6 +200,19 @@ class AWorkflowStepPastTheBoundTest(unittest.TestCase):
             alone = check(tmp, caller.replace("a" * 1000, "a"), {".github/workflows/called.yml": called})
         self.assertEqual([e for e in alone.errors if "put into the command lines" in e], [])
 
+    def test_many_callers_of_a_workflow_that_uses_a_prompt_a_few_times(self):
+        """Found by the review: the values 20 callers hand one input are one value to the checker, and a
+        prompt used three times then passed the first bound of this slice. A value may be put in eight times."""
+        called = ("on:\n  workflow_call:\n    inputs:\n      prompt: {type: string}\njobs:\n  c:\n"
+                  "    runs-on: ubuntu-latest\n    permissions: {contents: read}\n    steps:\n      - run: |\n"
+                  "          echo \"$PROMPT\" > prompt.txt\n          echo \"$PROMPT\" >> \"$GITHUB_STEP_SUMMARY\"\n"
+                  "          claude -p \"$PROMPT\" --allowedTools Read\n        env: {PROMPT: '${{ inputs.prompt }}'}\n")
+        jobs = "".join(f"  j{n}:\n    permissions: {{contents: read}}\n    uses: ./.github/workflows/called.yml\n"
+                       f"    with: {{prompt: {'p' * 2900}{n}}}\n" for n in range(20))
+        with TempDir() as tmp:
+            result = check(tmp, "on: push\njobs:\n" + jobs, {".github/workflows/called.yml": called})
+        self.assertEqual([e for e in result.errors if "put into the command lines" in e], [])
+
     def test_within_the_bound_the_agent_is_found_and_nothing_is_reported(self):
         result, _ = self.check(job("$A -p x", env_lines({"A": "claude"})))
         self.assertEqual(result.errors, [])
@@ -230,23 +262,38 @@ class AWorkflowStepPastTheBoundTest(unittest.TestCase):
 
 
 class AStepOfALocalActionTest(unittest.TestCase):
-    """In a local action, a step past the bound is named as not read, as `_expand_variables` names it."""
+    """In a local action, a step past the bound is an error too (found by the review: as a note, the job lost
+    the agent lane and every agent rule the base gave it)."""
 
-    def test_it_is_named_and_is_not_an_error(self):
-        # 150 `$P` of 1,000 characters: under `_expand_variables`' 200,000, past `env_put_in`'s 101,000.
-        run, env = repeated(150, before="$A -p x")
-        body = composite(f"    - run: {run}\n      shell: bash\n      env:\n        A: claude\n        P: {env['P']}\n")
+    def test_it_is_an_error(self):
+        run, env = repeated(150, before="${A}ude --dangerously-skip-permissions -p x")
+        body = composite(f"    - run: {run}\n      shell: bash\n      env:\n        A: cla\n        P: {env['P']}\n")
         with TempDir() as tmp:
             result = check(tmp, job_using(f"./{ACTION_DIR}"), {f"{ACTION_DIR}/action.yml": body})
-        self.assertEqual([e for e in result.errors if "put into" in e], [])
-        self.assertTrue(any("step 1: its environment, put into a script, makes a text longer than the checker reads"
-                            in n for n in result.notes), result.notes)
+        self.assertEqual([e for e in result.errors if "put into the command lines" in e],
+                         [f".github/workflows/wf.yml: job 'a' uses the local action ./{ACTION_DIR}, and in its step 1 "
+                          f"{UNREAD_ERROR}"])
 
     def test_within_the_bound_the_agent_is_found(self):
         body = composite("    - run: $A -p x\n      shell: bash\n      env:\n        A: claude\n")
         with TempDir() as tmp:
             lanes, notes = lane_of(tmp, job_using(f"./{ACTION_DIR}"), {f"{ACTION_DIR}/action.yml": body})
         self.assertEqual(lanes["a"][0], "agent")
+
+    def test_an_agent_found_otherwise_is_no_error(self):
+        run, env = repeated(150, before="claude -p x")
+        body = composite(f"    - run: {run}\n      shell: bash\n      env:\n        P: {env['P']}\n")
+        with TempDir() as tmp:
+            result = check(tmp, job_using(f"./{ACTION_DIR}"), {f"{ACTION_DIR}/action.yml": body})
+        self.assertEqual([e for e in result.errors if "put into the command lines" in e], [])
+
+    def test_expand_variables_keeps_its_own_bound(self):
+        """The reading of the scripts a step runs (`_expand_variables`) is bounded at 200,000 characters and
+        named as not read, as before; the #372 timing test measures its cost."""
+        problems: list = []
+        run = "bash $P/x.sh " + "$P " * 300
+        self.assertEqual(checker_mod._expand_variables(run, {"P": "a" * 1000}, problems), run)
+        self.assertEqual(problems, ["its environment, put into a script, makes a text longer than the checker reads"])
 
 
 class TheEgressControlTest(unittest.TestCase):
@@ -285,7 +332,7 @@ class OBAAFGHA026ReadingTest(unittest.TestCase):
     """OBAAF-GHA-026's own put-in (`agent_flags`) stops at the same bound."""
 
     def test_substitute_stops_at_the_bound(self):
-        times = 1 + ENV_PUT_IN_EXTRA // 1000
+        times = FITS
         values = {"P": "a" * 1000}
         self.assertEqual(len(agent_flags._substitute("x " + "$P " * times, values)), 2 + times * 1001)
         self.assertIsNone(agent_flags._substitute("x " + "$P " * (times + 1), values))
@@ -296,7 +343,7 @@ class OBAAFGHA026ReadingTest(unittest.TestCase):
         self.assertTrue(commands)
 
     def test_put_in_cheaply_stops_at_the_bound(self):
-        times = 1 + ENV_PUT_IN_EXTRA // 1000
+        times = FITS
         scopes = [{"P": "a" * 1000}, {}, {}]
         self.assertIsNotNone(agent_flags.put_in_cheaply("x=1 " + "$P " * times, scopes))
         self.assertIsNone(agent_flags.put_in_cheaply("x=1 " + "$P " * (times + 1), scopes))
@@ -326,13 +373,50 @@ class OBAAFGHA026ReadingTest(unittest.TestCase):
             with self.subTest(job_env=bool(job_env)):
                 self.assertEqual([f for f in result.findings if f.rule == "OBAAF-GHA-026"], [])
 
+    def test_a_name_in_another_word_of_the_step_does_not_hide_the_rest(self):
+        """Found by the review: a token named `CLAUDE_CODE_OAUTH_TOKEN` in the job's `env` holds claude's name,
+        so the step was read, but as one that does not name the tool, and the script past the bound gave
+        nothing where the base reported `--dangerously-skip-permissions`."""
+        run = "a=cla; b=ude; $a$b --dangerously-skip-permissions -p review; echo " + "$P " * 200
+        job_env = ("    env:\n      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}\n"
+                   "      P: " + "a" * 1000 + "\n")
+        with TempDir() as tmp:
+            result = check(tmp, job(run, "", job_env=job_env))
+        self.assertEqual([(f.kind, f.facts.get("program")) for f in result.findings if f.rule == "OBAAF-GHA-026"],
+                         [("command-computed", "claude-code")])
+
+    def test_an_env_value_read_as_prose_past_the_bound_is_cannot_tell(self):
+        """Found by the review: an action step's `env` value that starts the program is read as possible
+        prose, and the problem of a text past the bound was dropped there."""
+        steps = ("    env:\n      P: " + "a" * 1000 + "\n      F: --dangerously-skip-permissions\n"
+                 "    steps:\n      - uses: some-org/agent-runner@" + "1" * 40 + "\n        env:\n"
+                 "          AGENT_CMD: 'claude \"$F\" -p x " + '"$P" ' * 200 + "'\n")
+        text = ("on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-latest\n    permissions: {contents: read}\n"
+                + steps)
+        with TempDir() as tmp:
+            result = check(tmp, text)
+        self.assertEqual([f.kind for f in result.findings if f.rule == "OBAAF-GHA-026"], ["command-computed"])
+        with TempDir() as tmp:
+            within = check(tmp, text.replace('"$P" ' * 200, '"$P" '))
+        self.assertEqual([f.kind for f in within.findings if f.rule == "OBAAF-GHA-026"], ["command-option"])
+
+    def test_bash_s_own_quoting_names_no_tool(self):
+        """Found by the review: `IFS=$'\\n'` made every tool "cannot tell" on a step that names none."""
+        run = "IFS=$'\\n'; echo " + "$P " * 200
+        with TempDir() as tmp:
+            result = check(tmp, job(run, "", job_env="    env:\n      P: " + "a" * 1000 + "\n"))
+        self.assertEqual([f for f in result.findings if f.rule == "OBAAF-GHA-026"], [])
+
     def test_names_when_put_in_is_the_reading_it_stands_for(self):
         """On 3,000 generated scripts within the bound, `names_when_put_in` answers as `appears` does on the
-        text `put_in_cheaply` makes, except where bash's `$'...'` could be made, where it answers yes."""
+        text `put_in_cheaply` makes, except where a value it puts in has a `$`, `'` or backslash, where it
+        answers yes. Escapes of bash's `$'...'` that read into a value (`$'\\x6` before `3laude`) are made."""
         rng = random.Random(2161)
-        words = ["$a", "${b}", "$c", "cla", "ude", "CL", "aUDE", "'", '"', "\\", "$'", "x=1", "a=cla", "b=ude",
-                 "c=\"de\"", "c='$'", "echo", ";", "claude", "@anthropic-ai/claude-code", "-p", "q" * 70, ""]
-        env_values = ["cla", "ude", "Claude", "x" * 80, "c" * 61 + "la", "ude" + "u" * 70, "1", "a b", ""]
+        words = ["$a", "${b}", "$c", "$", "cla", "ude", "CL", "aUDE", "'", '"', "\\", "$'", "$'\\x6", "$'\\14",
+                 "$'\\U0000006", "x=1", "a=cla", "b=ude", "c=\"de\"", "c='$'", "echo", ";", "claude",
+                 "@anthropic-ai/claude-code", "-p", "q" * 70, ""]
+        env_values = ["cla", "ude", "Claude", "x" * 80, "c" * 61 + "la", "ude" + "u" * 70, "1", "a b", "",
+                      "3laude", "3" + "z" * 70 + "cla", "63" + "laude" * 20]
         programs, packages = ["claude"], ["@anthropic-ai/claude-code"]
         for n in range(3000):
             text = "".join(rng.choice(words) + rng.choice(["", " "]) for _ in range(rng.randint(1, 14)))
@@ -342,7 +426,7 @@ class OBAAFGHA026ReadingTest(unittest.TestCase):
             got = agent_flags.names_when_put_in(text, scopes, programs, packages)
             values = agent_flags._cheap_values(text, scopes)
             used = [values[m.group(1)] for m in agent_flags._CHEAP_NAME_RE.finditer(text) if m.group(1) in values]
-            wide = "$'" in text or any(ch in v for v in used for ch in "$'\\")
+            wide = any(ch in v for v in used for ch in "$'\\")
             with self.subTest(n=n, text=text, scopes=scopes):
                 if wide:
                     self.assertTrue(got)

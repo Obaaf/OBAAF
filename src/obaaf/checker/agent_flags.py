@@ -47,8 +47,7 @@ import json
 import re
 from dataclasses import dataclass, field
 
-from obaaf.checker.workflow import (ENV_PUT_IN_EXTRA, _SHELLS, _command_positions, _sub_expressions,
-                                    command_segments)
+from obaaf.checker.workflow import PutInBudget, _SHELLS, _command_positions, _sub_expressions, command_segments
 
 _EXPR = "\x02"           # a `${{ }}` expression is held as \x02<n>\x02 while a script is read
 _HOLE = "\x03"           # an expansion whose value is not known is marked \x03...\x03 in a word's text
@@ -670,13 +669,12 @@ class _Lexer:
 def _substitute(text: str, variables: dict) -> str | None:
     """The script with each `$NAME` and `${NAME}` whose value is known put in, outside single quotes (a plain
     value has no quote, expansion or backslash, so bash would read the result as it reads the variable:
-    split into words outside double quotes, one word inside them). None when the values put in, counted
-    each time one is put in, come to more than every value counted once and `ENV_PUT_IN_EXTRA` characters
-    more (flagship slice 2d.16): before, `claude -p $P $P ...` with 16,000 `$P` and a 16,000-character `P`
-    (48 KB of YAML) was read as 256,000,000 characters."""
+    split into words outside double quotes, one word inside them). None when a `PutInBudget` runs out
+    (flagship slice 2d.16): before, `claude -p $P $P ...` with 16,000 `$P` and a 16,000-character `P`
+    (64 KB of YAML) was read as 256,000,000 characters."""
     if not variables or "$" not in text:
         return text
-    room = sum(len(value) for value in variables.values()) + ENV_PUT_IN_EXTRA
+    budget = PutInBudget()
     out, i, n, quote = [], 0, len(text), ""
     while i < n:
         ch = text[i]
@@ -707,8 +705,7 @@ def _substitute(text: str, variables: dict) -> str | None:
             if m:
                 name = m.group(1) or m.group(2)
                 if name in variables:
-                    room -= len(variables[name])
-                    if room < 0:
+                    if not budget.take(variables[name]):
                         return None
                     out.append(variables[name])
                     i = m.end()
@@ -725,10 +722,9 @@ PUT_IN_UNREAD = "its variables, put in, make a text longer than the checker read
 def _lex(text: str, variables: dict) -> tuple[list, str]:
     put = _substitute(text, variables)
     if put is None:
-        # Read as written, with nothing put in, and "cannot tell" where the step names the tool.
+        # Read as written, with nothing put in; `_read_text` makes every warned option "cannot tell".
         lexer = _Lexer(text, {})
-        commands = lexer.commands()
-        return commands, lexer.problem or PUT_IN_UNREAD
+        return lexer.commands(), PUT_IN_UNREAD
     lexer = _Lexer(put, variables)
     commands = lexer.commands()
     return commands, lexer.problem
@@ -837,7 +833,9 @@ def _read_text(text: str, ctx: _Context) -> None:
         ctx.cannot_tell("nesting deeper than the checker reads: " + _fact_text(text))
         return
     commands, problem = _lex(text, ctx.variables)
-    if problem and not ctx.prose:
+    if problem == PUT_IN_UNREAD:
+        _put_in_unread(text, ctx)
+    elif problem and not ctx.prose:
         ctx.cannot_tell(f"{problem}: " + _fact_text(text))
     case_depth, pattern_next = 0, False
     for command in commands:
@@ -862,6 +860,15 @@ def _read_text(text: str, ctx: _Context) -> None:
         for w in command.words:
             for inner in w.inner:
                 _read_nested(inner, ctx)
+
+
+def _put_in_unread(text: str, ctx: _Context) -> None:
+    """Every warned option is "cannot tell" where the script's variables could not be put in (flagship slice
+    2d.16), whether or not the step names the tool and in prose too: the values left out may name it or hold
+    the option. A script is read only where the tool's name is somewhere in the step, or where the values
+    may make it (`names_when_put_in`)."""
+    for flag in ctx.flags:
+        ctx.reading.cannot_tell(flag, f"{PUT_IN_UNREAD}: " + _fact_text(text))
 
 
 def _fact_text(text: str) -> str:
@@ -1186,9 +1193,11 @@ def _start(words: list, bases: list, i: int, ctx: _Context, command: Command, ru
         if rest:
             target = rest[0]
             if target.inner and target.text.startswith("<("):
-                inner_commands, _p = _lex(target.inner[0], ctx.variables)
+                inner_commands, inner_problem = _lex(target.inner[0], ctx.variables)
                 literal = _literal_output(inner_commands[-1]) if len(inner_commands) == 1 else None
-                if literal is None:
+                if inner_problem == PUT_IN_UNREAD:
+                    _put_in_unread(target.inner[0], ctx)
+                elif literal is None:
                     ctx.cannot_tell(target.shown)
                 else:
                     _read_nested(literal, ctx)
@@ -1681,14 +1690,13 @@ def put_in_cheaply(text: str, scopes: list) -> str | None:
     values = _cheap_values(text, scopes)
     if not values:
         return text
-    room = [sum(len(value) for value in values.values()) + ENV_PUT_IN_EXTRA]
+    budget = PutInBudget()
 
     def put(match):
         value = values.get(match.group(1))
         if value is None:
             return match.group(0)
-        room[0] -= len(value)
-        if room[0] < 0:
+        if not budget.take(value):
             raise OverflowError
         return value
 
@@ -1701,38 +1709,41 @@ def put_in_cheaply(text: str, scopes: list) -> str | None:
 def names_when_put_in(text: str, scopes: list, programs: list, packages: list) -> bool:
     """`appears(put_in_cheaply(text, scopes), programs, packages)`, decided without making the text, for
     when it is longer than the checker reads (flagship slice 2d.16). `appears` takes quotes and
-    backslashes out and folds case, one character at a time, so each piece of the text and each value can
-    be read on its own: a name is in a value, or it is in what is left when each value longer than twice
-    the longest name is cut to its first and last such stretch, joined by a character no name has. Where
-    bash's `$'...'` could be made (the text has `$'`, or a value has `$`, `'` or a backslash), the answer
-    is yes: what it decodes to is not worked out here. Only the values the text puts in are read."""
+    backslashes out and folds case, one character at a time, and decodes bash's `$'...'`, whose quotes and
+    escapes begin in the script's own text when no value it puts in has a `$`, `'` or backslash. So each
+    piece of the text and each value can be read on its own: a name is in a value, or it is in the text
+    made with each value longer than twice `width` cut to its first and last `width` characters, joined by a
+    character no name has (`width` is the longest name and 16 more, more than the eight characters an escape
+    such as `\\U0001F600` reads after its backslash, so a name that reaches the part cut out is in the value
+    as written). Where a value it puts in has a `$`, `'` or backslash,
+    the answer is yes: what bash's `$'...'` then decodes to is not worked out here. Only the values the text
+    puts in are read."""
     names = [n.casefold() for n in programs + packages if n]
     if not names:
         return False
     values = _cheap_values(text, scopes)
     found = [m for m in _CHEAP_NAME_RE.finditer(text) if m.group(1) in values]
     used = {m.group(1): values[m.group(1)] for m in found}
-    if "$'" in text or any(ch in value for value in used.values() for ch in "$'\\"):
+    if any(ch in value for value in used.values() for ch in "$'\\"):
         return True
-    width = max(len(n) for n in names)
+    width = max(len(n) for n in names) + 16
 
     def folded(piece: str) -> str:
         return re.sub(r"[\"'\\]", "", piece).casefold()
 
     short: dict = {}
     for name, value in used.items():
-        whole = folded(value)
-        if any(n in whole for n in names):
+        if any(n in folded(value) for n in names):
             return True
-        short[name] = whole if len(whole) <= 2 * width else whole[:width] + "\x00" + whole[-width:]
+        short[name] = value if len(value) <= 2 * width else value[:width] + "\x00" + value[-width:]
     pieces, at = [], 0
     for m in found:
-        pieces.append(folded(text[at:m.start()]))
+        pieces.append(text[at:m.start()])
         pieces.append(short[m.group(1)])
         at = m.end()
-    pieces.append(folded(text[at:]))
+    pieces.append(text[at:])
     joined = "".join(pieces)
-    return any(n in joined for n in names)
+    return appears(joined, programs, packages)
 
 
 def appears(text: str, programs: list, packages: list) -> bool:

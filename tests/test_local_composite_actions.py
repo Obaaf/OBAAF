@@ -456,10 +456,11 @@ class TheReviewersSecondPassTest(unittest.TestCase):
         #372). Uncapped, 4,000 `$P` with a 4,000-character `P` is 16,000,000 characters, and either reading
         alone took 6.5 s (`_expand_variables`) or 12 s (`env_put_in`) on the session that wrote this, against
         0.23 s with both capped. Before 2d.16 the second had no cap, so this test ran at 2,000 by 2,000
-        and took 3.0 to 3.5 s on slower machines, its time spent in a reading it did not name."""
+        and took 3.0 to 3.5 s on slower machines, its time spent in a reading it did not name. Since 2d.16
+        the second's bound is an error (`_expand_variables`' is a note, which the error replaces here)."""
         body = composite("    - run: echo " + "$P " * 4000 + "\n      shell: bash\n      env:\n        P: " + "a" * 4000 + "\n")
         result = self.timed({f"{ACTION_DIR}/action.yml": body})
-        self.assertTrue(any("longer than the checker reads" in n for n in result.notes), result.notes)
+        self.assertTrue(any("longer than the checker reads" in e for e in result.errors), result.errors)
 
     def test_deep_parentheses_are_quick(self):
         body = composite("    - run: ${{ " + "(" * 6000 + "inputs.a" + ")" * 6000 + " }} -p x\n      shell: bash\n")
