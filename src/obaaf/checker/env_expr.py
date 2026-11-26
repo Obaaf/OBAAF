@@ -1,0 +1,811 @@
+"""Working out the `${{ }}` expressions in a step's command lines that read `env` (flagship slice 2d.19, #382).
+
+GitHub works out every `${{ }}` in a step's `run` (and in the inputs it hands an action) before the shell starts,
+with the `env` context: the workflow's, the job's and the step's own `env`, the nearest winning. So
+`run: ${{ env.AGENT }} -p review` with `AGENT: claude` in the job's `env` runs `claude`. The lanes read a step's
+command lines for an agent (`Step.agent_text`); before this slice they read such an expression as written, so the
+job was in no agent lane and no agent rule applied.
+
+`put_in(text, scopes, case)` gives the text with each expression that reads `env` worked out, read the widest way:
+
+- **Only `env` at the head of a reference counts** (`env.X`, `ENV.X`, `env['X']`, `(env).X`, `env[...]`);
+  `matrix.env`, `inputs.env` and the string `'env'` do not. An expression that does not read `env` is left as
+  written, as before.
+- **Letter case follows the runner** (#387, the lead's decision on F-405): on a known GitHub-hosted Linux or macOS
+  runner a name is looked up as written (`exact`); on a known GitHub-hosted Windows runner without regard to case,
+  the step's value over the job's over the workflow's (`folded`); anywhere else (`both`) each reading is kept where
+  the two differ.
+- **A reference not pinned to one name gives every value**: `env[matrix.key]`, the `env` object made into text
+  (`toJSON(env)`, `format('{0}', env)`, `env.*`) give each value `env` holds, one reading each, as the local-action
+  reader gives every input for `inputs[*]`. `join` over the whole `env`, a function the checker does not know
+  given `env`, or a form it does not read make the step an error of its file (`Unread`).
+- **Each expression is read on its own**; readings are made line by line, never multiplied across a step: a line
+  (with the lines a backslash continues or an expression spans) holding several expressions with several values
+  each is read in every combination, at most `LINE_READINGS` of them (`SINGLE_READINGS` where only one expression
+  there has several values); past that the step is an error of its file.
+- A value the checker does not know (another context: `matrix`, `inputs`, `github`, a step's output) is left as
+  the expression is written; where it is one operand of `||`, `&&`, `format()` or `join()`, the other readings are
+  made too, with it as an empty text where it is a piece of the text.
+
+Nothing here is checked against a run on GitHub beyond what #387 asserts (letter case in the `env` context on
+GitHub-hosted runners). What an earlier step writes to `GITHUB_ENV` is not read; a scope written as one expression
+(`env: ${{ fromJSON(...) }}`) gives values the checker does not know.
+"""
+
+from __future__ import annotations
+
+import itertools
+import json
+import math
+import re
+
+from obaaf.checker import expr as expr_mod
+
+# Readings of one line where two or more of its expressions give several values (their combinations), and where
+# only one does (its values: `echo "${{ toJSON(env) }}"` with a large `env` is ordinary).
+LINE_READINGS = 256
+SINGLE_READINGS = 4096
+# Values one expression may give; more is an error of the file.
+EXPRESSION_VALUES = 4096
+# Characters the readings of a step's lines may add to the lines as written (the copies of lines, not the values
+# put in, which the workflow's ledger counts).
+COPIES_TEXT = 2_000_000
+MAX_DEPTH = 64
+
+# A quick test: a text that cannot hold an expression reading `env` is not read at all.
+_MAY_READ_ENV = re.compile(r"\benv\b", re.I)
+
+
+class Unread(Exception):
+    """An expression reading `env` that the checker does not work out; `str()` says which and why."""
+
+
+class _Unknown:
+    """A value of another context, which the checker does not know: put in as the expression is written."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNKNOWN"
+
+
+UNKNOWN = _Unknown()
+
+
+class _EnvObject:
+    """The `env` context itself, not yet indexed."""
+
+    __slots__ = ()
+
+
+ENV_OBJECT = _EnvObject()
+
+
+class _AllValues:
+    """`env.*`: every value `env` holds, as an array."""
+
+    __slots__ = ()
+
+
+ALL_VALUES = _AllValues()
+
+
+def env_case(job) -> str:
+    """How the runner of `job` compares the names of the `env` context (#387, F-405): `exact` on a known
+    GitHub-hosted Linux or macOS runner, `folded` on a known GitHub-hosted Windows runner, `both` where the runner
+    is not resolved, not GitHub-hosted, or may be either."""
+    if job is None:
+        return "both"
+    try:
+        if job.self_hosted:
+            return "both"
+        sets = job.runner_label_sets()
+    except Exception:       # a `runs-on` the reader refuses: the runner is not known
+        return "both"
+    if not sets:
+        return "both"
+    from obaaf.checker.workflow import is_hosted_label
+    kinds = set()
+    for labels in sets:
+        low = {str(label).lower() for label in labels}
+        if len(low) != 1:
+            return "both"
+        label = next(iter(low))
+        if not is_hosted_label(label):
+            return "both"
+        kinds.add("folded" if label.startswith("windows-") else "exact")
+    return kinds.pop() if len(kinds) == 1 else "both"
+
+
+class Env:
+    """The `env` context a step's expressions see, by letter-case mode: `exact` looks a name up as written,
+    `folded` without regard to case (the nearest scope's value), `both` gives each where they differ. Each table
+    is built once per reading of a step (the review of 2d.18 found it rebuilt for every reference)."""
+
+    def __init__(self, scopes: list, case: str) -> None:
+        # `scopes`: the `env` mappings, outermost first (the workflow's, the job's, the step's). A scope that is
+        # not a mapping (one expression) makes every name possibly something the checker does not know.
+        self.case = case
+        self.unknown_scope = any(scope is not None and not isinstance(scope, dict) for scope in scopes)
+        exact: dict = {}
+        folded: dict = {}
+        for scope in scopes:
+            if not isinstance(scope, dict):
+                continue
+            for name, value in scope.items():
+                if not isinstance(name, str):
+                    continue
+                text = _scalar_text(value)
+                if text is None:
+                    # Not text (a mapping, a list): GitHub refuses it, or gives what the checker does not know.
+                    exact.pop(name, None)
+                    folded.pop(name.upper(), None)
+                    continue
+                exact[name] = text
+                folded[name.upper()] = text
+        self.exact, self.folded = exact, folded
+
+    def lookup(self, name: str) -> list:
+        """The values `env.NAME` can give (None for a name `env` does not hold)."""
+        out = []
+        if self.case in ("exact", "both"):
+            out.append(self.exact.get(name))
+        if self.case in ("folded", "both"):
+            out.append(self.folded.get(name.upper()))
+        if self.unknown_scope:
+            out.append(UNKNOWN)
+        return _unique(out)
+
+    def every(self) -> list:
+        """Every value `env` can give, and nothing (a name it does not hold)."""
+        values: list = []
+        if self.case in ("exact", "both"):
+            values.extend(self.exact.values())
+        if self.case in ("folded", "both"):
+            values.extend(self.folded.values())
+        values.append(None)
+        if self.unknown_scope:
+            values.append(UNKNOWN)
+        return _unique(values)
+
+    def as_dict(self) -> list:
+        """The object(s) `toJSON(env)` serialises."""
+        out = []
+        if self.case in ("exact", "both"):
+            out.append(dict(self.exact))
+        if self.case in ("folded", "both") and (self.case == "folded" or set(self.folded) != {
+                k.upper() for k in self.exact}):
+            out.append(dict(self.folded))
+        return out
+
+
+def _scalar_text(value) -> str | None:
+    """A YAML value as the text GitHub's `env` holds, None for a mapping or a list."""
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return _number_text(value)
+    return None
+
+
+def _number_text(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if math.isnan(value):
+        return "NaN"
+    if math.isinf(value):
+        return "Infinity" if value > 0 else "-Infinity"
+    if value == int(value) and abs(value) < 1e15:
+        return str(int(value))
+    return repr(value)
+
+
+def _key(value):
+    if value is UNKNOWN or value is ENV_OBJECT or value is ALL_VALUES:
+        return ("special", id(value))
+    if isinstance(value, (dict, list)):
+        try:
+            return ("json", json.dumps(value, sort_keys=True))
+        except (TypeError, ValueError):
+            return ("id", id(value))
+    return (type(value).__name__, value)
+
+
+def _unique(values: list) -> list:
+    seen: dict = {}
+    for value in values:
+        seen.setdefault(_key(value), value)
+    out = list(seen.values())
+    if len(out) > EXPRESSION_VALUES:
+        raise Unread(f"can give more than {EXPRESSION_VALUES:,} values")
+    return out
+
+
+def _truthy(value):
+    """True, False, or None where the checker cannot tell."""
+    if value is UNKNOWN:
+        return None
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return not (value == 0 or (isinstance(value, float) and math.isnan(value)))
+    if isinstance(value, str):
+        return value != ""
+    return True     # an object or an array
+
+
+def text_of(value, env: Env) -> list:
+    """The texts a value gives where GitHub puts it into a string (`${{ }}` in `run`, an argument of `format`).
+    An object made into text gives every value `env` holds (the checker reads it the widest way)."""
+    if value is UNKNOWN:
+        return [UNKNOWN]
+    if value is None:
+        return [""]
+    if isinstance(value, bool):
+        return ["true" if value else "false"]
+    if isinstance(value, (int, float)):
+        return [_number_text(value)]
+    if isinstance(value, str):
+        return [value]
+    if value is ENV_OBJECT or value is ALL_VALUES:
+        return _unique([text_of(v, env)[0] for v in env.every()])
+    if isinstance(value, (dict, list)):
+        # An object or array from `fromJSON`: its JSON and each text in it.
+        leaves: list = []
+        _leaves(value, leaves, 0)
+        return _unique([json.dumps(value, ensure_ascii=False), *leaves])
+    return [UNKNOWN]
+
+
+def _leaves(value, out: list, depth: int) -> None:
+    if depth > MAX_DEPTH or len(out) > EXPRESSION_VALUES:
+        raise Unread("holds JSON nested too deeply to read")
+    if isinstance(value, dict):
+        for item in value.values():
+            _leaves(item, out, depth + 1)
+    elif isinstance(value, list):
+        for item in value:
+            _leaves(item, out, depth + 1)
+    else:
+        out.append(text_of(value, None)[0] if not isinstance(value, (dict, list)) else "")
+
+
+# --------------------------------------------------------------------------------- the reader
+_COMPARE = ("==", "!=", "<=", ">=", "<", ">")
+_KNOWN_FUNCTIONS = frozenset({"format", "join", "tojson", "fromjson", "contains", "startswith", "endswith",
+                              "hashfiles", "success", "always", "failure", "cancelled"})
+
+
+class _Reader:
+    """A recursive-descent reader of one expression's tokens (`expr.tokens`), giving the values it can have."""
+
+    def __init__(self, toks: list, env: Env) -> None:
+        self.toks, self.env, self.pos = toks, env, 0
+
+    def peek(self, k: int = 0):
+        i = self.pos + k
+        return self.toks[i] if i < len(self.toks) else None
+
+    def op(self, text: str) -> bool:
+        """Whether the operator `text` (one or two characters) is next; it is taken if so."""
+        for k, ch in enumerate(text):
+            if self.peek(k) != ("op", ch):
+                return False
+        if text in ("<", ">", "!") and self.peek(1) == ("op", "="):
+            return False
+        if text == "=" or text == "|" or text == "&":
+            return False
+        self.pos += len(text)
+        return True
+
+    def read(self) -> list:
+        values = self.or_(0)
+        if self.pos != len(self.toks):
+            raise Unread("is written in a form the checker does not read")
+        return values
+
+    def or_(self, depth: int) -> list:
+        left = self.and_(depth)
+        while self.op("||"):
+            right = self.and_(depth)
+            out: list = []
+            for value in left:
+                truth = _truthy(value)
+                if truth is None:
+                    out.append(value)
+                    out.extend(right)
+                elif truth:
+                    out.append(value)
+                else:
+                    out.extend(right)
+            left = _unique(out)
+        return left
+
+    def and_(self, depth: int) -> list:
+        left = self.compare(depth)
+        while self.op("&&"):
+            right = self.compare(depth)
+            out: list = []
+            for value in left:
+                truth = _truthy(value)
+                if truth is None:
+                    out.append(value)
+                    out.extend(right)
+                elif truth:
+                    out.extend(right)
+                else:
+                    out.append(value)
+            left = _unique(out)
+        return left
+
+    def compare(self, depth: int) -> list:
+        left = self.unary(depth)
+        while True:
+            found = next((op for op in _COMPARE if self.op(op)), None)
+            if found is None:
+                return left
+            right = self.unary(depth)
+            left = _compared(found, left, right)
+
+    def unary(self, depth: int) -> list:
+        if depth > MAX_DEPTH:
+            raise Unread("is nested too deeply to read")
+        if self.op("!"):
+            values = self.unary(depth + 1)
+            out = []
+            for value in values:
+                truth = _truthy(value)
+                out.extend([True, False] if truth is None else [not truth])
+            return _unique(out)
+        return self.postfix(depth)
+
+    def postfix(self, depth: int) -> list:
+        values = self.primary(depth)
+        while True:
+            if self.peek() == ("op", ".") and self.peek(1) is not None and self.peek(1)[0] == "id":
+                name = self.peek(1)[1]
+                self.pos += 2
+                values = _unique([v for value in values for v in self.member(value, [name])])
+            elif self.peek() == ("op", ".") and self.peek(1) == ("op", "*"):
+                self.pos += 2
+                values = _unique([ALL_VALUES if value is ENV_OBJECT else UNKNOWN if value is UNKNOWN
+                                  else self._star(value) for value in values])
+            elif self.op("["):
+                keys = self.or_(depth + 1)
+                if not self.op("]"):
+                    raise Unread("has an index the checker does not read")
+                values = _unique([v for value in values for v in self.member(value, keys)])
+            else:
+                return values
+
+    def _star(self, value):
+        if isinstance(value, dict):
+            return list(value.values())
+        if isinstance(value, list):
+            return value
+        return None
+
+    def member(self, value, keys: list) -> list:
+        """What `value.KEY` or `value[KEY]` gives for each key the index can be."""
+        if value is UNKNOWN:
+            return [UNKNOWN]
+        if value is ENV_OBJECT:
+            out: list = []
+            for key in keys:
+                if isinstance(key, str):
+                    out.extend(self.env.lookup(key))
+                elif isinstance(key, (int, float)):
+                    out.extend(self.env.lookup(_number_text(key)))
+                elif key is None:
+                    out.append(None)        # `env[null]`, as `env[env.UNSET]`: no name, no value
+                else:
+                    # A key the checker does not know (another context, an object): any name.
+                    out.extend(self.env.every())
+            return out
+        if value is ALL_VALUES:
+            # `env.*[0]`: some value, in an order the checker does not know.
+            return self.env.every()
+        if isinstance(value, dict):
+            out = []
+            for key in keys:
+                if isinstance(key, str):
+                    found = [v for k, v in value.items() if isinstance(k, str) and k.lower() == key.lower()]
+                    out.extend(found or [None])
+                else:
+                    out.extend(list(value.values()) + [None])
+            return out
+        if isinstance(value, list):
+            out = []
+            for key in keys:
+                if isinstance(key, (int, float)) and not isinstance(key, bool) and float(key).is_integer() \
+                        and 0 <= int(key) < len(value):
+                    out.append(value[int(key)])
+                elif isinstance(key, (int, float)) and not isinstance(key, bool):
+                    out.append(None)
+                else:
+                    out.extend(list(value) + [None])
+            return out
+        return [None]       # a field of text, a number, true or null is null
+
+    def primary(self, depth: int) -> list:
+        tok = self.peek()
+        if tok is None:
+            raise Unread("ends where the checker expects a value")
+        kind, text = tok
+        if kind == "str":
+            self.pos += 1
+            return [text]
+        if kind == "num":
+            self.pos += 1
+            return [_number(text)]
+        if kind == "op" and text == "(":
+            self.pos += 1
+            values = self.or_(depth + 1)
+            if not self.op(")"):
+                raise Unread("has a bracket the checker does not see closed")
+            return values
+        if kind == "id":
+            low = text.lower()
+            if self.peek(1) == ("op", "("):
+                self.pos += 2
+                start = self.pos
+                args: list = []
+                if not self.op(")"):
+                    while True:
+                        args.append(self.or_(depth + 1))
+                        if self.op(")"):
+                            break
+                        if not self.op(","):
+                            raise Unread("has a function call the checker does not read")
+                return self.call(low, args, head_reads_env(self.toks[start:self.pos]))
+            self.pos += 1
+            if low == "env":
+                return [ENV_OBJECT]
+            if low == "true":
+                return [True]
+            if low == "false":
+                return [False]
+            if low == "null":
+                return [None]
+            if low in ("nan",):
+                return [float("nan")]
+            if low in ("infinity",):
+                return [float("inf")]
+            return [UNKNOWN]        # another context: github, inputs, matrix, steps, needs, vars, secrets, ...
+        raise Unread("is written in a form the checker does not read")
+
+    def call(self, name: str, args: list, reads_env: bool = False) -> list:
+        env = self.env
+        if name not in _KNOWN_FUNCTIONS:
+            # GitHub's functions are a fixed list; one the checker does not know may make any text of its
+            # arguments, so where they read `env` the step is an error of its file.
+            if reads_env:
+                raise Unread(f"passes what it reads from `env` to a function the checker does not know ({name})")
+            return [UNKNOWN]
+        if name in ("success", "always", "failure", "cancelled"):
+            return [True, False]
+        if name == "hashfiles":
+            return [UNKNOWN]
+        if name in ("contains", "startswith", "endswith"):
+            return [True, False]
+        if name == "tojson":
+            if len(args) != 1:
+                return [UNKNOWN]
+            out: list = []
+            for value in args[0]:
+                if value is UNKNOWN:
+                    out.append(UNKNOWN)
+                elif value is ENV_OBJECT:
+                    for table in env.as_dict():
+                        out.append(json.dumps(table, ensure_ascii=False, indent=2))
+                    out.extend(text_of(ENV_OBJECT, env))
+                elif value is ALL_VALUES:
+                    out.extend(text_of(ALL_VALUES, env))
+                else:
+                    try:
+                        out.append(json.dumps(value, ensure_ascii=False, indent=2))
+                    except (TypeError, ValueError):
+                        out.append(UNKNOWN)
+            return _unique(out)
+        if name == "fromjson":
+            if len(args) != 1:
+                return [UNKNOWN]
+            out = []
+            for value in args[0]:
+                if isinstance(value, str):
+                    try:
+                        out.append(json.loads(value))
+                    except (ValueError, RecursionError):
+                        out.append(None)        # GitHub fails the step: nothing runs
+                elif value is ENV_OBJECT or value is ALL_VALUES:
+                    raise Unread("passes the whole `env` to fromJSON")
+                else:
+                    out.append(UNKNOWN if value is UNKNOWN else value)
+            return _unique(out)
+        if name == "join":
+            if not args:
+                return [UNKNOWN]
+            seps = [s for v in (args[1] if len(args) > 1 else [","]) for s in text_of(v, env)]
+            out = []
+            for value in args[0]:
+                if value is ENV_OBJECT or value is ALL_VALUES:
+                    raise Unread("joins the whole `env`, in an order the checker does not know")
+                if isinstance(value, list):
+                    pieces = []
+                    for item in value:
+                        texts = text_of(item, env)
+                        if len(texts) != 1:
+                            raise Unread("joins values the checker reads more than one way")
+                        pieces.append(texts[0])
+                    for sep in seps:
+                        if UNKNOWN in pieces or sep is UNKNOWN:
+                            out.append(UNKNOWN)
+                        out.append("".join("" if p is UNKNOWN else p for p in
+                                           _interleave(pieces, "" if sep is UNKNOWN else sep)))
+                elif value is UNKNOWN:
+                    out.extend([UNKNOWN, ""])
+                else:
+                    out.extend(text_of(value, env))     # join of one value is that value as text
+            return _unique(out)
+        if name == "format":
+            if not args:
+                return [UNKNOWN]
+            pieces = [[t for v in values for t in text_of(v, env)] for values in args]
+            count = 1
+            for p in pieces:
+                count *= len(p)
+                if count > EXPRESSION_VALUES:
+                    raise Unread(f"can give more than {EXPRESSION_VALUES:,} values")
+            out = []
+            for choice in _product(pieces):
+                if any(p is UNKNOWN for p in choice):
+                    out.append(UNKNOWN)
+                text = _format("" if choice[0] is UNKNOWN else choice[0],
+                               ["" if p is UNKNOWN else p for p in choice[1:]])
+                if text is not None:
+                    out.append(text)
+            return _unique(out or [None])
+        return [UNKNOWN]
+
+
+def _interleave(pieces: list, sep: str) -> list:
+    out: list = []
+    for n, piece in enumerate(pieces):
+        if n:
+            out.append(sep)
+        out.append(piece)
+    return out
+
+
+def _product(lists: list):
+    return itertools.product(*lists)
+
+
+_FORMAT_RE = re.compile(r"\{\{|\}\}|\{(\d+)\}")
+
+
+def _format(template: str, args: list) -> str | None:
+    """GitHub's `format`: `{N}` is argument N, `{{` and `}}` are braces. None where GitHub fails the step (an
+    index with no argument)."""
+    out: list = []
+    pos = 0
+    for match in _FORMAT_RE.finditer(template):
+        out.append(template[pos:match.start()])
+        token = match.group(0)
+        if token == "{{":
+            out.append("{")
+        elif token == "}}":
+            out.append("}")
+        else:
+            n = int(match.group(1))
+            if n >= len(args):
+                return None
+            out.append(args[n])
+        pos = match.end()
+    out.append(template[pos:])
+    return "".join(out)
+
+
+def _number(text: str):
+    try:
+        if text.lower().startswith("0x"):
+            return int(text, 16)
+        if text.lower().startswith("0o"):
+            return int(text[2:], 8)
+        value = float(text)
+        return int(value) if value.is_integer() and "." not in text and "e" not in text.lower() else value
+    except ValueError:
+        return UNKNOWN
+
+
+def _reads_env(value) -> bool:
+    return value is ENV_OBJECT or value is ALL_VALUES
+
+
+def _compared(op: str, left: list, right: list) -> list:
+    """A comparison gives true or false; where both sides are one known text or number it is worked out, as
+    GitHub compares them (texts without regard to case), and otherwise it may be either."""
+    if len(left) == 1 and len(right) == 1:
+        a, b = left[0], right[0]
+        if isinstance(a, str) and isinstance(b, str) and op in ("==", "!="):
+            same = a.casefold() == b.casefold()
+            return [same if op == "==" else not same]
+        if (isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool)
+                and not isinstance(b, bool)):
+            if any(isinstance(x, float) and math.isnan(x) for x in (a, b)):
+                return [op == "!="]
+            return [{"==": a == b, "!=": a != b, "<": a < b, "<=": a <= b, ">": a > b, ">=": a >= b}[op]]
+    return [True, False]
+
+
+# --------------------------------------------------------------------------------- the text
+def head_reads_env(toks: list) -> bool:
+    """Whether an expression's tokens hold `env` at the head of a reference (not `matrix.env`, not the text
+    'env', not a function's name)."""
+    for i, (kind, text) in enumerate(toks):
+        if kind == "id" and text.lower() == "env":
+            if i and toks[i - 1] == ("op", "."):
+                continue
+            return True
+    return False
+
+
+def spans(text: str) -> list:
+    """(start, end, body) of each `${{ }}` in `text`, ended where GitHub's runner ends it: at the first `}}` that
+    is not inside a single-quoted string (`expr.bodies`). An expression with no end is left out (GitHub refuses
+    the workflow). Raises `expr.TooComplex` as `expr.bodies` does."""
+    out: list = []
+    budget = 8 * len(text) + 65536
+    start = text.find(expr_mod.OPEN)
+    quote_or_close = re.compile(r"'|\}\}")
+    while start != -1:
+        begin = start + len(expr_mod.OPEN)
+        pos, in_string, end = begin, False, -1
+        while True:
+            match = quote_or_close.search(text, pos)
+            budget -= (match.end() if match else len(text)) - pos
+            if match is None:
+                break
+            if match.group(0) == "'":
+                in_string = not in_string
+                pos = match.end()
+            elif in_string:
+                pos = match.start() + 1
+            else:
+                end = match.start()
+                break
+        if budget < 0:
+            raise expr_mod.TooComplex("too many unfinished ${{ expressions to read")
+        if end == -1:
+            break
+        out.append((start, end + 2, text[begin:end]))
+        start = text.find(expr_mod.OPEN, end + 2)
+    return out
+
+
+def may_read_env(text: str) -> bool:
+    return expr_mod.OPEN in text and _MAY_READ_ENV.search(text) is not None
+
+
+def put_in(text: str, env: Env) -> tuple:
+    """(text, size, readings): `text` with each expression that reads `env` worked out, line by line, the
+    characters of values put in (what the workflow's ledger counts), and the most readings made of one line. Raises `Unread` (its text says why) where the checker does
+    not work an expression out, or the readings would pass what it reads."""
+    try:
+        found = spans(text)
+    except expr_mod.TooComplex as error:
+        raise Unread(f"has {error}") from None
+    work: list = []
+    for start, end, body in found:
+        try:
+            toks = expr_mod.tokens(body)
+        except RecursionError:
+            raise Unread("is nested too deeply to read") from None
+        if not head_reads_env(toks):
+            continue
+        try:
+            values = _Reader(toks, env).read()
+        except Unread as error:
+            raise Unread(f"('{_short(text[start:end])}') {error}") from None
+        except RecursionError:
+            raise Unread(f"('{_short(text[start:end])}') is nested too deeply to read") from None
+        texts: list = []
+        for value in values:
+            texts.extend(text_of(value, env))
+        texts = _unique([text[start:end] if t is UNKNOWN else t for t in texts])
+        work.append((start, end, texts))
+    if not work:
+        return text, 0, 1
+    # Lines: a line, the lines a backslash at its end continues, and the lines an expression spans, read as one.
+    units = _units(text, [(start, end) for start, end, _texts in work])
+    out: list = []
+    size = 0
+    copies = 0
+    most = 1
+    pos = 0
+    w = 0
+    for u_start, u_end in units:
+        here = []
+        while w < len(work) and work[w][0] < u_end:
+            here.append(work[w])
+            w += 1
+        out.append(text[pos:u_start])
+        pos = u_end
+        if not here:
+            out.append(text[u_start:u_end])
+            continue
+        several = [item for item in here if len(item[2]) > 1]
+        count = 1
+        for item in several:
+            count *= len(item[2])
+        limit = SINGLE_READINGS if len(several) <= 1 else LINE_READINGS
+        if count > limit:
+            raise Unread(f"holds expressions that read `env` which together give more than {limit:,} readings of "
+                         "one line")
+        most = max(most, count)
+        readings = []
+        for choice in _product([item[2] for item in here]):
+            pieces = []
+            at = u_start
+            for (start, end, _texts), value in zip(here, choice):
+                pieces.append(text[at:start])
+                pieces.append(value)
+                size += len(value)
+                at = end
+            pieces.append(text[at:u_end])
+            readings.append("".join(pieces))
+        copies += sum(len(r) for r in readings) - (u_end - u_start)
+        if copies > COPIES_TEXT:
+            raise Unread(f"holds expressions that read `env` whose readings come to more than {COPIES_TEXT:,} "
+                         "characters")
+        out.append("\n".join(readings))
+    out.append(text[pos:])
+    return "".join(out), size, most
+
+
+def _units(text: str, spans_: list) -> list:
+    """(start, end) of each line of `text` that holds a span, joined with the lines a backslash continues and the
+    lines a span reaches into, in order; lines with no span are left out."""
+    lines: list = []
+    pos = 0
+    for line in text.split("\n"):
+        lines.append([pos, pos + len(line)])
+        pos += len(line) + 1
+    # Join a line ending in a backslash with the next.
+    merged: list = []
+    for start, end in lines:
+        if merged and text[merged[-1][0]:merged[-1][1]].endswith("\\"):
+            merged[-1][1] = end
+        else:
+            merged.append([start, end])
+    out: list = []
+    i = 0
+    for start, end in spans_:
+        while i < len(merged) and merged[i][1] < start:
+            i += 1
+        if i >= len(merged):
+            break
+        unit = [merged[i][0], merged[i][1]]
+        j = i
+        while unit[1] < end and j + 1 < len(merged):
+            j += 1
+            unit[1] = merged[j][1]
+        if out and out[-1][1] >= unit[0]:
+            out[-1][1] = max(out[-1][1], unit[1])
+        else:
+            out.append(unit)
+        i = j
+    return [tuple(u) for u in out]
+
+
+def _short(text: str) -> str:
+    one = " ".join(text.split())
+    return one if len(one) <= 60 else one[:57] + "..."

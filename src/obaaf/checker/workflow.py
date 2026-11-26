@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterator
 
 from obaaf import yamlutil
 from obaaf.catalog import load as load_catalog
+from obaaf.checker import env_expr
 from obaaf.checker import expr as expr_mod
 
 LANES = ("untrusted", "agent", "effect", "release", "trusted")
@@ -2113,6 +2114,11 @@ class Step:
     # How many readings of its command lines a step of a local action read for an agent is made of, where an
     # input's expression gives several (flagship slice 2d.18): its own bound (D-137) is that many times as wide.
     readings: int = field(default=1, repr=False, compare=False)
+    # Flagship slice 2d.19 (#382): the job the step runs in, whose runner decides how the names of the `env`
+    # context compare in its `${{ }}` expressions (`env_expr.env_case`). None for a step read on its own and for a
+    # step of a local action read for an agent (2d.4a), whose expressions that reader works out itself; then every
+    # reading is kept.
+    job: Any = field(default=None, repr=False, compare=False)
 
     @property
     def name(self) -> str:
@@ -2267,6 +2273,10 @@ class Step:
         # longer than the checker reads is not made (flagship slices 2d.16 and 2d.17): `env_put_in_unread`
         # says so. What is found in a text made before, with the same patterns, is not looked for again
         # (2d.17): a check reads an agent job's steps about six times.
+        # `${{ }}` expressions that read `env` are worked out as GitHub works them out before the shell starts
+        # (flagship slice 2d.19): their value is the script itself, so the text they make is read as the script
+        # written out would be, not only command by command as a `$NAME` value is below.
+        worked = self.env_expressions_text(own)
         made, put, _why = self._env_put_in_reading(own)
         if put is not None and put != own:
             signature = tuple((p.pattern, p.flags) for p in commands)
@@ -2281,8 +2291,17 @@ class Step:
                         break
                 made.found[signature] = tuple(here)
                 found.extend(here)
-        text = "\n".join(p for p in [own, *found] if p)
+        text = "\n".join(p for p in [own, worked if worked != own else None, *found] if p)
         return "\n".join(dict.fromkeys(v for v in _readings(text) if v))
+
+    def env_expressions_text(self, own: str | None = None) -> str | None:
+        """The command lines `agent_text` reads (`own`, by default `_command_text()`) with their `${{ }}`
+        expressions that read `env` worked out (flagship slice 2d.19, `env_expr.put_in`); the lines as written
+        when they hold none; None when the checker does not work one out (`env_put_in_why` says why)."""
+        own = self._command_text() if own is None else own
+        if not own or not env_expr.may_read_env(own):
+            return own
+        return self._env_expressions(own)[0]
 
     def env_put_in(self, own: str | None = None) -> str | None:
         """The command lines `agent_text` reads as written (`own`, by default `_command_text()`), with each
@@ -2294,6 +2313,39 @@ class Step:
         own = self._command_text() if own is None else own
         return self._env_put_in_reading(own)[1]
 
+    def _env_scopes(self) -> list:
+        """The `env` mappings the step's expressions see, outermost first: its workflow's, its job's, its own
+        (flagship slice 2d.19). A scope written as one expression is kept as written."""
+        return [holder.get("env") if isinstance(holder, dict) else None for holder in reversed(self.inherited)] + [
+            self.raw.get("env")]
+
+    def _env_expressions(self, own: str) -> tuple:
+        """(text, size, readings, why) for the `${{ }}` expressions in `own` that read `env` (flagship slice
+        2d.19): `own` with them worked out (`env_expr.put_in`), the characters of values put in, the most
+        readings of one line, and None; or (None, None, 1, why) where the checker does not work one out. Made
+        once for the same lines, runner and `env` values (by their ids), and kept on the workflow's ledger."""
+        case = env_expr.env_case(self.job)
+        scopes = self._env_scopes()
+        ids = tuple((id(scope), tuple((name, id(value)) for name, value in scope.items()) if isinstance(scope, dict)
+                     else None) for scope in scopes)
+        key = ("env-expressions", own, case, ids)
+        put_ins = self.put_ins
+        made = put_ins.lanes.made.get(key) if put_ins is not None else None
+        if made is None:
+            try:
+                text, size, readings = env_expr.put_in(own, env_expr.Env(scopes, case))
+                why = None
+            except env_expr.Unread as error:
+                text, size, readings = None, None, 1
+                why = (f"its command lines hold an expression that reads `env` which the checker does not work out "
+                       f"(one {error})")
+            # The scopes' values are kept with the reading, so that their ids, which the key holds, stay theirs.
+            kept = tuple(tuple(scope.values()) if isinstance(scope, dict) else scope for scope in scopes)
+            made = (text, size, readings, why, kept)
+            if put_ins is not None:
+                put_ins.lanes.made[key] = made
+        return made[0], made[1], made[2], made[3]
+
     def _env_put_in_reading(self, own: str) -> tuple:
         """(made, text, why) for `env_put_in`: `made` the `_MadeText` (None where nothing is put in, and then
         the text is `own`), the text or None, and why it is None. The text is made once for the same command
@@ -2303,26 +2355,36 @@ class Step:
         that YAML makes of one mapping took 72 s when the text was counted once for all of them)."""
         if not own or "$" not in own:
             return None, own, None
+        # `${{ }}` expressions that read `env` are worked out first, as GitHub works them out before the shell
+        # starts (flagship slice 2d.19; before, `run: ${{ env.AGENT }} -p x` was read as written and was in no
+        # agent lane). The `$NAME` put-in below is then made on that text.
+        base, extra, lines, expressions_why = own, 0, 1, None
+        if env_expr.may_read_env(own):
+            base, extra, lines, expressions_why = self._env_expressions(own)
+            if base is None:
+                return None, None, expressions_why
         # The `env` the step runs with: its own over its job's over its workflow's (flagship slice 2d.18; before,
         # its own alone, so `$CLAUDE -p x` with `CLAUDE` in the workflow's `env` was in no agent lane). Only the
         # names the lines use are kept, so a job's other values do not make each step's text a new one.
-        given = self.run_env
-        if not given:
-            return None, own, None
-        env = {name: given[name] for name in dict.fromkeys(m.group(1) for m in _ENV_NAME_RE.finditer(own))
-               if name in given}
-        if not env:
+        given = self.run_env if "$" in base else {}
+        env = {name: given[name] for name in dict.fromkeys(m.group(1) for m in _ENV_NAME_RE.finditer(base))
+               if name in given} if given else {}
+        if not env and base == own:
             return None, own, None
         put_ins = self.put_ins
         key = (own, tuple((name, id(value)) for name, value in env.items()))
+        if base != own:
+            key = (key, "env-expressions", base)
         made = put_ins.lanes.made.get(key) if put_ins is not None else None
         if made is None:
             # What would be put in is counted first, and the text is made only once a step's use of it is
             # settled, so a text past either bound is never made (found by the second review: 1,000 steps
-            # past the workflow's bound made and kept 800,000,000 characters).
-            budget = PutInBudget(scale=max(1, min(self.readings, 16)))
-            size = 0
-            for match in _ENV_NAME_RE.finditer(own):
+            # past the workflow's bound made and kept 800,000,000 characters). A line the expressions make
+            # several readings of holds each `$NAME` once in each, so the step's own bound is that many times as
+            # wide (2d.19), as for a local action's readings (2d.18).
+            budget = PutInBudget(scale=max(1, min(self.readings, 16), min(lines, env_expr.LINE_READINGS)))
+            size = extra
+            for match in _ENV_NAME_RE.finditer(base):
                 value = env.get(match.group(1))
                 if value is None:
                     continue
@@ -2338,7 +2400,7 @@ class Step:
         if put_ins is not None and not put_ins.lanes.settle((self.seq, key), made.size):
             return made, None, put_ins.unread
         if made.text is None:
-            made.text = _ENV_NAME_RE.sub(lambda m: env.get(m.group(1), m.group(0)), own)
+            made.text = _ENV_NAME_RE.sub(lambda m: env.get(m.group(1), m.group(0)), base) if env else base
         return made, made.text, None
 
     @property
@@ -3683,7 +3745,7 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
                     inputs_checked(sub, number)
                     job.steps.append(Step(index=len(job.steps), raw=sub, line=getattr(sub, "line", line),
                                           group=groups, background=True, put_ins=workflow.put_ins,
-                                          seq=workflow.put_ins.number(), inherited=inherited))
+                                          seq=workflow.put_ins.number(), inherited=inherited, job=job))
             continue
         inputs_checked(step_raw, number)
         if not ({"run", "uses"} & set(step_raw)) and not (CONTROL_STEP_KEYS & set(step_raw)):
@@ -3691,7 +3753,8 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
                                      "the checker knows, so it cannot check what the step does")
         background = as_text(step_raw.get("background", "")).strip().lower() not in ("", "false")
         job.steps.append(Step(index=len(job.steps), raw=step_raw, line=line, background=background,
-                              put_ins=workflow.put_ins, seq=workflow.put_ins.number(), inherited=inherited))
+                              put_ins=workflow.put_ins, seq=workflow.put_ins.number(), inherited=inherited,
+                              job=job))
 
 
 def declared_lane(value) -> str | None:
