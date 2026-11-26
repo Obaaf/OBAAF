@@ -364,9 +364,9 @@ class CostTest(unittest.TestCase):
         calls = []
         real = env_expr.plan
 
-        def counting(text_, env_):
+        def counting(text_, env_, **kw):
             calls.append(1)
-            return real(text_, env_)
+            return real(text_, env_, **kw)
         with mock.patch.object(env_expr, "plan", counting):
             problems(text)
         self.assertEqual(len(calls), 1)
@@ -377,7 +377,8 @@ class CostTest(unittest.TestCase):
         text = (f"on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    env:\n      BIG: {value}\n"
                 f"    steps:\n{steps}")
         found = problems(text)
-        self.assertTrue(any(wf.ENV_PUT_IN_WORKFLOW_UNREAD in p for p in found), found[:2])
+        self.assertTrue(any(wf.ENV_PUT_IN_WORKFLOW_UNREAD in p or wf.ENV_EXPRESSIONS_WORKFLOW_UNREAD in p
+                            for p in found), found[:2])
         # Steps before the bound are read; the first is not an error.
         self.assertFalse(any("step 'step 1'" in p for p in found))
 
@@ -444,7 +445,7 @@ class FromTheReviewTest(unittest.TestCase):
         with mock.patch.object(env_expr, "build", counting):
             found = problems(text)
         self.assertTrue(any(wf.ENV_EXPRESSIONS_WORKFLOW_UNREAD in p for p in found), found[:1])
-        self.assertLessEqual(sum(made), wf.ENV_PUT_IN_WORKFLOW + max(made))
+        self.assertLessEqual(sum(made), wf.ENV_PUT_IN_WORKFLOW + max(made, default=0))
 
     def test_letter_case_outside_ascii(self):
         # GitHub compares texts letter by letter without regard to case (.NET's ordinal comparison): `ß` is not
@@ -474,6 +475,56 @@ class FromTheReviewTest(unittest.TestCase):
 
     def test_a_negative_number(self):
         self.assertEqual(problems(flow("echo ${{ env.RETRIES || -1 }}")), [])
+
+
+
+class FromTheSecondReviewTest(unittest.TestCase):
+    """The second review of slice 2d.19 (on `890d422`)."""
+
+    def test_values_in_every_reading_are_counted_before_they_are_made(self):
+        values = ", ".join(f"V{n}: '{'a' * 1000}{n}'" for n in range(3))
+        run = "\n".join("echo " + "${{ env[matrix.a] }}" * 4 for _ in range(100))
+        made = []
+        real = env_expr.build
+
+        def counting(text_, plan_):
+            out = real(text_, plan_)
+            made.append(len(out))
+            return out
+        with mock.patch.object(env_expr, "build", counting):
+            found = problems(flow(run, job_env="{" + values + "}"))
+        self.assertTrue(any(UNREAD in p and "characters" in p for p in found), found[:1])
+        self.assertEqual(made, [])
+
+    def test_a_step_past_the_workflows_room_is_not_planned_to_the_end(self):
+        env = "{" + ", ".join(f"V{n}: value{n}" for n in range(1000)) + "}"
+        steps = "".join(f"      - run: echo {n} ${{{{ env }}}} {'x' * 400}\n" for n in range(40))
+        text = ("on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-24.04\n"
+                f"    env: {env}\n    steps:\n{steps}")
+        with TempDir() as tmp:
+            result = check(tmp, text)
+        refused = [p for p in result.errors if wf.ENV_EXPRESSIONS_WORKFLOW_UNREAD in p]
+        self.assertGreater(len(refused), 20)
+
+    def test_a_written_expression_beside_a_value_reads_as_the_literal(self):
+        for env_form, literal in (
+                ("${{ inputs.pre || env.PRE }}${{ env.AGENT }} -p x", "${{ inputs.pre || env.PRE }}claude -p x"),
+                ("${{ env.AGENT }}${{ inputs.post || env.POST }} -p x", "claude${{ inputs.post || env.POST }} -p x"),
+                ("${{ inputs.pre }} ${{ env.AGENT }} -p x", "${{ inputs.pre }} claude -p x")):
+            with self.subTest(form=env_form):
+                job_env = "{PRE: x, POST: y, AGENT: claude}"
+                self.assertEqual(lane(flow(env_form, job_env=job_env)), lane(flow(literal, job_env=job_env)))
+
+    def test_join_with_a_name_yaml_reads_otherwise(self):
+        text = flow("${{ join(env.*, '') }} -p x", job_env="{A: cla, 1: ude}").replace(
+            f"          ANTHROPIC_API_KEY: {KEY}\n", "          NOTHING: ''\n")
+        self.assertEqual(lane(text), "agent")
+
+    def test_windows_names_outside_ascii(self):
+        text = flow("${{ env['\u1fb3'] }} -p x", job_env="{\u1fbc: claude}", runs_on="windows-latest")
+        self.assertEqual(lane(text), "agent")
+        linux = flow("${{ env['\u1fb3'] }} -p x", job_env="{\u1fbc: claude}")
+        self.assertEqual(lane(linux), "trusted")
 
 
 if __name__ == "__main__":

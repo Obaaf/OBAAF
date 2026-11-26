@@ -2029,8 +2029,8 @@ ENV_PUT_IN_ACTIONS_UNREAD = ("its env values, put into the command lines it runs
 
 
 ENV_EXPRESSIONS_WORKFLOW_UNREAD = ("its command lines hold `${{ }}` expressions that read `env` whose readings would "
-                                   "take the lines the checker copies for its workflow past what it reads (more than "
-                                   f"{ENV_PUT_IN_WORKFLOW:,} characters)")
+                                   "take the text the checker makes of its workflow's command lines past what it "
+                                   f"reads (more than {ENV_PUT_IN_WORKFLOW:,} characters)")
 
 
 class PutInLedger:
@@ -2069,8 +2069,9 @@ class PutIns:
         self.lanes = PutInLedger()
         self.options = PutInLedger()
         self.names = PutInLedger()
-        # Flagship slice 2d.19: the lines the lanes copy where `${{ }}` expressions that read `env` make several
-        # readings of one line (`env_expr.Plan.copies`), each step's counted before they are made.
+        # Flagship slice 2d.19: the text the lanes make of command lines whose `${{ }}` expressions read `env` (the
+        # values in every reading and the lines copied for readings past the first, `env_expr.Plan`), each step's
+        # counted before it is made.
         self.copies = PutInLedger()
         self.unread = unread
         self._numbered = 0
@@ -2341,12 +2342,23 @@ class Step:
         made = put_ins.lanes.made.get(key) if put_ins is not None else None
         if made is None:
             try:
-                plan = env_expr.plan(own, env_expr.Env(scopes, case))
+                # The room left on the workflow's ledger is checked as the plan is made, so a step past it costs
+                # little and nothing is kept for it (found by the second review).
+                plan = env_expr.plan(own, env_expr.Env(scopes, case),
+                                     room=put_ins.copies.room if put_ins is not None else None)
                 why = None
             except env_expr.Unread as error:
                 plan = None
                 why = (f"its command lines hold an expression that reads `env` which the checker does not work out "
                        f"(one {error})")
+                # What the refused plan worked through is counted for the workflow too, so many steps refused at
+                # their own bound do not each work to it (found by the second review).
+                if put_ins is not None:
+                    put_ins.copies.room = max(0, put_ins.copies.room - getattr(error, "spent", 0))
+            except env_expr.NoRoom as error:
+                plan, why = None, ENV_EXPRESSIONS_WORKFLOW_UNREAD
+                if put_ins is not None:
+                    put_ins.copies.room = max(0, put_ins.copies.room - getattr(error, "spent", 0))
             # The scopes' values are kept with the reading, so that their ids, which the key holds, stay theirs.
             kept = tuple(tuple(scope.values()) if isinstance(scope, dict) else scope for scope in scopes)
             made = [plan, None, why, kept]
@@ -2359,7 +2371,7 @@ class Step:
             return own, 0, 1, None
         # The lines a step's readings copy are counted for the whole workflow before they are made, each step
         # once (found by the review: 600 steps each copying 2 MB took 1.2 GB).
-        if put_ins is not None and not put_ins.copies.settle((self.seq, key), plan.copies):
+        if put_ins is not None and not put_ins.copies.settle((self.seq, key), plan.copies + plan.size):
             return None, None, 1, ENV_EXPRESSIONS_WORKFLOW_UNREAD
         if text is None:
             text = made[1] = env_expr.build(own, plan)

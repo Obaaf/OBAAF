@@ -6,24 +6,27 @@ with the `env` context: the workflow's, the job's and the step's own `env`, the 
 command lines for an agent (`Step.agent_text`); before this slice they read such an expression as written, so the
 job was in no agent lane and no agent rule applied.
 
-`put_in(text, scopes, case)` gives the text with each expression that reads `env` worked out, read the widest way:
+`put_in(text, env)` (that is, `plan` and then `build`) gives the text with each expression that reads `env` worked out,
+for the `Env` of the step's scopes and its runner (`env_case`), read the widest way:
 
 - **Only `env` at the head of a reference counts** (`env.X`, `ENV.X`, `env['X']`, `(env).X`, `env[...]`);
   `matrix.env`, `inputs.env` and the string `'env'` do not. An expression that does not read `env` is left as
   written, as before.
 - **Letter case follows the runner** (#387, the lead's decision on F-405): on a known GitHub-hosted Linux or macOS
   runner a name is looked up as written (`exact`); on a known GitHub-hosted Windows runner without regard to case,
-  the step's value over the job's over the workflow's (`folded`); anywhere else (`both`) each reading is kept where
-  the two differ.
+  letter by letter (`fold`), the step's value over the job's over the workflow's (`folded`), and a name outside
+  ASCII may be any name outside ASCII; anywhere else (`both`) each reading is kept where the two differ.
 - **A reference not pinned to one name gives every value**: `env[matrix.key]`, the `env` object made into text
   (`toJSON(env)`, `format('{0}', env)`, `env.*`, `join(env.*, sep)`) give each value `env` holds, one reading each,
-  as the local-action reader gives every input for `inputs[*]`. A function the checker does not know given what
+  as the local-action reader gives every input for `inputs[*]` (`join` gives the values joined in the order the
+  workflow writes them too, and `toJSON` the JSON). A function the checker does not know given what
   an expression reads from `env`, or a form it does not read, make the step an error of its file (`Unread`).
 - **Each expression is read on its own**; readings are made line by line, never multiplied across a step: a line
   (with the lines a backslash continues or an expression spans) holding several expressions with several values
   each is read in every combination, at most `LINE_READINGS` of them (`SINGLE_READINGS` where only one expression
-  there has several values); past that the step is an error of its file. What the readings copy is worked out
-  before they are made (`plan`), so the caller can count it for the whole workflow.
+  there has several values); past that the step is an error of its file. What the readings make (the values in
+  every reading and the lines copied for readings past the first) is worked out before anything is made (`plan`),
+  against the room the caller has left for the whole workflow.
 - A value the checker does not know (another context: `matrix`, `inputs`, `github`, a step's output) makes no
   reading where the expression has values the checker knows (the lines as written are read anyway); where it is
   one operand of `||`, `&&`, `format()` or `join()`, the other readings are made, with it as an empty text where
@@ -62,6 +65,10 @@ _MAY_READ_ENV = re.compile(r"\benv\b", re.I)
 
 class Unread(Exception):
     """An expression reading `env` that the checker does not work out; `str()` says which and why."""
+
+
+class NoRoom(Exception):
+    """The readings of a step would make more text than the workflow's ledger has room for (`plan`'s `room`)."""
 
 
 class _Unknown:
@@ -155,10 +162,14 @@ class Env:
                 exact[name] = text
                 folded[fold(name)] = text
         self.exact, self.folded = exact, folded
+        # On Windows a name outside ASCII is compared by .NET's own mapping, which the checker does not copy (the
+        # second review: U+1FB3 and U+1FBC are one name there), so such a lookup may give any such name's value.
+        self.outside_ascii = [value for name, value in exact.items() if not name.isascii()]
         self.parsed: dict = {}
         self.parse_room = PARSE_TEXT
         self.fields: dict = {}
         self.kept: list = []
+        self.every_texts = None
 
     def lookup(self, name: str) -> list:
         """The values `env.NAME` can give (None for a name `env` does not hold)."""
@@ -170,6 +181,8 @@ class Env:
             out.append(self.exact.get(name))
         if case in ("folded", "both"):
             out.append(self.folded.get(fold(name)))
+            if not name.isascii():
+                out.extend(self.outside_ascii)
         out.extend(self.odd)
         if self.unknown_scope:
             out.append(UNKNOWN)
@@ -191,10 +204,17 @@ class Env:
     def joined(self, sep: str) -> list:
         """`join(env.*, sep)`: the values in the order the workflow writes them, in each table."""
         out = []
+        tables = []
         if self.case in ("exact", "both"):
-            out.append(sep.join(self.exact.values()))
+            tables.append(list(self.exact.values()))
         if self.case in ("folded", "both"):
-            out.append(sep.join(self.folded.values()))
+            tables.append(list(self.folded.values()))
+        for values in tables:
+            out.append(sep.join(values))
+            if self.odd:
+                # Where a name YAML may read otherwise stands among them is not known: first and last.
+                out.append(sep.join(self.odd + values))
+                out.append(sep.join(values + self.odd))
         return out
 
     def as_dict(self) -> list:
@@ -300,7 +320,11 @@ def text_of(value, env: Env) -> list:
     if isinstance(value, str):
         return [value]
     if value is ENV_OBJECT or value is ALL_VALUES:
-        return _unique([text_of(v, env)[0] for v in env.every()])
+        # Made once for each reading of a step (found by the second review: 30 `${{ env }}` over 4,000 values in
+        # each of 150 steps).
+        if env.every_texts is None:
+            env.every_texts = _unique([text_of(v, env)[0] for v in env.every()])
+        return env.every_texts
     if isinstance(value, (dict, list)):
         # An object or array from `fromJSON`: its JSON and each text in it.
         leaves: list = []
@@ -800,9 +824,25 @@ class Plan:
         self.units, self.size, self.copies, self.readings = units, size, copies, readings
 
 
-def plan(text: str, env: Env) -> Plan:
+def plan(text: str, env: Env, room: int | None = None) -> Plan:
+    """`_plan`, and where it refuses the text (`Unread`), the characters its work came to before it stopped, as the
+    refusal's `spent`, so the caller can count them for the workflow too (found by the second review: 300 steps,
+    each refused at its own bound, each worked to that bound)."""
+    state = [0]
+    try:
+        return _plan(text, env, room, state)
+    except (Unread, NoRoom) as error:
+        error.spent = state[0]
+        raise
+
+
+def _plan(text: str, env: Env, room: int | None, state: list) -> Plan:
     """The `Plan` for `text`. Raises `Unread` (its text says why) where the checker does not work an expression
-    out, or the readings would pass what it reads for one step."""
+    out, or the readings would pass what it reads for one step; `NoRoom` where the text they make (the copies and
+    the values in every reading) would pass `room`, the room left on the workflow's ledger, which is checked as
+    the work goes, so a step past it costs little (found by the second review)."""
+    room = COPIES_TEXT * 1000 if room is None else room
+    whole_room = room
     try:
         found = spans(text)
     except expr_mod.TooComplex as error:
@@ -825,6 +865,11 @@ def plan(text: str, env: Env) -> Plan:
         for value in values:
             texts.extend(text_of(value, env))
         known = _unique([t for t in texts if t is not UNKNOWN])
+        # Each value is in at least one reading: what they come to is a floor of what the readings make.
+        room -= sum(len(t) for t in known)
+        state[0] = whole_room - room
+        if room < 0:
+            raise NoRoom
         # A value the checker does not know is the expression as written, which the lanes read anyway in the
         # lines as written; where the expression also has values it knows, only those are made into readings, so
         # the default idiom `${{ inputs.k || env.K }}` gives one reading, not two (found by the review: nine of
@@ -856,16 +901,22 @@ def plan(text: str, env: Env) -> Plan:
         # The readings' length, worked out without making them: each holds the line's text outside its
         # expressions, and each value of an expression is in count / (its number of values) of them.
         outside = (u_end - u_start) - sum(end - start for start, end, _texts in here)
-        values = 0
+        values = first = 0
         for _start, _end, texts in here:
             values += sum(len(t) for t in texts) * (count // len(texts))
+            first += len(texts[0])
         size += values
-        # The copies are the line's text outside its expressions made again for each reading past the first; the
-        # values, in every reading, are on the workflow's lanes ledger (D-138) through `size`.
-        copies += (count - 1) * (outside + 1)
+        # The copies are what the readings past the first make: the line's text outside its expressions again for
+        # each, and the values in them (found by the second review: counting only the text outside let 100 lines
+        # of five expressions with 1,000-character values make 768 MB). One reading's values are what GitHub puts
+        # in, bounded for the workflow like any value (D-138).
+        copies += (count - 1) * (outside + 1) + (values - first)
+        state[0] = whole_room - room + copies
         if copies > COPIES_TEXT:
             raise Unread(f"holds expressions that read `env` whose readings come to more than {COPIES_TEXT:,} "
                          "characters")
+        if copies + size > whole_room:
+            raise NoRoom
         planned.append((u_start, u_end, here))
     return Plan(planned, size, copies, most)
 
