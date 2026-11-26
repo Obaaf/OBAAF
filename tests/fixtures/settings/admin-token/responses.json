@@ -253,6 +253,17 @@
       }
     },
     {
+      "path": "/repos/example-studio/game/environments/main-only/deployment_protection_rules?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "total_count": 0,
+        "custom_deployment_protection_rules": []
+      }
+    },
+    {
       "path": "/repos/example-studio/game/environments/release/deployment-branch-policies?per_page=100",
       "status": 200,
       "headers": {
@@ -273,6 +284,17 @@
             "type": "branch"
           }
         ]
+      }
+    },
+    {
+      "path": "/repos/example-studio/game/environments/release/deployment_protection_rules?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "total_count": 0,
+        "custom_deployment_protection_rules": []
       }
     },
     {

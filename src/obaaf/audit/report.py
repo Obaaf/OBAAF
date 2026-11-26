@@ -12,7 +12,7 @@ import re
 
 from obaaf.audit.github import plain, quoted
 from obaaf.audit.rules import RULE_TYPES
-from obaaf.audit.settings import BY_KEY, SETTINGS
+from obaaf.audit.settings import BY_KEY, CUSTOM_RULES, SETTINGS
 
 HEADINGS = (("unread", "NOT READ"), ("partial", "PARTLY READ"), ("read", "READ"),
             ("not_applicable", "DOES NOT APPLY"))
@@ -167,12 +167,25 @@ def _environment_text(env: dict) -> str:
             env["prevent_self_review"], "")
     wait = f"; wait {plain(env['wait_timer'], 10)} min" if env["wait_timer"] else ""
     other = f"; other rules: {_list(env['other_protection_rules'])}" if env["other_protection_rules"] else ""
+    # Custom deployment protection rules (slice 2b.9b), each by the app that runs it. Said when there is one,
+    # and when they were not read; an environment of a snapshot taken before they were read has no field.
+    custom = env.get(CUSTOM_RULES, False)
+    if custom is False:
+        apps = "; custom deployment protection rules: not read (this snapshot predates them)"
+    elif custom is None:
+        apps = "; custom deployment protection rules: not read"
+    elif custom:
+        apps = "; custom deployment protection rules: " + _join(
+            (f"app {quoted(r['app'])}" + ("" if r["enabled"] else " (not enabled)") for r in custom), 8)
+    else:
+        apps = ""
     # GitHub's setting "Allow administrators to bypass configured protection rules", as it gives it. It is
     # said only where there is a reviewer, a wait or another rule for an administrator to bypass.
     bypass = ""
-    if env["reviewers"] or env["wait_timer"] or env["other_protection_rules"]:
+    if env["reviewers"] or env["wait_timer"] or env["other_protection_rules"] or any(
+            r["enabled"] for r in custom or ()):
         bypass = "; administrators may bypass these rules: " + _yes(env["can_admins_bypass"])
-    return f"{quoted(env['name'])}: {branches}; {review}{wait}{other}{bypass}"
+    return f"{quoted(env['name'])}: {branches}; {review}{wait}{other}{apps}{bypass}"
 
 
 def _describe(key: str, value, settings: dict, whole: bool = True) -> list[str]:  # noqa: C901 - kept flat

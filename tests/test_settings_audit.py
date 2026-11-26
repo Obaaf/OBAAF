@@ -2,8 +2,9 @@
 and above all how it records what it could not read.
 
 Three of the recordings under tests/fixtures/settings/ (public-no-token, workflow-token, admin-token) were
-written by hand from the example responses in GitHub's REST reference (read 2026-11-12). They were not
-recorded from a live repository. The three whose names begin with "live-" are GitHub's own answers to a run
+written by hand from the example responses in GitHub's REST reference (read 2026-11-12; since slice 2b.9b each
+also answers that its environments have no custom deployment protection rule). They were not recorded from a
+live repository. The ones whose names begin with "live-" are GitHub's own answers to a run
 with no token, as the workflow .github/workflows/settings-audit-live.yml printed them (RecordedFromGitHubTest
 says which run for the two of 2026-11-12; test_settings_adopter.py is about the one of
 2026-11-13). That workflow runs the same reader against GitHub itself whenever the reader changes.
@@ -45,7 +46,9 @@ PUBLIC_PATHS = [
     f"{R}/rules/branches/main?per_page=100",
     f"{R}/branches/main",
     f"{R}/environments?per_page=100",
+    f"{R}/environments/main-only/deployment_protection_rules?per_page=100",
     f"{R}/environments/release/deployment-branch-policies?per_page=100",
+    f"{R}/environments/release/deployment_protection_rules?per_page=100",
 ]
 NEEDS_A_TOKEN = ["branch_protection", "environment_secrets", "repository_secrets", "organization_secrets",
                  "actions_permissions", "workflow_permissions", "fork_pull_requests", "actions_policies",
@@ -54,6 +57,27 @@ NEEDS_A_TOKEN = ["branch_protection", "environment_secrets", "repository_secrets
 
 def recording(name: str) -> list[dict]:
     return json.loads((SETTINGS_DIR / name / "responses.json").read_text(encoding="utf-8"))["responses"]
+
+
+# Since slice 2b.9b the reader asks for each environment's custom deployment protection rules. The recordings of
+# GitHub's own answers (the "live-" ones) were made before that, so they hold no answer to it.
+CUSTOM = "/deployment_protection_rules?per_page=100"
+
+
+def with_no_custom_rules(entries: list[dict]) -> list[dict]:
+    """A copy of a recording made before slice 2b.9b, with an answer of "no custom deployment protection rule"
+    added for each environment it lists, so that a test about something else can replay it whole. The added
+    answers are written here, in the shape GitHub's REST reference gives; they are not GitHub's."""
+    out = copy.deepcopy(entries)
+    for entry in entries:
+        path = entry["path"]
+        if path.endswith("/environments?per_page=100") and entry.get("status") == 200:
+            base = path[:-len("?per_page=100")]
+            for env in entry["body"]["environments"]:
+                name = settings_mod._segment(env["name"])
+                if not any(e["path"] == f"{base}/{name}{CUSTOM}" for e in out):
+                    out.append(ok(f"{base}/{name}{CUSTOM}", {"total_count": 0, "custom_deployment_protection_rules": []}))
+    return out
 
 
 def ok(path: str, body, headers=None) -> dict:
@@ -165,11 +189,12 @@ class ReadWithoutATokenTest(unittest.TestCase):
         # Any branch may deploy: the first of the adopter's incidents.
         self.assertEqual(main_only, {"name": "main-only", "deployment_branches": "any", "wait_timer": 0,
                                      "reviewers": [], "prevent_self_review": None, "other_protection_rules": [],
-                                     "can_admins_bypass": None})
+                                     "custom_protection_rules": [], "can_admins_bypass": None})
         self.assertEqual(release, {
             "name": "release", "deployment_branches": "selected",
             "branch_policies": [{"name": "main", "type": "branch"}, {"name": "release/*", "type": None}],
             "wait_timer": 30, "prevent_self_review": False, "other_protection_rules": [], "can_admins_bypass": None,
+            "custom_protection_rules": [],
             "reviewers": [{"type": "Team", "name": "justice-league", "id": 1},
                           {"type": "User", "name": "octocat", "id": 1}]})
         self.assertEqual(s["branches"]["value"]["main"], {"protected": True, "public_protection": {
@@ -186,7 +211,7 @@ class ReadWithoutATokenTest(unittest.TestCase):
             self.assertIn(audit.BY_KEY[key].title, text)
         self.assertIn("No rule was applied to it", text)
         self.assertIn('"main-only": any branch or tag may deploy', text)
-        self.assertIn("8 requests sent, all GET", text)
+        self.assertIn("10 requests sent, all GET", text)
 
 
 class RecordedFromGitHubTest(unittest.TestCase):
@@ -199,22 +224,41 @@ class RecordedFromGitHubTest(unittest.TestCase):
     - live-expectrail-no-token: the first adopter's at 01:33 UTC,
       https://github.com/Obaaf/OBAAF/actions/runs/43135263367
 
-    Only what anyone may read is covered. No answer to an administrator's token has been recorded yet."""
+    Only what anyone may read is covered. No answer to an administrator's token has been recorded yet.
+
+    Both were recorded before slice 2b.9b, so neither holds an answer about custom deployment protection rules.
+    The reader now asks for them, environment by environment, and records them as not read: that is what a
+    replay of these answers gives, and what these tests hold it to."""
 
     def take(self, name: str, repository: str):
         entries = recording(name)
         snap, transport = take(entries, repository=repository)
-        self.assertEqual(transport.missing, [])
-        # The reader asks today for exactly what it asked for on the day, in the same order.
-        self.assertEqual([path for path, _ in transport.seen], [e["path"] for e in entries])
+        asked = [path for path, _ in transport.seen]
+        # The reader asks today for exactly what it asked for on the day, in the same order, and, after each
+        # environment's patterns, for its custom rules, which the recording does not hold.
+        self.assertEqual([p for p in asked if not p.endswith(CUSTOM)], [e["path"] for e in entries])
+        envs = snap["settings"]["environments"]
+        names = [settings_mod._segment(e["name"]) for e in envs["value"]]
+        self.assertEqual(transport.missing, [p for p in asked if p.endswith(CUSTOM)])
+        self.assertEqual([p.rsplit("/", 2)[-2] for p in transport.missing], names)
+        self.assertEqual(envs["status"], "partial")
+        self.assertEqual([(p["key"], p["reason_code"]) for p in envs["problems"]],
+                         [(e["name"], "network") for e in envs["value"]])
+        for env in envs["value"]:
+            self.assertIsNone(env[settings_mod.CUSTOM_RULES])
         return snap, report.to_text(snap)
+
+    def environments(self, snap: dict) -> list[dict]:
+        """The environments as read, without the custom rules the recording did not hold."""
+        return [{k: v for k, v in env.items() if k != settings_mod.CUSTOM_RULES}
+                for env in snap["settings"]["environments"]["value"]]
 
     def test_this_repository_as_anyone_sees_it(self):
         snap, text = self.take("live-obaaf-no-token", "Obaaf/OBAAF")
         s = snap["settings"]
         self.assertEqual({k: v for k, v in statuses(snap).items() if v != "unread"}, {
             "repository": "read", "rulesets": "read", "ruleset_bypass_actors": "not_applicable",
-            "branch_rules": "read", "branches": "read", "environments": "read"})
+            "branch_rules": "read", "branches": "read", "environments": "partial"})
         self.assertEqual({s[k]["reason_code"] for k in NEEDS_A_TOKEN}, {"no_token"})
         self.assertEqual(s["repository"]["value"], {
             "full_name": "Obaaf/OBAAF", "visibility": "public", "default_branch": "main", "owner": "Obaaf",
@@ -225,7 +269,7 @@ class RecordedFromGitHubTest(unittest.TestCase):
         main = s["branches"]["value"]["main"]
         self.assertTrue(main["protected"])
         self.assertEqual(len(main["public_protection"]["required_status_checks"]["contexts"]), 8)
-        pages, pypi = s["environments"]["value"]
+        pages, pypi = self.environments(snap)
         self.assertEqual(pages, {
             "name": "github-pages", "deployment_branches": "selected", "wait_timer": 0, "reviewers": [],
             "prevent_self_review": None, "other_protection_rules": [], "can_admins_bypass": True,
@@ -237,9 +281,11 @@ class RecordedFromGitHubTest(unittest.TestCase):
             "branch_policies": [{"name": "v*", "type": "tag"}]})
         # A pattern is said to be for tags or for branches: "v*" means different things as each.
         self.assertIn('"pypi": may deploy: tag "v*"; reviewers: "FehintolaObafemi", "Ofonna-N", "seanudeke" '
-                      "(self-review prevented); administrators may bypass these rules: no\n", text)
+                      "(self-review prevented); custom deployment protection rules: not read; administrators may "
+                      "bypass these rules: no\n", text)
         # Nothing for an administrator to bypass, so nothing is said about it.
-        self.assertIn('"github-pages": may deploy: branch "main"; no required reviewers\n', text)
+        self.assertIn('"github-pages": may deploy: branch "main"; no required reviewers; custom deployment protection '
+                      "rules: not read\n", text)
 
     def test_a_repository_protected_by_a_ruleset_as_anyone_sees_it(self):
         snap, text = self.take("live-expectrail-no-token", "Expectrail/Expectrail")
@@ -261,8 +307,10 @@ class RecordedFromGitHubTest(unittest.TestCase):
                                                          "contexts": [], "checks": []}}})
         self.assertIn('"main": GitHub calls it protected; no required checks shown in this view', text)
         self.assertIn('"unity": any branch or tag may deploy; reviewers: "seanudeke" (self-review allowed); '
-                      "administrators may bypass these rules: yes\n", text)
-        self.assertIn('"main-only": may deploy: branch "main"; no required reviewers\n', text)
+                      "custom deployment protection rules: not read; administrators may bypass these rules: yes\n",
+                      text)
+        self.assertIn('"main-only": may deploy: branch "main"; no required reviewers; custom deployment protection '
+                      "rules: not read\n", text)
 
     def test_every_required_check_of_a_rule_is_named_in_the_report(self):
         # The first report from this recording cut the rule off after three names and part of a fourth.
@@ -293,7 +341,7 @@ class ReadWithAnAdministratorsTokenTest(unittest.TestCase):
 
     def test_every_request_carries_the_token_and_nothing_else_is_asked(self):
         self.assertEqual(self.transport.missing, [])
-        self.assertEqual(len(self.transport.seen), 20)
+        self.assertEqual(len(self.transport.seen), 22)
         for _, headers in self.transport.seen:
             self.assertEqual(headers["Authorization"], f"Bearer {TOKEN}")
 
@@ -1224,6 +1272,8 @@ class TerminalTest(unittest.TestCase):
             status=403, body={"message": self.NASTY}, headers={"x-accepted-github-permissions": self.NASTY})
         encoded = "prod%1B%5B2J%E2%80%AEgnp.exe%E2%80%8B%D8%9C%F3%A0%81%81%0AREAD%3A%20all%20is%20%22fine%22%7F%C2%9B"
         entries.append(ok(f"{R}/environments/{encoded}/secrets?per_page=100", {"total_count": 0, "secrets": []}))
+        entries.append(ok(f"{R}/environments/{encoded}{CUSTOM}",
+                          {"total_count": 0, "custom_deployment_protection_rules": []}))
         snap, transport = take(entries, token=TOKEN)
         self.assertEqual(transport.missing, [])
         text = report.to_text(snap)
@@ -1331,7 +1381,7 @@ class CommandLineTest(unittest.TestCase):
         with clean_env(GH_TOKEN=TOKEN), mock.patch.object(github, "UrllibTransport", return_value=transport):
             code, _, err = run_cli("audit", "--repo", REPO, "--api-url", "https://github.example.com/api/v3")
         self.assertEqual(code, 0)
-        self.assertEqual(len(transport.seen), 8)
+        self.assertEqual(len(transport.seen), 10)
         self.assertFalse([h for _, h in transport.seen if "Authorization" in h])
         code, _, err = run_cli("audit", "--repo", REPO, "--api-url", "http://github.example.com/api/v3")
         self.assertEqual(code, 2)
@@ -1374,8 +1424,8 @@ class CommandLineTest(unittest.TestCase):
             self.assertIn("Nothing was asked of GitHub now", out)
             self.assertEqual(out.splitlines()[2:-1], live_out.splitlines()[2:-1])
             # Only a run that was just made can say what was sent. For a file it is what the file lists.
-            self.assertTrue(live_out.endswith("that do not apply. 20 requests sent, all GET.\n"))
-            self.assertTrue(out.endswith("that do not apply. The snapshot lists 20 requests.\n"))
+            self.assertTrue(live_out.endswith("that do not apply. 22 requests sent, all GET.\n"))
+            self.assertTrue(out.endswith("that do not apply. The snapshot lists 22 requests.\n"))
             code, _, err, _ = cli([], "--from-snapshot", tmp / "s.json", "--fail-on-unread")
             self.assertEqual(code, 1)
             code, _, err, _ = cli([], "--from-snapshot", tmp / "s.json", "--repo", "someone/else")
@@ -1745,6 +1795,7 @@ class TextForDisplayIsNotTextForDecisionsTest(unittest.TestCase):
         envs[1]["name"] = "pre  prod x"
         policies = entry_for(entries, f"{R}/environments/release/deployment-branch-policies?per_page=100")
         policies["path"] = f"{R}/environments/pre%20%20prod%C2%A0x/deployment-branch-policies?per_page=100"
+        entry_for(entries, f"{R}/environments/release{CUSTOM}")["path"] = f"{R}/environments/pre%20%20prod%C2%A0x{CUSTOM}"
         snap, transport = take(entries)
         self.assertEqual(transport.missing, [])
         self.assertEqual(snap["settings"]["environments"]["value"][1]["name"], "pre  prod x")
@@ -1932,11 +1983,12 @@ class LiveCheckSecondReviewTest(unittest.TestCase):
         self.assertIn("rulesets was not read (not_found)", said)
 
     def test_a_repository_with_no_ruleset_gets_a_notice_that_none_was_met(self):
-        obaaf, _ = take(recording("live-obaaf-no-token"), repository="Obaaf/OBAAF")
+        # The recordings predate slice 2b.9b; answers of no custom rule are added so that environments are read.
+        obaaf, _ = take(with_no_custom_rules(recording("live-obaaf-no-token")), repository="Obaaf/OBAAF")
         code, said = self.check(obaaf, full_report(obaaf), *self.READ, "--notice-if-no-ruleset")
         self.assertEqual(code, 0)
         self.assertIn("::notice::This repository has no ruleset now", said)
-        adopter, _ = take(recording("live-expectrail-no-token"), repository="Expectrail/Expectrail")
+        adopter, _ = take(with_no_custom_rules(recording("live-expectrail-no-token")), repository="Expectrail/Expectrail")
         code, said = self.check(adopter, full_report(adopter), *self.READ, "--notice-if-no-ruleset")
         self.assertEqual(code, 0)
         self.assertNotIn("::notice::", said)
