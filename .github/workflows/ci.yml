@@ -446,10 +446,12 @@ jobs:
     # does `${{ env.NAME }}` in a step's `run` find a value set under another letter case, and which value
     # does it give when the job's `env` and the step's own `env` set one name in two cases? The process
     # environment is printed beside it. It checks nothing out, holds no secret and writes nothing. Plan
-    # slice 2d.19a. What the first run showed on ubuntu-24.04 (image 20261122.23.1, run 45856719413) is
-    # asserted below for Linux: the context is case-sensitive, both spellings keep their own value, a
-    # spelling nobody set is empty, `env['name']` is the same as `env.name`, and the step's own value of
-    # one name wins over the job's. macOS and Windows are printed and not yet asserted.
+    # slice 2d.19a. What the first runs showed (45856719413 and 45857766790) is asserted for each system:
+    # - Linux and macOS: the context is case-sensitive. Both spellings keep their own value, in the
+    #   context and in the process; a spelling nobody set is empty; `env['name']` is `env.name`.
+    # - Windows: it is not. The step's `premise_two_cases` replaces the job's `PREMISE_TWO_CASES`, the
+    #   one variable keeps the job's spelling, and every spelling gives the step's value.
+    # On every system the step's own value of one name wins over the job's.
     name: "Runner premise: letter case in the env context (2d.19, ${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
@@ -474,29 +476,31 @@ jobs:
         shell: pwsh
         run: |
           # A list of objects, not a hashtable: PowerShell's hashtables fold the case of their keys.
+          # `sensitive` is what Linux and macOS give, `folded` what Windows gives.
           $seen = @(
-            [pscustomobject]@{ read = 'env.PREMISE_TWO_CASES'; got = '${{ env.PREMISE_TWO_CASES }}'; linux = 'from-job' }
-            [pscustomobject]@{ read = 'env.premise_two_cases'; got = '${{ env.premise_two_cases }}'; linux = 'from-step' }
-            [pscustomobject]@{ read = 'env.Premise_Two_Cases'; got = '${{ env.Premise_Two_Cases }}'; linux = '' }
-            [pscustomobject]@{ read = "env['premise_two_cases']"; got = '${{ env['premise_two_cases'] }}'; linux = 'from-step' }
-            [pscustomobject]@{ read = 'env.premise_job_only'; got = '${{ env.premise_job_only }}'; linux = '' }
-            [pscustomobject]@{ read = 'env.PREMISE_SAME'; got = '${{ env.PREMISE_SAME }}'; linux = 'same-from-step' }
-            [pscustomobject]@{ read = 'step env: env.premise_job_only'; got = $env:PREMISE_SEEN_IN_STEP_ENV; linux = '' }
+            [pscustomobject]@{ read = 'env.PREMISE_TWO_CASES'; got = '${{ env.PREMISE_TWO_CASES }}'; sensitive = 'from-job'; folded = 'from-step' }
+            [pscustomobject]@{ read = 'env.premise_two_cases'; got = '${{ env.premise_two_cases }}'; sensitive = 'from-step'; folded = 'from-step' }
+            [pscustomobject]@{ read = 'env.Premise_Two_Cases'; got = '${{ env.Premise_Two_Cases }}'; sensitive = ''; folded = 'from-step' }
+            [pscustomobject]@{ read = "env['premise_two_cases']"; got = '${{ env['premise_two_cases'] }}'; sensitive = 'from-step'; folded = 'from-step' }
+            [pscustomobject]@{ read = 'env.premise_job_only'; got = '${{ env.premise_job_only }}'; sensitive = ''; folded = 'job-only' }
+            [pscustomobject]@{ read = 'env.PREMISE_SAME'; got = '${{ env.PREMISE_SAME }}'; sensitive = 'same-from-step'; folded = 'same-from-step' }
+            [pscustomobject]@{ read = 'step env: env.premise_job_only'; got = $env:PREMISE_SEEN_IN_STEP_ENV; sensitive = ''; folded = 'job-only' }
           )
           "image: $env:ImageOS $env:ImageVersion ($env:RUNNER_OS)"
           $seen | Format-Table read, got -AutoSize | Out-String -Width 200
           'process environment, names as the process holds them:'
-          Get-ChildItem env: | Where-Object Name -like 'premise_*' | Sort-Object Name |
-            Format-Table Name, Value -AutoSize | Out-String -Width 200
-          if ($env:RUNNER_OS -eq 'Linux') {
-            foreach ($row in $seen) {
-              if (-not ("$($row.got)" -ceq $row.linux)) { throw "$($row.read) gave '$($row.got)', expected '$($row.linux)'" }
-            }
-            # `-ceq` and `-not`, not the case-sensitive "not equal" operator, whose letters OBAAF-GHA-026 reads as a
-            # tool's name in a script it cannot read to the end (#388).
-            if (-not ([Environment]::GetEnvironmentVariable('premise_two_cases') -ceq 'from-step' -and
-                      [Environment]::GetEnvironmentVariable('PREMISE_TWO_CASES') -ceq 'from-job')) {
-              throw 'the process environment did not keep both spellings'
-            }
-            'Linux: as recorded.'
+          $process = @(Get-ChildItem env: | Where-Object Name -like 'premise_*' | Sort-Object Name)
+          $process | Format-Table Name, Value -AutoSize | Out-String -Width 200
+          $folds = $env:RUNNER_OS -eq 'Windows'
+          foreach ($row in $seen) {
+            $expected = if ($folds) { $row.folded } else { $row.sensitive }
+            # `-ceq` and `-not`, not the case-sensitive "not equal" operator, whose letters OBAAF-GHA-026 reads
+            # as a tool's name in a script it cannot read to the end (#388).
+            if (-not ("$($row.got)" -ceq $expected)) { throw "$($row.read) gave '$($row.got)', expected '$expected'" }
           }
+          $names = @($process | Where-Object Name -like 'premise_two_cases' | ForEach-Object { "$($_.Name)=$($_.Value)" })
+          $want = if ($folds) { @('PREMISE_TWO_CASES=from-step') } else { @('PREMISE_TWO_CASES=from-job', 'premise_two_cases=from-step') }
+          if (-not ((($names | Sort-Object -CaseSensitive) -join ',') -ceq (($want | Sort-Object -CaseSensitive) -join ','))) {
+            throw "the process held $($names -join ', '), expected $($want -join ', ')"
+          }
+          "$($env:RUNNER_OS): as recorded."
