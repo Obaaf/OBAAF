@@ -1588,7 +1588,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             # are kept for the check, whichever workflow asked first, so what they make is the check's.
             put_ins = cache.get(_PUT_INS)
             if put_ins is None:
-                put_ins = cache[_PUT_INS] = wf_mod.PutIns()
+                put_ins = cache[_PUT_INS] = wf_mod.PutIns(wf_mod.ENV_PUT_IN_ACTIONS_UNREAD)
             step = wf_mod.Step(index=number - 1, raw=put, line=getattr(step_raw, "line", 0), put_ins=put_ins,
                                seq=put_ins.number())
             # What a caller hands the action (the text its inputs add) is worked on again at each reading,

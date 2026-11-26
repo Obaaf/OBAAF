@@ -2383,7 +2383,8 @@ class WorkflowRules:
         # What is put in is bounded for the whole workflow too (flagship slice 2d.17), on the step's own number.
         put_ins = step.put_ins
         cheap = [(text, agent_flags.put_in_cheaply(text, scopes, put_ins.names if put_ins is not None else None,
-                                                   step.seq)) for text, _b in parts if "$" in text and "=" in text]
+                                                   (step.seq, n))) for n, (text, _b) in enumerate(parts)
+                 if "$" in text and "=" in text]
         named_unread = any(put is None and agent_flags.names_when_put_in(text, scopes, programs, packages)
                            for text, put in cheap)
         if not named_unread and not any(agent_flags.appears(t, programs, packages) for t in named) and not any(

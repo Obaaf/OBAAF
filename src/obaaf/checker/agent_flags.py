@@ -673,13 +673,15 @@ def _substitute(text: str, variables: dict, budget: PutInBudget | None = None) -
     (flagship slice 2d.16): before, `claude -p $P $P ...` with 16,000 `$P` and a 16,000-character `P`
     (64 KB of YAML) was read as 256,000,000 characters. `budget` is the step's, which every nested script
     shares (`bash -c '... $P ...'` read again; found by the review); a new one by default. None too when the
-    text would take its workflow's OBAAF-GHA-026 put-ins past their bound (the budget's `ledger`, flagship
-    slice 2d.17); the reading is settled there by the step's number, the script and the values put in, so the
-    same step read again for another tool or in the second pass is counted once."""
+    values put in would take its workflow's OBAAF-GHA-026 put-ins past their bound (the budget's `ledger`,
+    flagship slice 2d.17). The text is settled there by the step's number, the script, the values put in and
+    how many times the same text has been made in this reading of the step, so the same step read again for
+    another tool or in the second pass is counted once, and a script written twice in it (`bash -c '...'`
+    twice) is counted twice (found by the review)."""
     if not variables or "$" not in text:
         return text
     budget = PutInBudget() if budget is None else budget
-    used: dict = {}
+    size = 0
     named: dict = {}
     out, i, n, quote = [], 0, len(text), ""
     while i < n:
@@ -714,7 +716,7 @@ def _substitute(text: str, variables: dict, budget: PutInBudget | None = None) -
                     value = variables[name]
                     if not budget.take(value):
                         return None
-                    used[value] = used.get(value, 0) + 1
+                    size += len(value)
                     named[name] = value
                     out.append(value)
                     i = m.end()
@@ -722,9 +724,11 @@ def _substitute(text: str, variables: dict, budget: PutInBudget | None = None) -
         out.append(ch)
         i += 1
     # Settled before the text is joined, so a text past the workflow's bound is never made (2d.17).
-    if used and budget.ledger is not None and not budget.ledger.settle(
-            (budget.place, text, frozenset(named.items())), used):
-        return None
+    if named and budget.ledger is not None:
+        reading = (text, frozenset(named.items()))
+        times = budget.made[reading] = budget.made.get(reading, 0) + 1
+        if not budget.ledger.settle((budget.place, times, reading), size):
+            return None
     return "".join(out)
 
 
@@ -1698,18 +1702,18 @@ def _cheap_values(text: str, scopes: list) -> dict:
 _CHEAP_NAME_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 
 
-def put_in_cheaply(text: str, scopes: list, ledger=None, place: int = 0) -> str | None:
+def put_in_cheaply(text: str, scopes: list, ledger=None, place=0) -> str | None:
     """A script with each plain assignment it makes and each plain `env` value put in for `$NAME` and
     `${NAME}`, by a regular expression: only to decide whether the step names the tool. None, as
     `_substitute` gives, when the values put in would make a text longer than the checker reads (flagship
     slice 2d.16), or would take its workflow's past their bound (`ledger`, a `PutInLedger`, with `place` the
-    step's number; flagship slice 2d.17); `names_when_put_in` then decides."""
+    step's number and which of its scripts this is; flagship slice 2d.17); `names_when_put_in` then decides."""
     values = _cheap_values(text, scopes)
     if not values:
         return text
     # What would be put in is counted first, so a text past either bound is never made (2d.17).
     budget = PutInBudget()
-    used: dict = {}
+    size = 0
     named: dict = {}
     for match in _CHEAP_NAME_RE.finditer(text):
         value = values.get(match.group(1))
@@ -1717,9 +1721,9 @@ def put_in_cheaply(text: str, scopes: list, ledger=None, place: int = 0) -> str 
             continue
         if not budget.take(value):
             return None
-        used[value] = used.get(value, 0) + 1
+        size += len(value)
         named[match.group(1)] = value
-    if used and ledger is not None and not ledger.settle((place, text, frozenset(named.items())), used):
+    if named and ledger is not None and not ledger.settle((place, text, frozenset(named.items())), size):
         return None
     return _CHEAP_NAME_RE.sub(lambda m: values.get(m.group(1), m.group(0)), text)
 
