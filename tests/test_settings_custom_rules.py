@@ -518,6 +518,19 @@ class DriftTest(unittest.TestCase):
         self.assertTrue(drift.failed(found))
         self.assertIn(("release", "server_error"), [(e["item"], e["reason_code"]) for e in found["not_compared"]])
 
+    def test_an_environment_a_file_leaves_out_is_not_compared_with_one_read_in_part(self):
+        # The second review: the expected file drops "release" and marks it not read; this run read it in part.
+        expected, live = self.snapshots(answered_with(ADMIN, RELEASE_RULES, {"message": "x"}, status=500))
+        envs = expected["settings"]["environments"]
+        expected["settings"]["environments"] = {
+            "status": "partial", "value": [e for e in envs["value"] if e["name"] != "release"], "needs": "x",
+            "problems": [{"key": "release", "what": "x", "reason_code": "network", "reason": "x"}]}
+        self.assertEqual(snapshot_mod.problems(expected), [])
+        found = drift.compare(expected, live)
+        self.assertTrue(drift.failed(found))
+        self.assertEqual([(e["item"], e["reason_code"]) for e in found["not_compared"]], [("release", "network")])
+        self.assertNotIn("release", [e["item"] for e in found["not_covered"]])
+
     def test_rules_not_read_now_are_not_compared(self):
         expected, live = self.snapshots(answered_with(ADMIN, MAIN_ONLY_RULES, {"message": "no"}, status=500))
         found = drift.compare(expected, live)

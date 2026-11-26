@@ -1198,7 +1198,7 @@ def _other_gates(env: dict) -> tuple[list[str], str]:
     that it may overstate."""
     gates = [f"a custom deployment protection rule run by the app {_q(r['app'])}"
              for r in env.get(CUSTOM_RULES) or () if r["enabled"] is True]
-    gates += [f"a protection rule of the type {_q(kind)}, which this version does not know"
+    gates += [f"a protection rule of the type {_q(kind)}, which this version does not know and which may be such a gate"
               for kind in env["other_protection_rules"]]
     if CUSTOM_RULES not in env:
         unread = ("its custom deployment protection rules were not read: the snapshot was taken by a version of "

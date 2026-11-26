@@ -421,6 +421,17 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
                                                                              "was compared; not read by the expected "
                                                                              "one: ")})
                     continue
+                if (ident in e_parts) != (ident in l_parts):
+                    # One side holds what it read of it and the other holds nothing (an environment a file marks
+                    # as not read and leaves out, against one this run read in part): whether it changed is not
+                    # known, which is a failure, never "neither read it" (the second review of slice 2b.9b).
+                    held = ("it was read only in part now, and the expected snapshot holds none of it: "
+                            if ident in l_parts else
+                            "the expected snapshot holds part of it, and none of it could be read now: ")
+                    side = e_unknown[ident] if ident in l_parts else l_unknown[ident]
+                    not_compared.append({**here, "reason_code": side.get("reason_code"),
+                                         "why": unknown(side, held) + (". " + RETAKE if ident in l_parts else "")})
+                    continue
                 not_covered.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
                                     "why": unknown(e_unknown[ident], "neither snapshot read it; the expected one: ")})
                 continue
