@@ -270,16 +270,18 @@ class VerifierBlocksTest(unittest.TestCase):
                      (args, 1, "Release verification: BLOCKED, do not upload"),
                      ([*args, "--pre-approval"], 0,
                       "Pre-approval checks: PASSED, release approval is still required"))
+            outputs = []
             for i, (case, expected_code, heading) in enumerate(cases):
                 summary = tmp / f"summary-{i}.md"
                 with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
                     code, out, _ = run_cli(*case)
+                outputs.append(out)
                 self.assertEqual(code, expected_code, out)
                 self.assertEqual(out.splitlines()[0], heading)
                 self.assertEqual(summary.read_text(encoding="utf-8").splitlines()[:3],
                                  ["## OBAAF release verification", "", "```"])
                 self.assertEqual(summary.read_text(encoding="utf-8").splitlines()[3], heading)
-            self.assertIn("no release approvals were supplied", run_cli(*args)[1])
+            self.assertIn("no release approvals were supplied", outputs[1])
 
     def test_cli_no_longer_trusts_unverified_gh_output(self):
         with TempDir() as tmp:
