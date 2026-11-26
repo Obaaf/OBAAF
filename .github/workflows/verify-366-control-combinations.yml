@@ -1,7 +1,7 @@
 name: Verify item 7 across producer and consumer egress controls
 on:
   push:
-    branches: [lead/verify-366-control-combinations-2f8474e]
+    branches: [lead/verify-366-control-combinations-571aad0]
 permissions:
   contents: read
 jobs:
@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 2f8474ed1cbe75cfe1197633502c9e1204bb1817
+          ref: 571aad01e0fe838564b4355104010f7d3ccb8279
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
@@ -19,7 +19,7 @@ jobs:
       - name: Inspect text and JSON on static workflows
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 2f8474ed1cbe75cfe1197633502c9e1204bb1817
+          test "$(git rev-parse HEAD)" = 571aad01e0fe838564b4355104010f7d3ccb8279
           export TMPDIR="$(mktemp -d "$RUNNER_TEMP/obaaf-output.XXXXXX")"
           if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
           python -m pip install -q --constraint actions/setup-obaaf/constraints.txt .
