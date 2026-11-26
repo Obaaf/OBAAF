@@ -417,6 +417,20 @@ class OBAAFGHA026ReadingTest(unittest.TestCase):
         self.assertIsNotNone(agent_flags._substitute("$P " * FITS, values, budget))
         self.assertIsNone(agent_flags._substitute("$P", values, budget))
 
+    def test_every_part_of_a_step_shares_its_budget(self):
+        """From the third review: the step's `env` values and inputs are read with the same budget as its
+        script. 50 `env` values that each put a 10,000-character `P` in eight times took 9 s on the base."""
+        env = "".join(f"          K{n}: 'claude -p x " + "$P " * 8 + "'\n" for n in range(50))
+        text = ("on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-latest\n    permissions: {contents: read}\n"
+                "    env:\n      P: " + "a b " * 2500 + "\n    steps:\n      - uses: some-org/agent-runner@" + "1" * 40
+                + "\n        env:\n" + env)
+        with TempDir() as tmp:
+            started = time.monotonic()
+            result = check(tmp, text)
+            took = time.monotonic() - started
+        self.assertLess(took, 3)
+        self.assertEqual([f.kind for f in result.findings if f.rule == "OBAAF-GHA-026"], ["command-computed"])
+
     def test_bash_s_own_quoting_names_no_tool(self):
         """Found by the review: `IFS=$'\\n'` made every tool "cannot tell" on a step that names none."""
         run = "IFS=$'\\n'; echo " + "$P " * 200
