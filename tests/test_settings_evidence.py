@@ -152,6 +152,34 @@ class EvidenceTests(unittest.TestCase):
         result = self.result()
         self.assertIn("gone: list may be short", result.reason)
         self.assertNotIn("patterns unavailable", result.reason)
+        # Only the unlisted names, not merely first (second review of #386).
+        self.settings["environments"]["problems"] = [
+            p for p in self.settings["environments"]["problems"] if p["key"] in ("gone", "release")]
+        result = self.result()
+        self.assertIn("gone: list may be short", result.reason)
+        self.assertNotIn("patterns unavailable", result.reason)
+
+    def test_review_386_a_null_pattern_list_with_no_problem_of_its_own(self):
+        """Second review of #386: a matching environment's patterns null, no problem under its name (an edited
+        file): the recorded problems are named, as before, and the answer stays "cannot tell"."""
+        self._partial(("main-only", "custom rules", "rules unavailable"))
+        self.env["branch_policies"] = None
+        result = self.result()
+        self.assertEqual(result.verdict, "cannot tell")
+        self.assertIn("environments partial: main-only: rules unavailable", result.reason)
+
+    def test_review_386_a_name_that_differs_only_in_case_outside_ascii(self):
+        """Second review of #386: GitHub may or may not fold this case; its unread patterns count."""
+        value = self.settings["environments"]["value"]
+        other = copy.deepcopy(self.env)
+        other.update(name="Ünicode", branch_policies=None)
+        value.append(other)
+        self.settings["environment_secrets"]["value"]["Ünicode"] = []
+        self._partial(("Ünicode", "branch patterns", "patterns unavailable"))
+        result = self.read().assess("PACKAGE_INDEX_TOKEN", "ünicode")
+        self.assertEqual(result.verdict, "cannot tell")
+        self.assertIn("Ünicode: patterns unavailable", result.reason)
+        self.assertEqual(self.result().verdict, "verified")
 
     def test_review_386_the_inventory_lines_with_no_environment_named(self):
         """Review of #386: `report_settings` asks about every environment when protected_secrets is empty."""
