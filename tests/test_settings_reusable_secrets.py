@@ -235,7 +235,8 @@ class PassedByNameTest(unittest.TestCase):
         files = {"r.yml": caller("    secrets:\n      PACKAGE_INDEX_TOKEN: ${{ secrets.PACKAGE_INDEX_TOKEN }}\n", remote)}
         result = one(files)
         self.assertEqual(result["state"], "cannot-tell")
-        self.assertIn("only if it declares that environment itself", result["message"])
+        self.assertIn("only if it declares an environment that holds it", result["message"])
+        self.assertNotIn("is empty", result["message"])
 
     def test_a_key_this_reader_does_not_take_as_a_name_is_cannot_tell(self):
         files = {"r.yml": caller("    secrets:\n      ~: ${{ secrets.MODEL_API_KEY }}\n"),
@@ -249,6 +250,62 @@ class PassedByNameTest(unittest.TestCase):
         result = one(files)
         self.assertEqual(result["state"], "finding")
         self.assertIn("as an input", result["message"])
+
+
+class SecondReviewTest(unittest.TestCase):
+    """What the second review of slice 2b.9 found: messages that said more than was known."""
+
+    def test_a_cycle_or_a_chain_deeper_than_github_allows_is_cannot_tell(self):
+        reads = ("      - run: ./x\n        env:\n          A: ${{ secrets.HELDOUT_TOKEN }}\n")
+        itself = workflow("  workflow_call:\n  workflow_dispatch:\n",
+                          "  again:\n    uses: ./.github/workflows/w.yml\n" + job("propose", "    environment: main-only\n", reads))
+        self.assertEqual({r[0] for r in results({"w.yml": itself})}, {"cannot-tell"})
+        chain = {"a.yml": caller(uses="./.github/workflows/b.yml")}
+        for here, there in (("b", "c"), ("c", "d"), ("d", "e")):
+            chain[f"{here}.yml"] = workflow("  workflow_call:\n", f"  next:\n    uses: ./.github/workflows/{there}.yml\n"
+                                            + job("propose", "    environment: main-only\n", reads))
+        chain["e.yml"] = workflow("  workflow_call:\n", job("propose", "    environment: main-only\n", reads))
+        found = results(chain)
+        self.assertTrue(found)
+        self.assertEqual({r[0] for r in found}, {"cannot-tell"})
+
+    def test_a_call_written_with_dollar_slash_says_the_finding_rests_on_it(self):
+        files = {"bench.yml": caller(uses="$/.github/workflows/w.yml"),
+                 "w.yml": called("secrets.HELDOUT_TOKEN", "    environment: main-only\n")}
+        result = one(files)
+        self.assertEqual(result["state"], "finding")
+        self.assertIn("This holds if GitHub runs a call written with $/", result["message"])
+
+    def test_a_declaration_that_was_not_read_whole_does_not_say_no_error(self):
+        body = job("propose", "    environment: main-only\n",
+                   "      - run: ./x\n        env:\n          A: ${{ secrets.HELDOUT_TOKEN }}\n")
+        for declared in ("    secrets: [HELDOUT_TOKEN]\n", "    secrets:\n      ' HELDOUT_TOKEN ':\n        required: true\n",
+                         "    secrets:\n      HELDOUT_TOKEN:\n        required: 'yes'\n"):
+            files = {"bench.yml": caller(), "w.yml": workflow(f"  workflow_call:\n{declared}", body)}
+            message = one(files)["message"]
+            self.assertIn("the run either fails at its start or gets an empty value", message, declared)
+            self.assertNotIn("shows no error", message, declared)
+            self.assertNotIn("GitHub fails the run at its start for", message, declared)
+
+    def test_a_call_that_passes_a_secret_the_called_workflow_does_not_declare_does_not_say_no_error(self):
+        declares = workflow("  workflow_call:\n    secrets:\n      HELDOUT_TOKEN:\n",
+                            job("propose", "    environment: main-only\n",
+                                "      - run: ./x\n        env:\n          A: ${{ secrets.HELDOUT_TOKEN }}\n"))
+        files = {"bench.yml": caller("    secrets:\n      key: ${{ secrets.MODEL_API_KEY }}\n"), "w.yml": declares}
+        message = one(files)["message"]
+        self.assertIn("the call also passes a secret the called workflow does not declare", message)
+        self.assertNotIn("shows no error", message)
+
+    def test_either_value_non_empty_is_no_finding(self):
+        # release holds PACKAGE_INDEX_TOKEN; MODEL_API_KEY is a repository secret release does not hold.
+        files = {"r.yml": caller("    secrets:\n      PACKAGE_INDEX_TOKEN: ${{ secrets.MODEL_API_KEY }}\n"),
+                 "w.yml": called("secrets.PACKAGE_INDEX_TOKEN", "    environment: release\n")}
+        self.assertEqual(status(assess_files(ADMIN, files), "OBAAF-SET-011"), "no-finding")
+
+    def test_an_odd_key_to_a_workflow_not_read_does_not_say_every_secret(self):
+        remote = "octo-org/shared/.github/workflows/p.yml@" + "a" * 40
+        message = one({"r.yml": caller("    secrets:\n      ~: x\n", remote)})["message"]
+        self.assertNotIn("passes every secret", message)
 
 
 class SecondCallTest(unittest.TestCase):

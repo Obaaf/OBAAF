@@ -279,19 +279,25 @@ def _passed_by_name(passed) -> tuple[dict, bool]:
 def _call_secrets(workflow) -> dict:
     """The secrets a reusable workflow declares under ``on.workflow_call.secrets``, upper case, each with
     whether it is marked required: True only for the literal ``required: true``, False for ``false`` or no
-    ``required``, None for anything else. GitHub's page on reusing workflows: "To make the workflow run fail
+    ``required``, None for anything else (`names`); and whether that list was read whole (`whole`: False
+    when ``secrets`` is there but is not a mapping, or has a name that is not plain text, with space round
+    it, or given twice in two letter cases). GitHub's page on reusing workflows: "To make the workflow run fail
     instead, set `required: true` for the secret in `on.workflow_call.secrets`" (slice 2b.9)."""
     config = workflow.triggers.get("workflow_call")
     declared = config.get("secrets") if isinstance(config, dict) else None
+    if declared is None:
+        return {"names": {}, "whole": True}
     if not isinstance(declared, dict):
-        return {}
-    out = {}
+        return {"names": {}, "whole": False}
+    names: dict = {}
+    whole = True
     for name, spec in declared.items():
-        if not isinstance(name, str):
+        if not isinstance(name, str) or not name or name != name.strip() or name.upper() in names:
+            whole = False
             continue
         required = spec.get("required", False) if isinstance(spec, dict) else (False if spec is None else None)
-        out[name.strip().upper()] = required if isinstance(required, bool) else None
-    return out
+        names[name.upper()] = required if isinstance(required, bool) else None
+    return {"names": names, "whole": whole}
 
 
 def _job(job: wf_mod.Job) -> dict:
