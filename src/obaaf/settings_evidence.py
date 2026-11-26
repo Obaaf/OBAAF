@@ -180,13 +180,24 @@ class SettingsEvidence:
             f"{plain(p['key'], 60)}: {plain(p['reason'], 160)}" for p in entry.get("problems", [])[:3])
         return f"{key} {entry['status']}: {plain(why, 400)}"
 
-    def inventory_limitations(self) -> list[str]:
+    def inventory_limitations(self, environment: str | None = None) -> list[str]:
         """Recorded reasons a full inventory cannot be compared, including when no names are configured."""
         entries = self.data["settings"]
         repo = entries["repository"]
         personal = (repo["status"] == "read" and repo["value"]["owner_type"] == "User"
                     and entries["organization_secrets"]["status"] == "not_applicable")
         needed = ["environments", "environment_secrets", "repository_secrets"]
+        envs = entries["environments"]
+        if envs["status"] == "partial":
+            names = {env["name"] for env in envs["value"]}
+            list_whole = all(problem["key"] in names for problem in envs["problems"])
+            policies_read = all(
+                env.get("branch_policies") is not None for env in envs["value"]
+                if env["deployment_branches"] == "selected"
+                and (environment is None or environment_match(env["name"], environment) != "differs")
+            )
+            if list_whole and policies_read:
+                needed.remove("environments")
         if not personal:
             needed.append("organization_secrets")
         return [reason for key in needed if (reason := self._unread(key))]
@@ -202,7 +213,7 @@ class SettingsEvidence:
         if not environment or "${{" in environment:
             return Assessment(CANNOT_TELL, "a literal environment name is needed")
         entries = self.data["settings"]
-        missing = self.inventory_limitations()
+        missing = self.inventory_limitations(environment)
         if missing:
             return Assessment(CANNOT_TELL, "; ".join(missing))
         environments = entries["environments"]["value"]

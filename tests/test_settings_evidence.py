@@ -75,6 +75,31 @@ class EvidenceTests(unittest.TestCase):
         self.settings["environment_secrets"] = {"status": "read", "value": {"release": ["PACKAGE_INDEX_TOKEN"]}}
         self.assertIn("inventories disagree", self.result().reason)
 
+    def test_partial_environment_reads_use_the_named_environments_branch_policies(self):
+        entry = self.settings["environments"]
+        other = entry["value"][0]
+        other["custom_protection_rules"] = None
+        problem = {"key": other["name"], "what": "custom rules", "reason_code": "forbidden",
+                   "reason": "rules unavailable"}
+        entry.update(status="partial", needs="read", problems=[problem])
+        self.assertEqual(self.result().verdict, "verified")
+        self.env["deployment_branches"] = "any"
+        self.env.pop("branch_policies")
+        self.assertEqual(self.result().verdict, "not met")
+
+        other.update(deployment_branches="selected", branch_policies=None)
+        problem.update(what="branch policies", reason="patterns unavailable")
+        evidence = self.read()
+        self.assertEqual(evidence.assess("PACKAGE_INDEX_TOKEN", "release").verdict, "not met")
+        limited = evidence.assess("PACKAGE_INDEX_TOKEN", other["name"])
+        self.assertEqual(limited.verdict, "cannot tell")
+        self.assertIn("patterns unavailable", limited.reason)
+
+        problem["key"] = "unlisted"
+        evidence = self.read()
+        for env in entry["value"]:
+            self.assertEqual(evidence.assess("PACKAGE_INDEX_TOKEN", env["name"]).verdict, "cannot tell")
+
     def test_evidence_of_another_copy_or_an_unprotected_branch(self):
         for key in ("repository_secrets", "organization_secrets"):
             self.settings[key]["value"].append("package_index_token")
