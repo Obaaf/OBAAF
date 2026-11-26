@@ -29,7 +29,7 @@ from obaaf.checker.workflow import (
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION, AgentActions, leaves_repository,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup, image_outputs_push, through_matrix,
     bounded, digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
-    ENV_PUT_IN_UNREAD, LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
+    ENV_PUT_IN_UNREAD, LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, PutInBudget, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -2394,11 +2394,14 @@ class WorkflowRules:
         known = {id(text): agent_flags.known_variables(scopes, text, trust_env) for text, _b in parts}
         mentioned = named_unread or any(agent_flags.mentions(t, programs, packages) for t in named)
         reading = agent_flags.Reading()
+        # One budget for every script of the step that is read (flagship slice 2d.16, from the review): a value
+        # may be put in eight times in the step, not eight times in each of its `env` values and inputs.
+        budget = PutInBudget()
         for text, bash in parts:
             variables, unread = known[id(text)]
             if bash:
                 reading.merge(agent_flags.read_script(text, programs, packages, flags, variables,
-                                                      mentioned=mentioned, unread=unread, loose=True))
+                                                      mentioned=mentioned, unread=unread, loose=True, budget=budget))
             else:
                 # JavaScript (github-script) or another shell: "cannot tell" only where a line names the tool
                 # and runs a command (an exec call, or in a shell, a character its quoting or variables use).
@@ -2420,7 +2423,7 @@ class WorkflowRules:
                     command_like and agent_flags.appears(other, programs, packages)):
                 variables, unread = agent_flags.known_variables(scopes, other, trust_env)
                 reading.merge(agent_flags.read_script(other, programs, packages, flags, variables, mentioned=True,
-                                                      unread=unread, prose=not command_like))
+                                                      unread=unread, prose=not command_like, budget=budget))
         for flag, option, value in reading.hits.values():
             written_as = option if value is None else f"{option} {value}"
             self.add("OBAAF-GHA-026", step.line,

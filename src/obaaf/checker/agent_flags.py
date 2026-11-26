@@ -666,15 +666,16 @@ class _Lexer:
         return i + 1
 
 
-def _substitute(text: str, variables: dict) -> str | None:
+def _substitute(text: str, variables: dict, budget: PutInBudget | None = None) -> str | None:
     """The script with each `$NAME` and `${NAME}` whose value is known put in, outside single quotes (a plain
     value has no quote, expansion or backslash, so bash would read the result as it reads the variable:
-    split into words outside double quotes, one word inside them). None when a `PutInBudget` runs out
+    split into words outside double quotes, one word inside them). None when the `PutInBudget` runs out
     (flagship slice 2d.16): before, `claude -p $P $P ...` with 16,000 `$P` and a 16,000-character `P`
-    (64 KB of YAML) was read as 256,000,000 characters."""
+    (64 KB of YAML) was read as 256,000,000 characters. `budget` is the step's, which every nested script
+    shares (`bash -c '... $P ...'` read again; found by the review); a new one by default."""
     if not variables or "$" not in text:
         return text
-    budget = PutInBudget()
+    budget = PutInBudget() if budget is None else budget
     out, i, n, quote = [], 0, len(text), ""
     while i < n:
         ch = text[i]
@@ -719,8 +720,8 @@ def _substitute(text: str, variables: dict) -> str | None:
 PUT_IN_UNREAD = "its variables, put in, make a text longer than the checker reads"
 
 
-def _lex(text: str, variables: dict) -> tuple[list, str]:
-    put = _substitute(text, variables)
+def _lex(text: str, variables: dict, budget: PutInBudget | None = None) -> tuple[list, str]:
+    put = _substitute(text, variables, budget)
     if put is None:
         # Read as written, with nothing put in; `_read_text` makes every warned option "cannot tell".
         lexer = _Lexer(text, {})
@@ -765,6 +766,8 @@ class _Context:
     depth: int = 0
     loose: bool = False             # the tool's name appears in the text at all, even inside a word
     prose: bool = False             # text that may be prose (another input, an `env` value, an argument)
+    # What putting variables in may still add, for the whole step, every nested script included (2d.16).
+    budget: PutInBudget = field(default_factory=PutInBudget)
 
     def cannot_tell(self, word: str) -> None:
         if self.mentioned:
@@ -832,7 +835,7 @@ def _read_text(text: str, ctx: _Context) -> None:
     if ctx.depth > _MAX_DEPTH:
         ctx.cannot_tell("nesting deeper than the checker reads: " + _fact_text(text))
         return
-    commands, problem = _lex(text, ctx.variables)
+    commands, problem = _lex(text, ctx.variables, ctx.budget)
     if problem == PUT_IN_UNREAD:
         _put_in_unread(text, ctx)
     elif problem and not ctx.prose:
@@ -1193,7 +1196,7 @@ def _start(words: list, bases: list, i: int, ctx: _Context, command: Command, ru
         if rest:
             target = rest[0]
             if target.inner and target.text.startswith("<("):
-                inner_commands, inner_problem = _lex(target.inner[0], ctx.variables)
+                inner_commands, inner_problem = _lex(target.inner[0], ctx.variables, ctx.budget)
                 literal = _literal_output(inner_commands[-1]) if len(inner_commands) == 1 else None
                 if inner_problem == PUT_IN_UNREAD:
                     _put_in_unread(target.inner[0], ctx)
@@ -1594,14 +1597,15 @@ def _read_widest(text: str, programs: list, packages: list, flags: list, reading
 def read_script(text: str, programs: list, packages: list, flags: list, variables: dict | None = None,
                 mentioned: bool | None = None, bash: bool = True, unread: dict | None = None,
                 written_files: set | None = None, loose: bool | None = None, prose: bool = False,
-                language: str = "") -> Reading:
+                language: str = "", budget: PutInBudget | None = None) -> Reading:
     """Each warned flag a script gives the tool's program, and what the checker cannot read there.
     `mentioned`: whether the step names the tool anywhere (its script, its `env` values or the job's and
     workflow's); "cannot tell" about a command the checker cannot name is given only then. `bash` False:
     the script is in another shell or language, which is read only the widest way, and "cannot tell" where
     it names the tool and nothing is found; `language` (a shell's or an interpreter's name, or
     `github-script`) says how `agent_code` reads it by its tokens as well. `unread`: `env` values the checker
-    cannot read, shown with a word that uses them."""
+    cannot read, shown with a word that uses them. `budget`: the step's `PutInBudget`, shared by every
+    script of the step that is read (flagship slice 2d.16); a new one by default."""
     reading = Reading()
     if not text or not flags:
         return reading
@@ -1618,7 +1622,7 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
         written = set(written_files or ()) | {m.group(1) for m in re.finditer(
             r"(?:>>?|\btee(?:\s+-a)?)\s*['\"]?([^\s'\";&|<>]+)", held_text)}
         ctx = _Context(list(programs), packages, flags, dict(variables or {}), mentioned, written, reading,
-                       loose=loose, prose=prose)
+                       loose=loose, prose=prose, budget=PutInBudget() if budget is None else budget)
         _read_text(held_text, ctx)
         if held or unread:
             shown: dict = {}

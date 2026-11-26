@@ -400,6 +400,23 @@ class OBAAFGHA026ReadingTest(unittest.TestCase):
             within = check(tmp, text.replace('"$P" ' * 200, '"$P" '))
         self.assertEqual([f.kind for f in within.findings if f.rule == "OBAAF-GHA-026"], ["command-option"])
 
+    def test_a_nested_script_shares_the_step_s_budget(self):
+        """Found by the second review: each `bash -c '...'` read again had a budget of its own, so 50 of them,
+        each putting a 10,000-character `P` in eight times inside single quotes (12.5 KB of YAML), took 8.8 s,
+        as on the base. Every script of the step now shares one budget."""
+        run = "; ".join(["bash -c 'claude -p x " + "$P " * 8 + "'"] * 50)
+        job_env = "    env:\n      P: " + "a b " * 2500 + "\n"
+        with TempDir() as tmp:
+            started = time.monotonic()
+            result = check(tmp, job(run, "", job_env=job_env))
+            took = time.monotonic() - started
+        self.assertLess(took, 3)
+        self.assertEqual([f.kind for f in result.findings if f.rule == "OBAAF-GHA-026"], ["command-computed"])
+        values = {"P": "a" * 1000}
+        budget = PutInBudget()
+        self.assertIsNotNone(agent_flags._substitute("$P " * FITS, values, budget))
+        self.assertIsNone(agent_flags._substitute("$P", values, budget))
+
     def test_bash_s_own_quoting_names_no_tool(self):
         """Found by the review: `IFS=$'\\n'` made every tool "cannot tell" on a step that names none."""
         run = "IFS=$'\\n'; echo " + "$P " * 200
