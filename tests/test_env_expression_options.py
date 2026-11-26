@@ -92,10 +92,10 @@ class TheOptionIsReadTest(unittest.TestCase):
         found = sorted((f.severity, f.kind) for f in result.findings if f.rule == "OBAAF-GHA-026")
         self.assertEqual(found, HIGH)
 
-    def test_both_readings_where_the_runner_is_not_known(self):
-        # A name set in two letter cases on a runner that may be Windows: either value may be the one; one warns.
-        self.assertEqual(gha026(flow("claude ${{ env.FLAGS }} -p review", job_env="{FLAGS: --model x}",
-                                     step_env=f"flags: {SKIP}", runs_on="[self-hosted]")), HIGH)
+    def test_one_reading_where_the_runner_is_not_known(self):
+        # A runner that may be Windows, with the name set once: both comparisons give the same text.
+        self.assertEqual(gha026(flow("claude ${{ env.flags }} -p review", job_env=f"{{flags: {SKIP}}}",
+                                     runs_on="[self-hosted]")), HIGH)
 
 
 class AHarmlessValueIsQuietTest(unittest.TestCase):
@@ -160,6 +160,69 @@ class WhatTheCheckerDoesNotKnowIsCannotTellTest(unittest.TestCase):
     def test_a_value_that_is_not_text(self):
         self.assertEqual(gha026(flow("claude ${{ env.FLAGS }} -p review", job_env="{FLAGS: [a, b]}")),
                          CANNOT_TELL)
+
+
+class WhatTheReviewFoundTest(unittest.TestCase):
+    """The review of 2d.19c (#382): each way past it found, base medium and quiet with the first version."""
+
+    def test_another_context_beside_a_known_value(self):
+        # `env_expr` leaves out a value it does not know beside one it knows, and reads one inside `format` and
+        # `join` as empty: GitHub runs what `inputs.flags` holds.
+        for expression in ("inputs.flags || env.SAFE", "format('{0} {1}', env.SAFE, inputs.extra)",
+                           "join(matrix.f, env.SAFE)", "matrix.f || env.EMPTY", "env.SAFE && github.event.x",
+                           "vars.F || env.SAFE"):
+            with self.subTest(expression=expression):
+                self.assertEqual(gha026(flow(f"claude ${{{{ {expression} }}}} -p review",
+                                             job_env="{SAFE: --model sonnet, EMPTY: ''}")), CANNOT_TELL)
+
+    def test_several_readings_of_a_line(self):
+        # The second reading would be inside the first's heredoc; GitHub runs one of them, which may warn.
+        run = ("claude ${{ startsWith(env.MODE, 'safe') && '--model sonnet' || '" + SKIP + "' }} -p \"$(cat <<'P'\n"
+               "Review.\nP\n)\"")
+        self.assertEqual(gha026(flow(run, job_env="{MODE: full}")), CANNOT_TELL)
+        # Two letter cases on a runner that may be Windows: two readings.
+        self.assertEqual(gha026(flow("claude ${{ env.FLAGS }} -p review", job_env="{FLAGS: --model x}",
+                                     step_env=f"flags: {SKIP}", runs_on="[self-hosted]")), CANNOT_TELL)
+
+    def test_a_value_that_holds_an_expression(self):
+        # GitHub works the value's own expression out before it puts the value in.
+        for value in ('"--model sonnet # ${{ vars.EXTRA }}"', "\"'${{ vars.F }}'\"", '"${{ matrix.f }}"'):
+            with self.subTest(value=value):
+                self.assertEqual(gha026(flow("claude ${{ env.FLAGS }} -p review", job_env=f"{{FLAGS: {value}}}")),
+                                 CANNOT_TELL)
+
+    def test_writers_the_older_pattern_misses(self):
+        for writer in ("echo 'FLAGS=x' >> \"${{ github.env }}\"", "echo '::set-env name=FLAGS::x'"):
+            with self.subTest(writer=writer):
+                text = flow("claude ${{ env.FLAGS }} -p review", job_env="{FLAGS: --model x}").replace(
+                    "    steps:\n", f"    steps:\n      - run: |\n          {writer}\n", 1)
+                self.assertEqual(gha026(text), CANNOT_TELL)
+        script = ("      - uses: actions/github-script@" + "a" * 40 + "\n        with:\n"
+                  "          script: c['export' + 'Variable']('FLAGS', 'x')\n")
+        text = flow("claude ${{ env.FLAGS }} -p review", job_env="{FLAGS: --model x}").replace(
+            "    steps:\n", "    steps:\n" + script, 1)
+        self.assertEqual(gha026(text), CANNOT_TELL)
+        text = flow("claude ${{ env.FLAGS }} -p review", job_env="{FLAGS: --model x, ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}")
+        self.assertEqual(gha026(text), CANNOT_TELL)
+
+    def test_a_local_actions_step_is_read_as_written(self):
+        # The caller works its `with` out in its own context; the action's step reads its own `env`.
+        action = ("runs:\n  using: composite\n  steps:\n    - shell: bash\n      env: {X: --model sonnet}\n"
+                  "      run: claude ${{ inputs.flags }} -p hi\n")
+        text = ("on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    permissions: {contents: read}\n"
+                f"    env:\n      X: {SKIP}\n      ANTHROPIC_API_KEY: ${{{{ secrets.K }}}}\n    steps:\n"
+                "      - uses: ./.github/actions/run-claude\n        with: {flags: '${{ env.X }}'}\n")
+        with TempDir() as tmp:
+            result = check(tmp, text, files={".github/actions/run-claude/action.yml": action})
+        self.assertEqual(list(result.errors), [])
+        found = sorted((f.severity, f.kind) for f in result.findings if f.rule == "OBAAF-GHA-026")
+        self.assertEqual(found, CANNOT_TELL)
+
+    def test_many_values_under_odd_names_do_not_raise(self):
+        job_env = "{" + ", ".join(f"{n}: v{n}" for n in range(4200)) + ", X: --model sonnet}"
+        with TempDir() as tmp:
+            result = check(tmp, flow("claude ${{ env.X }} -p hi", job_env=job_env))
+        self.assertIsNotNone(result)
 
 
 class NothingElseChangesTest(unittest.TestCase):
