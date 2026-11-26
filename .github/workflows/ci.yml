@@ -440,3 +440,43 @@ jobs:
           assert os.environ["PATH"].startswith(os.path.join(tmp, "premise", "bin") + ":")
           assert os.environ.get("SHELLOPTS") == "noexec"
           assert ran and skipped
+
+  env-context-case-premise:
+    # What slice 2d.19 (#382) must know before the checker folds `env` names: on a GitHub-hosted Linux
+    # runner, does `${{ env.NAME }}` in a step's `run` find a value set under another letter case, and
+    # which value does it give when the job's `env` and the step's own `env` set one name in two cases?
+    # The shell's environment is printed beside it. It checks nothing out, holds no secret and writes
+    # nothing. Plan slice 2d.19a.
+    name: "Runner premise: letter case in the env context (2d.19)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Advisory: it is not a required check of main, so its failure is reported and does not fail the
+    # run (OBAAF-SET-008). A maintainer may make it required.
+    continue-on-error: true
+    permissions: {}
+    env:
+      PREMISE_TWO_CASES: from-job
+      PREMISE_JOB_ONLY: job-only
+      PREMISE_SAME: same-from-job
+    steps:
+      - name: Read the env context in other letter cases
+        env:
+          premise_two_cases: from-step
+          PREMISE_SAME: same-from-step
+          PREMISE_SEEN_IN_STEP_ENV: ${{ env.premise_job_only }}
+        shell: /usr/bin/python3 -I -S {0}
+        run: |
+          import json, os
+          seen = {
+              "env.PREMISE_TWO_CASES": "${{ env.PREMISE_TWO_CASES }}",
+              "env.premise_two_cases": "${{ env.premise_two_cases }}",
+              "env.Premise_Two_Cases": "${{ env.Premise_Two_Cases }}",
+              "env['premise_two_cases']": "${{ env['premise_two_cases'] }}",
+              "env.premise_job_only": "${{ env.premise_job_only }}",
+              "env.PREMISE_SAME": "${{ env.PREMISE_SAME }}",
+          }
+          names = ("PREMISE_TWO_CASES", "premise_two_cases", "Premise_Two_Cases", "PREMISE_JOB_ONLY",
+                   "premise_job_only", "PREMISE_SAME", "PREMISE_SEEN_IN_STEP_ENV")
+          process = {name: os.environ.get(name) for name in names}
+          print("image:", os.environ.get("ImageOS"), os.environ.get("ImageVersion"))
+          print(json.dumps({"expressions": seen, "process": process}, indent=1))
