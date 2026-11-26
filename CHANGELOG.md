@@ -4,6 +4,16 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### OBAAF-SET-011 follows GitHub's page on reusing workflows
+
+Slice 2b.9, from #212; decision D-140. `obaaf audit` only. GitHub's page on reusing workflows, read on 2026-11-26, says a job that calls a reusable workflow cannot declare an environment, that a called job gets an environment's secret when it declares that environment itself and its caller still passes the secret, by name or with `secrets: inherit`, and that a secret the caller does not pass is an empty string, with no error. The rule now weighs each secret each called job in this repository reads by those sentences. Its title is now "A reusable workflow gets an empty value for a secret kept in an environment".
+
+- **A caller that passes nothing a called job reads from an environment is a finding** (medium, one for the call; it says the run fails at its start for a secret the called workflow marks `required`). This is the first adopter's incident of 2026-11-10 (Expectrail `ad3e0775`), which the rule did not apply to, because it weighed only callers that passed something. On a copy of Expectrail's files before that commit, with the two key names that commit's error message says `main-only` holds put into the recorded snapshot (which has no secret names), it now reports `jit-bench.yml#case`.
+- **A secret kept only in an environment, passed by name to a called job that declares that environment, is no longer a finding.** It was reported as empty "whatever the called workflow declares".
+- **The fix no longer says to stop passing the secret**, which by the page empties it: it says to declare the environment on the called job, pass the secret by name or with `secrets: inherit`, and mark it `required`.
+- **"Cannot tell"** where the page does not say or the audit cannot read: a secret passed under another name or with another value to a job whose environment holds it, a value that reads such a secret among other things, a called job that reads or passes on every secret, a second call not handed the secret by name or with `secrets: inherit`, `secrets:` with a key in two letter cases, a key that is not plain text or other text than `inherit`, a file GitHub may read otherwise or one whose own calls reach a cycle or a chain too deep, and any called workflow that was not read, in another repository or not (a finding or "does not apply" before).
+- **Not changed:** `obaaf check`; the audit on this repository and on Expectrail's current files gives the same results, with the rule's new words. Not run: no workflow was run on GitHub to see what a called job gets.
+
 ### An agent named through the `env` a step runs with
 
 Slice 2d.18, from #377; decision D-139. A step runs with its own `env` over its job's over its workflow's. The checker read less than that, so a job could run an agent and get no agent rule:

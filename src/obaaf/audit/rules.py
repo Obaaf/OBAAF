@@ -195,17 +195,22 @@ RULES: tuple[Rule, ...] = (
          "and read OBAAF-GHA-001 and OBAAF-GHA-002 on what such a workflow must not do.",
          why="From 2026-12-02 GitHub's announced default policy blocks this event here, so the workflow's runs for "
              "it will fail at startup and do nothing for pull requests."),
-    Rule("OBAAF-SET-011", "A reusable workflow is passed a secret its caller cannot read", "medium",
+    Rule("OBAAF-SET-011", "A reusable workflow gets an empty value for a secret kept in an environment", "medium",
          ("environment_secrets", "repository_secrets", "organization_secrets"),
-         "the secrets a job passes to a reusable workflow",
-         "A job that calls a reusable workflow cannot declare an environment, so it cannot read a secret "
-         "that is stored only in one: what it passes on is empty. The tempting repair is to copy the secret "
-         "to the repository, which removes the environment's protection. Not followed: what a reusable workflow "
-         "in another repository declares.",
-         "Declare the environment on the job inside the reusable workflow, let that job read the "
-         "environment's secret under its own name, and stop passing it from the caller. Do not copy the "
+         "the secrets the jobs of a called workflow read, and what each calling job passes",
+         "A job in a reusable workflow reads a secret that is kept in an environment. By GitHub's page on reusing "
+         "workflows, the job that calls it cannot declare an environment, so the called job gets the "
+         "environment's value only when it declares that environment itself and the caller still passes the "
+         "secret, by name or with secrets: inherit. Otherwise it gets an empty value, and the run shows no "
+         "error: the caller passes nothing, or passes a secret kept only in an environment, which the caller "
+         "cannot read. The tempting repair is to copy the secret to the repository, which removes the "
+         "environment's protection. Not followed: what a reusable workflow in another repository declares (it is "
+         "\"cannot tell\"), and a secret kept outside every environment that the caller does not pass.",
+         "Declare the environment on the job inside the reusable workflow, and pass the secret from the caller "
+         "by name (NAME: ${{ secrets.NAME }}) or with secrets: inherit. Mark it required under "
+         "on.workflow_call.secrets, so that a caller that does not pass it fails at the start. Do not copy the "
          "secret to the repository.",
-         why="The called workflow may get an empty value for the secret, and the tempting fix, copying it to the "
+         why="The called job may run with an empty secret and no error, and the tempting fix, copying it to the "
              "repository, would remove the environment's protection."),
     Rule("OBAAF-SET-012", "Jobs with no permissions block get a token that can write", "medium",
          ("workflow_permissions",), "jobs that declare no `permissions`",
@@ -1469,80 +1474,366 @@ def rule_003(run: _Run) -> None:
         run.unread("where the secrets are stored", what + " is not known", *missing)
 
 
+def _given(names, only_env: dict) -> str:
+    """"X is stored only in the environment E", for one or more secrets kept only in environments."""
+    names = sorted(names)
+    envs = sorted({e for n in names for e in only_env[n]})
+    where = f"the environment {_names(_q(e) for e in envs)}" if len(envs) == 1 else \
+        f"the environments {_names(_q(e) for e in envs)}"
+    return f"{_names(_q(n) for n in names)} {'is' if len(names) == 1 else 'are'} stored only in {where}"
+
+
+class _Secrets:
+    """Where the settings say each secret is kept, in upper case as GitHub compares secret names."""
+
+    def __init__(self, env_secrets: dict, wide: set) -> None:
+        self.stored: dict = {}      # secret -> the environments that hold it
+        self.by_env: dict = {}      # environment, in lower case as GitHub compares the names -> its secrets
+        for env, names in env_secrets.items():
+            self.by_env.setdefault(env.lower(), set()).update(n.upper() for n in names)
+            for name in names:
+                self.stored.setdefault(name.upper(), set()).add(env)
+        self.wide = frozenset(wide)
+        self.only_env = {name: envs for name, envs in self.stored.items() if name not in wide}
+        self.only_env_names = frozenset(self.only_env)
+
+    def held_by(self, env: dict, names) -> list[str]:
+        """Which of the names the environment a job declares holds: only for a name written plainly (an
+        expression, a number, or a name with space round it, whose reading by GitHub is not established, is
+        never taken to hold anything)."""
+        name = env.get("name")
+        if name is None or name != name.strip():
+            return []
+        held = self.by_env.get(name.lower(), set())
+        return sorted(n for n in names if n in held)
+
+
+def _plainly_named(env: dict) -> bool:
+    name = env.get("name")
+    return not env or (name is not None and name == name.strip())
+
+
+def _reaches_called_job(run: _Run, subject: str, target: str, passes: dict, called: dict, name: str,
+                        kept: _Secrets, missing: dict) -> None:
+    """What a job of a called workflow in this repository gets for a secret it reads, by GitHub's page on
+    reusing workflows (https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows, read
+    on 2026-11-26 for flagship slice 2b.9): "The job that calls the reusable workflow can't use the
+    `environment` keyword"; "To use an environment secret in a reusable workflow, set `environment` on the
+    job in the reusable workflow. The caller workflow must still pass the secret. Use `secrets: inherit` or
+    pass the secret by name"; "You can pass a secret by name even if it only exists in the environment";
+    "The job that sets `environment` receives the environment secret's value"; and "If the caller workflow
+    doesn't pass an environment secret, the secret resolves to an empty string in the reusable workflow. The
+    workflow run doesn't show an error." What the page does not say (a secret passed under another name or
+    with another value to a job whose environment holds it, a second call that is not passed the secret) is
+    "cannot tell"."""
+    upper = name.upper()
+    key = passes["keys"].get(upper)
+    inherit = passes["inherit"] and not passes["odd_keys"]
+    passed = inherit or key is not None
+    where = f"whose job {_q(called['id'])} reads secrets.{plain(name, 60)}"
+    env = called["environment"] or {}
+    reads = set((key or {}).get("reads", ()))
+    reads_env = sorted(reads & kept.only_env_names)
+    concerns = upper in kept.stored or bool(reads_env) or bool(key and key["all"])
+    if not concerns:
+        return      # kept outside every environment, or nowhere, and passed from secrets every job can read
+    if passes["odd_keys"] or (key and key.get("ambiguous")):
+        run.cannot_tell(subject, f"The job calls {_q(target, 120)}, {where}. Its secrets: "
+                                 + ("names it twice, in two letter cases" if key and key.get("ambiguous") else
+                                    "holds a key this reader does not take as a plain name, or is text other than "
+                                    "inherit")
+                                 + f", so whether and how it passes {_q(name)} is not known.")
+        return
+    if called["calls"]:
+        # The called job passes it on to a workflow of its own. That call is read as a caller of its own; this
+        # call counts only when it hands the job the secret as the page documents, by name or with inherit.
+        if not (inherit or (key is not None and key["plain"] == upper)):
+            run.cannot_tell(subject, f"The job calls {_q(target, 120)}, {where} and passes it on to "
+                                     f"{_q(called['calls'], 120)}. "
+                                     + ("This job does not pass it" if not passed else
+                                        "This job passes it under another name or with another value")
+                                     + "; whether a job there that declares an environment holding it gets its "
+                                       "value is not documented, so the second call was not followed.")
+        return
+    if not passed:
+        if upper not in kept.stored:
+            return
+        # Reported once for the call, with every secret and job it concerns (see _missing_finding).
+        entry = missing.setdefault(upper, {"name": name, "jobs": [], "declared": []})
+        entry["jobs"].append(called["id"])
+        if kept.held_by(env, [upper]):
+            entry["declared"].append(called["id"])
+        return
+    if not _plainly_named(env):
+        # Passed, so what the job gets depends on whether the environment it names holds the secret.
+        run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)}, {where} and names its "
+                                 "environment in a form this reader does not take as a plain name (an expression, "
+                                 "a number, a mapping without a name, or space round it). Whether that is an "
+                                 f"environment that holds {_q(name)}, and so which value the job gets, is not known.")
+        return
+    if inherit:
+        if kept.held_by(env, [upper]):
+            return      # the job declares the environment and is passed the secret: it gets the environment's value
+        if upper in kept.only_env:
+            run.finding(subject, "medium",
+                        f"The job passes every secret to {_q(target, 120)}, {where}. {_given([upper], kept.only_env)}, "
+                        "and that job does not declare it, so the value it gets is empty.")
+        return
+    held = kept.held_by(env, sorted({upper} | reads))
+    if held:
+        if key["plain"] == upper:
+            return      # passed as NAME: ${{ secrets.NAME }} to a job whose environment holds NAME: documented
+        if upper in held and key["plain"] in kept.wide and not kept.held_by(env, [key["plain"]]):
+            return      # either the environment's NAME or a secret every job can read: neither is empty
+        run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)} with a value other than "
+                                 f"${{{{ secrets.{plain(name, 60)} }}}}, {where} and declares the environment "
+                                 f"{_q(env['name'])}, which holds {_names(_q(n) for n in held)}. Which value that job "
+                                 "gets is not documented.")
+        return
+    # The job's environment holds neither the name it reads nor what the value reads: it gets what the caller
+    # passes, which the caller, which cannot declare an environment, evaluates without one.
+    if key["all"]:
+        run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)} as a secret it picks with an "
+                                 f"expression, {where}. Whether that is one stored only in an environment is not "
+                                 "known.")
+        return
+    if not reads_env:
+        return      # the value comes from secrets every job can read, or from text
+    shown = "" if key["plain"] == upper else f" as {_q(name)}"
+    if key["plain"] in kept.only_env:
+        run.finding(subject, "medium",
+                    f"The job passes secrets.{plain(key['plain'], 60)} to {_q(target, 120)}{shown}, {where}. "
+                    f"{_given([key['plain']], kept.only_env)}, and a job that calls a reusable workflow cannot "
+                    "declare an environment, so what it passes is empty; the called job does not declare an "
+                    "environment that holds either name.")
+        return
+    run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)} with a value that reads "
+                             f"{_names(_q(n) for n in reads_env)} among other things, {where}. "
+                             f"{_given(reads_env, kept.only_env)}, so that part of the value is empty; whether the "
+                             "whole value is is not known.")
+
+
+def _missing_finding(run: _Run, subject: str, target: str, missing: dict, kept: _Secrets,
+                     declared: dict, passes: dict) -> None:
+    """One finding for a call that does not pass secrets kept in an environment which jobs of the called
+    workflow read: the first adopter's incident (Expectrail `ad3e0775`, 2026-11-10). A secret the called
+    workflow marks required makes the run fail at its start, by the page; the others are empty."""
+    if not missing:
+        return
+    names = [missing[k]["name"] for k in sorted(missing)]
+    jobs = sorted({j for k in missing for j in missing[k]["jobs"]})
+    envs = sorted({e for k in missing for e in kept.stored[k]})
+    holds: dict = {}
+    for k in sorted(missing):
+        for j in missing[k]["declared"]:
+            holds.setdefault(j, []).append(missing[k]["name"])
+    by_names: dict = {}     # the secrets held -> the jobs whose environment holds just those
+    for j, ns in sorted(holds.items()):
+        by_names.setdefault(tuple(sorted(set(ns))), []).append(j)
+    said = "".join(f" {'Its job' if len(js) == 1 else 'Its jobs'} {_names(_q(j) for j in js)} "
+                   f"{'declares' if len(js) == 1 else 'declare'} an environment that holds {_names(_q(n) for n in ns)}, "
+                   f"but the caller must still pass a secret for {'the job' if len(js) == 1 else 'a job'} to get it."
+                   for ns, js in sorted(by_names.items()))
+    listed, whole = declared.get("names") or {}, declared.get("whole", False)
+    # A secret passed that the called workflow does not declare: by a GitHub community thread ("Invalid secret,
+    # ... is not defined in the referenced workflow"), not by the page, the run may then fail at its start.
+    refused = whole and any(k not in listed for k in passes["keys"])
+    # Only a declaration read whole says what GitHub does; otherwise every one of them is "either".
+    required = sorted(missing[k]["name"] for k in missing if whole and not refused and listed.get(k) is True)
+    unsure = sorted(missing[k]["name"] for k in missing
+                    if not whole or refused or (k in listed and listed[k] is None))
+    empty = sorted(set(names) - set(required) - set(unsure))
+    outcome = []
+    if required:
+        outcome.append(f"GitHub fails the run at its start for {_names(_q(n) for n in required)}, which the called "
+                       "workflow marks required")
+    if empty:
+        outcome.append(f"{_names(_q(n) for n in empty)} {'is' if len(empty) == 1 else 'are'} empty in the called "
+                       "workflow, and the run shows no error")
+    if unsure:
+        why = ("the call also passes a secret the called workflow does not declare" if refused else
+               "the called workflow's declaration of its secrets was not read whole" if not whole else
+               "the called workflow's declaration of it was not read as true or false")
+        outcome.append(f"for {_names(_q(n) for n in unsure)} the run either fails at its start or gets an empty "
+                       f"value ({why})")
+    many = len(names) > 1
+    run.finding(subject, "medium",
+                f"The job calls {_q(target, 120)} without passing {_names(_q(n) for n in names)}, which "
+                f"{'its job' if len(jobs) == 1 else 'its jobs'} {_names(_q(j) for j in jobs)} "
+                f"{'reads' if len(jobs) == 1 and not many else 'read'}, and "
+                f"{'which are' if many else 'which is'} stored in the "
+                f"{'environment' if len(envs) == 1 else 'environments'} {_names(_q(e) for e in envs)}.{said} A "
+                "called workflow gets only the secrets its caller passes, by name or with secrets: inherit, so "
+                + "; ".join(outcome) + ".")
+
+
+def _call_graph_parts(run: _Run) -> dict:
+    """For each workflow file whose own calls reach a file in a cycle or a chain deeper than GitHub allows (by
+    _call_graph_doubts), itself included, why: a run of it GitHub may refuse whole, so no job in it may run at
+    all (the second review of slice 2b.9: a finding there said "the run shows no error"). Only what a file's
+    own calls reach counts, never another caller of the same workflow (the third review: one cyclic file made
+    every caller of a shared workflow "cannot tell"). One pass up the calls from every such file at once."""
+    files = run.files()
+    read = {file["path"] for file in files}
+    calls = {file["path"]: [t for t in (called_path(job) for job in file["jobs"]) if t is not None] for file in files}
+    doubts = _call_graph_doubts(calls, read)
+    for file in files:
+        if not file.get("triggers") and file["path"] not in doubts:
+            # No event starts it, and GitHub calls only a workflow that has `workflow_call` (the fourth review).
+            doubts[file["path"]] = "no event starts it, so GitHub never runs it"
+    if not doubts:
+        return {}
+    callers: dict = {}
+    for path, targets in calls.items():
+        for target in dict.fromkeys(targets):
+            callers.setdefault(target, []).append(path)
+    out = {path: [f"{plain(path, 120)}: {why}"] for path, why in doubts.items()}
+    frontier = list(out)
+    while frontier:
+        reached = []
+        for target in frontier:
+            for path in callers.get(target, ()):
+                if path not in out:
+                    out[path] = out[target]
+                    reached.append(path)
+        frontier = reached
+    # A file that runs only when called runs only inside its callers' runs: when every caller in this repository
+    # is a run GitHub may refuse, so is each of its own (the third review: a chain a→b→c→d→e, whose files below
+    # `a` run only from it). Each file is settled once, when its last caller is.
+    only_called = {f["path"] for f in files if f.get("triggers") and set(f["triggers"]) <= {"workflow_call"}}
+    left = {path: len(set(callers.get(path, ()))) for path in only_called}
+    frontier = list(out)
+    settled = set(out)
+    while frontier:
+        reached = []
+        for path in frontier:
+            for target in dict.fromkeys(calls.get(path, ())):
+                if target in left and target not in settled:
+                    left[target] -= 1
+                    if left[target] == 0:
+                        out[target] = [f"{plain(target, 120)}: it runs only when called, and every workflow here "
+                                       f"that calls it is one GitHub may refuse ({out[path][0]})"]
+                        settled.add(target)
+                        reached.append(target)
+        frontier = reached
+    return out
+
+
+def _weighed_call(run: _Run, job: dict) -> bool:
+    """Whether OBAAF-SET-011 has something to weigh for a calling job: it passes a secret (by name, with
+    `secrets: inherit`, or as an input), it calls a workflow that was not read (in another repository, or one
+    that does not parse or was not found), or a job of the workflow it calls reads one."""
+    passes = job["passes"]
+    if passes["inherit"] or passes["keys"] or passes["odd_keys"] or passes["inputs"] or passes["inputs_all"] \
+            or passes["all"]:
+        return True
+    local = _called(run, job)
+    return local is None or any(j["secrets"] or j["all_secrets"] or j["passes"] for j in local["jobs"])
+
+
+def _weigh_call(run: _Run, file: dict, job: dict, kept: _Secrets, listed: str, graph: dict) -> None:
+    """OBAAF-SET-011 for one calling job."""
+    subject = f"job {_job_label(file, job)}"
+    target = job["calls"] or ""
+    passes = job["passes"]
+    local = _called(run, job)
+    doubt = list(job.get("doubt") or []) + list(file.get("may_refuse") or []) + \
+        (list(local.get("may_refuse") or []) if local else []) + graph.get(file["path"], [])
+    if doubt:
+        # The caller's file, or the file it calls, may be read by GitHub otherwise than by this reader (a YAML
+        # merge key may give the environment or the secrets passed), or not run.
+        run.cannot_tell(subject, f"The job calls {_q(target, 120)}, and GitHub may read the files otherwise "
+                                 f"than the audit does, or not run them ({_names(doubt, 2)}), so what the called "
+                                 "jobs get for the secrets they read is not known.")
+        return
+    # Handed over as an input, under `with:`: an input is not a secret, so no environment the called job
+    # declares stands in for it.
+    for name in passes["inputs"]:
+        if name.upper() in kept.only_env:
+            run.finding(subject, "medium",
+                        f"The job hands secrets.{plain(name, 60)} to {_q(target, 120)} as an input. "
+                        f"{_given([name.upper()], kept.only_env)}, and a job that calls a reusable workflow "
+                        "cannot declare an environment, so the called workflow cannot get its value that way, "
+                        "whatever it declares.")
+    if passes["inputs_all"]:
+        run.cannot_tell(subject, f"The job hands {_q(target, 120)} a secret it picks with an expression as an "
+                                 "input. Whether that is one stored only in an environment is not known.")
+    if local is None:
+        unread = "which was not read (it is in another repository, could not be parsed, or is not among the files read)"
+        said = len(run.results)
+        if passes["odd_keys"]:
+            run.cannot_tell(subject, f"The job calls {_q(target, 120)}, {unread}, and its secrets: holds a key "
+                                     "this reader does not take as a plain name, or is text other than inherit. "
+                                     "What a job there gets for a secret kept in an environment is not known.")
+        elif passes["inherit"]:
+            run.cannot_tell(subject, f"The job passes every secret to {_q(target, 120)}, {unread}. Whether a "
+                                     "job there reads a secret kept in an environment without declaring that "
+                                     f"environment ({listed or 'none is kept only in one'}) is not known.")
+        for name, key in sorted(passes["keys"].items()):
+            reads = sorted(set(key["reads"]) & kept.only_env_names)
+            if key["all"]:
+                run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)} as a secret it picks "
+                                         f"with an expression, {unread}. Whether that is one stored only in "
+                                         "an environment is not known.")
+            elif reads:
+                run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)}, {unread}. "
+                                         f"{_given(reads, kept.only_env)}: a job there gets a value for it only "
+                                         "if it declares an environment that holds it, and whether one does is "
+                                         "not known.")
+        if len(run.results) == said:
+            run.cannot_tell(subject, f"The job calls {_q(target, 120)}, {unread}. Whether a job there reads a "
+                                     "secret kept in an environment that this job does not pass, which it would "
+                                     "then get empty, is not known.")
+        return
+    missing: dict = {}
+    for called in local["jobs"]:
+        onward = called["passes"] and (called["passes"]["inherit"] or called["passes"]["all"])
+        if called["all_secrets"] or onward:
+            # It can read any secret, or passes them all on: which it relies on is not known.
+            run.cannot_tell(subject, f"The job calls {_q(target, 120)}, whose job {_q(called['id'])} "
+                                     + ("passes every secret on to another call" if onward and not
+                                        called["all_secrets"] else "can read any secret")
+                                     + ". Whether it relies on one kept in an environment, and what it gets "
+                                       "for it, is not known.")
+        # Each secret it names is still weighed, once in any letter case, as GitHub compares the names.
+        spelled: dict = {}
+        for name in called["secrets"]:
+            spelled.setdefault(name.upper(), name)
+        for name in spelled.values():
+            _reaches_called_job(run, subject, target, passes, called, name, kept, missing)
+    _missing_finding(run, subject, target, missing, kept, local.get("call_secrets") or {}, passes)
+
+
 def rule_011(run: _Run) -> None:
-    callers = [(file, job) for file, job in run.jobs()
-               if job["passes"] and (job["passes"]["inherit"] or job["passes"]["names"] or job["passes"]["all"])]
+    callers = [(file, job) for file, job in run.jobs() if job["calls"] and _weighed_call(run, job)]
     if not callers:
-        run.idle = "no job passes a secret to a reusable workflow"
+        run.idle = "no job passes a secret to a reusable workflow, or calls one that reads a secret or was not read"
         return
     env_secrets, env_whole = run.got("environment_secrets")
     repo, repo_whole = run.got("repository_secrets")
     org, org_whole = run.got("organization_secrets")
     if not (env_whole and repo_whole and org_whole):
         run.unread("where the secrets are stored",
-                   f"{_do(len(callers), 'job', 'passes', 'pass')} secrets to a reusable workflow, and whether any "
-                   "of those secrets is stored only in an environment is not known",
+                   f"{_do(len(callers), 'job', 'calls', 'call')} a reusable workflow, and whether a secret that "
+                   "workflow reads is kept in an environment is not known",
                    "environment_secrets", "repository_secrets", "organization_secrets")
         return
-    wide = {name.upper() for name in list(repo) + list(org)}
-    only_env: dict = {}
-    for env, names in env_secrets.items():
-        for name in names:
-            if name.upper() not in wide:
-                only_env.setdefault(name.upper(), []).append(env)
-    run.compared = f"{_n(len(callers), 'job')} passing secrets to a reusable workflow"
-    if not only_env:
-        return  # every secret is stored where a caller can read it
-    listed = _names(_q(n) for n in sorted(only_env))
+    kept = _Secrets(env_secrets, {name.upper() for name in list(repo) + list(org)})
+    run.compared = f"{_n(len(callers), 'job')} calling a reusable workflow"
+    if not kept.stored:
+        return  # no secret is kept in an environment
+    listed = _names(_q(n) for n in sorted(kept.only_env))
+    graph = _call_graph_parts(run)
     for file, job in callers:
-        subject = f"job {_job_label(file, job)}"
-        target = job["calls"] or ""
-        passes = job["passes"]
-        # Passed by name, as a secret or as an input: the called workflow sees what the caller could read.
-        for name in passes["names"]:
-            envs = only_env.get(name.upper())
-            if envs:
-                run.finding(subject, "medium",
-                            f"The job passes secrets.{plain(name, 60)} to {_q(target, 120)}. {_q(name)} is stored "
-                            f"only in the environment {_names(_q(e) for e in sorted(envs))}, and a job that "
-                            "calls a reusable workflow cannot declare an environment, so what it passes is "
-                            "empty, whatever the called workflow declares.")
-        if passes["all"]:
-            run.cannot_tell(subject, f"The job passes a secret it picks with an expression to {_q(target, 120)}. "
-                                     f"Whether that is one of {listed}, stored only in an environment, is not "
-                                     "known.")
-        if not passes["inherit"]:
-            continue
-        local = _called(run, job)
-        if local is None:
-            run.cannot_tell(subject, f"The job passes every secret to {_q(target, 120)}, which was not read "
-                                     "(it is in another repository, or could not be parsed). Whether that "
-                                     f"workflow reads {listed}, stored only in an environment, is not known.")
-            continue
-        for called in local["jobs"]:
-            env = called["environment"] or {}
-            where = f"whose job {_q(called['id'])}"
-            if called["all_secrets"] or (called["passes"] and (called["passes"]["inherit"] or called["passes"]["all"])):
-                run.cannot_tell(subject, f"The job passes every secret to {_q(target, 120)}, {where} can read "
-                                         f"any of them or passes them on. Whether it relies on {listed}, "
-                                         "stored only in an environment, is not known.")
-                continue
-            for name in called["secrets"]:
-                envs = only_env.get(name.upper())
-                if not envs:
-                    continue
-                if env.get("computed"):
-                    run.cannot_tell(subject, f"The job passes every secret to {_q(target, 120)}, {where} reads "
-                                             f"secrets.{plain(name, 60)} and names its environment with an "
-                                             f"expression. {_q(name)} is stored only in the environment "
-                                             f"{_names(_q(e) for e in sorted(envs))}; whether that is the "
-                                             "environment the job gets is not known.")
-                elif env.get("name", "").lower() not in {e.lower() for e in envs}:
-                    run.finding(subject, "medium",
-                                f"The job passes every secret to {_q(target, 120)}, {where} reads "
-                                f"secrets.{plain(name, 60)}. {_q(name)} is stored only in the environment "
-                                f"{_names(_q(e) for e in sorted(envs))}, and that job does not declare it, so "
-                                "the value it gets is empty.")
+        mark = len(run.results)
+        _weigh_call(run, file, job, kept, listed, graph)
+        if self_repository_call(job):
+            # D-076 reads a `$/` call as this repository's, though whether GitHub takes `$/` in a job's `uses:` was
+            # not established: a finding then rests on that, wherever the weighing ended (the third review).
+            for result in run.results[mark:]:
+                if result["state"] == "finding":
+                    result["message"] += (" This holds if GitHub runs a call written with $/, which was not "
+                                          "established.")
 
 
 # ---------------------------------------------------------------- rules about branches
