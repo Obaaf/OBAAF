@@ -2384,9 +2384,18 @@ class WorkflowRules:
         # named `CLAUDE_CODE_OAUTH_TOKEN` in the job's `env`; found by the review).
         # What is put in is bounded for the whole workflow too (flagship slice 2d.17), on the step's own number.
         put_ins = step.put_ins
-        cheap = [(text, agent_flags.put_in_cheaply(text, scopes, put_ins.names if put_ins is not None else None,
-                                                   (step.seq, n))) for n, (text, _b) in enumerate(parts)
-                 if "$" in text]
+        # Worked out once for the step, not once for each tool it is read for: without the `=` guard every script
+        # with a `$` is put in (found by CI: a test of 400 jobs using local actions took 25 % longer).
+        cheap_cache = self.__dict__.setdefault("_cheap_put_ins", {})
+        cheap = []
+        for n, (text, _b) in enumerate(parts):
+            if "$" not in text:
+                continue
+            key = (step.seq, id(step.raw), n, text)
+            if key not in cheap_cache:
+                cheap_cache[key] = agent_flags.put_in_cheaply(
+                    text, scopes, put_ins.names if put_ins is not None else None, (step.seq, n))
+            cheap.append((text, cheap_cache[key]))
         named_unread = any(put is None and agent_flags.names_when_put_in(text, scopes, programs, packages)
                            for text, put in cheap)
         if not named_unread and not any(agent_flags.appears(t, programs, packages) for t in named) and not any(
