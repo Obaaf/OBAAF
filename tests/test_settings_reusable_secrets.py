@@ -340,7 +340,16 @@ class ThirdReviewTest(unittest.TestCase):
                  "w.yml": workflow(declared, job("propose", "    environment: main-only\n", self.READS))}
         message = one(files)["message"]
         self.assertIn("the run either fails at its start or gets an empty value", message)
+        self.assertIn("declaration of its secrets was not read whole", message)
         self.assertNotIn("GitHub fails the run at its start for", message)
+
+    def test_a_caller_in_a_file_no_event_starts_is_cannot_tell(self):
+        # The fourth review: `on: {}` runs nowhere, so its call gives no empty secret.
+        lib = workflow("  workflow_call:\n", job("propose", "    environment: main-only\n", self.READS))
+        idle = "name: M\non: {}\npermissions:\n  contents: read\njobs:\n  case:\n    uses: ./.github/workflows/lib.yml\n"
+        result = one({"mid.yml": idle, "lib.yml": lib})
+        self.assertEqual(result["state"], "cannot-tell")
+        self.assertIn("no event starts it", result["message"])
 
     def test_the_dollar_slash_clause_reaches_a_call_to_a_file_that_was_not_read(self):
         files = {"r.yml": caller("    with:\n      token: ${{ secrets.PACKAGE_INDEX_TOKEN }}\n", "$/.github/workflows/gone.yml")}

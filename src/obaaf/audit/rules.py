@@ -1652,6 +1652,7 @@ def _missing_finding(run: _Run, subject: str, target: str, missing: dict, kept: 
                        "workflow, and the run shows no error")
     if unsure:
         why = ("the call also passes a secret the called workflow does not declare" if refused else
+               "the called workflow's declaration of its secrets was not read whole" if not whole else
                "the called workflow's declaration of it was not read as true or false")
         outcome.append(f"for {_names(_q(n) for n in unsure)} the run either fails at its start or gets an empty "
                        f"value ({why})")
@@ -1676,6 +1677,10 @@ def _call_graph_parts(run: _Run) -> dict:
     read = {file["path"] for file in files}
     calls = {file["path"]: [t for t in (called_path(job) for job in file["jobs"]) if t is not None] for file in files}
     doubts = _call_graph_doubts(calls, read)
+    for file in files:
+        if not file.get("triggers") and file["path"] not in doubts:
+            # No event starts it, and GitHub calls only a workflow that has `workflow_call` (the fourth review).
+            doubts[file["path"]] = "no event starts it, so GitHub never runs it"
     if not doubts:
         return {}
     callers: dict = {}
