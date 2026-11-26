@@ -1743,8 +1743,8 @@ def _weigh_call(run: _Run, file: dict, job: dict, kept: _Secrets, listed: str, g
         # The caller's file, or the file it calls, may be read by GitHub otherwise than by this reader (a YAML
         # merge key may give the environment or the secrets passed), or not run.
         run.cannot_tell(subject, f"The job calls {_q(target, 120)}, and GitHub may read the files otherwise "
-                                 f"than the audit does ({_names(doubt, 2)}), so what the called jobs get for "
-                                 "the secrets they read is not known.")
+                                 f"than the audit does, or not run them ({_names(doubt, 2)}), so what the called "
+                                 "jobs get for the secrets they read is not known.")
         return
     # Handed over as an input, under `with:`: an input is not a secret, so no environment the called job
     # declares stands in for it.
