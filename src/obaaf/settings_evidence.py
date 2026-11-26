@@ -172,13 +172,34 @@ class SettingsEvidence:
             return self
         return replace(self, limitations=(*self.limitations, reason))
 
-    def _unread(self, key: str) -> str:
+    def _unread(self, key: str, problems: list[dict] | None = None) -> str:
+        """Why ``key`` was not read in full, naming ``problems`` (by default every recorded one)."""
         entry = self.data["settings"][key]
         if entry["status"] == "read":
             return ""
+        shown = entry.get("problems", []) if problems is None else problems
         why = entry.get("reason") or ", ".join(
-            f"{plain(p['key'], 60)}: {plain(p['reason'], 160)}" for p in entry.get("problems", [])[:3])
+            f"{plain(p['key'], 60)}: {plain(p['reason'], 160)}" for p in shown[:3])
         return f"{key} {entry['status']}: {plain(why, 400)}"
+
+    def _environment_problems(self, environment: str | None) -> list[dict]:
+        """The problems of a partly read environment list that keep it from being used for ``environment``
+        (any environment when None): one naming an environment the list does not hold, which may mean the
+        list itself is incomplete, or else the selected-branch patterns of a matching environment not read.
+        Empty when the list can be used. Other parts not read, such as custom deployment protection rules,
+        are outside this control (#385); they are left out of the reason too (review of #386)."""
+        envs = self.data["settings"]["environments"]
+        names = {env["name"] for env in envs["value"]}
+        unlisted = [problem for problem in envs["problems"] if problem["key"] not in names]
+        if unlisted:
+            return unlisted
+        unread = {env["name"] for env in envs["value"]
+                  if env["deployment_branches"] == "selected" and env.get("branch_policies") is None
+                  and (environment is None or environment_match(env["name"], environment) != "differs")}
+        if not unread:
+            return []
+        # A pattern list that is null with no problem under its name says nothing more; name them all.
+        return [problem for problem in envs["problems"] if problem["key"] in unread] or envs["problems"]
 
     def inventory_limitations(self, environment: str | None = None) -> list[str]:
         """Recorded reasons a full inventory cannot be compared, including when no names are configured."""
@@ -187,20 +208,15 @@ class SettingsEvidence:
         personal = (repo["status"] == "read" and repo["value"]["owner_type"] == "User"
                     and entries["organization_secrets"]["status"] == "not_applicable")
         needed = ["environments", "environment_secrets", "repository_secrets"]
-        envs = entries["environments"]
-        if envs["status"] == "partial":
-            names = {env["name"] for env in envs["value"]}
-            list_whole = all(problem["key"] in names for problem in envs["problems"])
-            policies_read = all(
-                env.get("branch_policies") is not None for env in envs["value"]
-                if env["deployment_branches"] == "selected"
-                and (environment is None or environment_match(env["name"], environment) != "differs")
-            )
-            if list_whole and policies_read:
+        shown: dict[str, list[dict]] = {}
+        if entries["environments"]["status"] == "partial":
+            if problems := self._environment_problems(environment):
+                shown["environments"] = problems
+            else:
                 needed.remove("environments")
         if not personal:
             needed.append("organization_secrets")
-        return [reason for key in needed if (reason := self._unread(key))]
+        return [reason for key in needed if (reason := self._unread(key, shown.get(key)))]
 
     def assess(self, name: str, environment: str) -> Assessment:
         """Assess one literal name from a job, independently of the finding's other controls."""
