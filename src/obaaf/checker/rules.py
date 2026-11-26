@@ -2376,7 +2376,7 @@ class WorkflowRules:
     def _first_env_writer(self, job: Job) -> int:
         """The index of the job's first step that may set a variable of the `env` context for the steps after it
         (`_ENV_CONTEXT_WRITERS_RE` in any text or key of the step, or a github-script step), -1 where the job's or
-        workflow's `env` names such a thing, and the number of steps where none does. Worked out once for the job,
+        workflow's `env` or `defaults` names such a thing, and the number of steps where none does. Worked out once for the job,
         each mapping and text read once, so a YAML alias is not read again (found by the second review: the
         steps' texts read for every step took 75 s for 6,000 steps and 1 GB for a 1 KB alias bomb)."""
         cache = self.__dict__.setdefault("_first_env_writer_cache", {})
@@ -2403,7 +2403,9 @@ class WorkflowRules:
                 return False
 
             first = len(job.steps)
-            if writes(job.raw.get("env")) or writes(self.wf.raw.get("env")):
+            # A default `shell` is a command line every `run` step starts with (found by the third review).
+            if any(writes(where) for where in (job.raw.get("env"), self.wf.raw.get("env"), job.raw.get("defaults"),
+                                               self.wf.raw.get("defaults"))):
                 first = -1
             else:
                 for n, other_step in enumerate(job.steps):

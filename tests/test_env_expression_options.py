@@ -251,6 +251,14 @@ class TheSecondReviewTest(unittest.TestCase):
                     "    steps:\n", f"    steps:\n      - run: |\n          {writer}\n", 1)
                 self.assertEqual(gha026(text), CANNOT_TELL)
 
+    def test_a_writer_in_a_default_shell(self):
+        shell = "    defaults: {run: {shell: 'bash -c \"echo FLAGS=x >> $GITHUB_ENV; bash -e {0}\"'}}\n"
+        text = flow("claude ${{ env.FLAGS }} -p review", job_env="{FLAGS: --model x}", extra=shell)
+        self.assertEqual(gha026(text), CANNOT_TELL)
+        top = "defaults: {run: {shell: 'bash -c \"echo FLAGS=x >> $GITHUB_ENV; bash -e {0}\"'}}\n"
+        self.assertEqual(gha026(top + flow("claude ${{ env.FLAGS }} -p review", job_env="{FLAGS: --model x}")),
+                         CANNOT_TELL)
+
     def test_an_alias_bomb_before_the_step_is_read_once(self):
         lines = ["x0: &x0 [" + ", ".join(["aaaaaaaaaa"] * 5) + "]"]
         for n in range(1, 25):
