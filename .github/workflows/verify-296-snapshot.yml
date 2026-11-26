@@ -1,0 +1,86 @@
+name: Check snapshot compatibility for the generated workflow
+on:
+  push:
+    branches: [lead/verify-296-snapshot-ba04f84]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  readers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        reader: ['8caddd6f06c50b9266d8116fd672f39b55770477', 'ba04f841d7f15a22f61bb4252f377dfa3c8c9dca']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.reader }}
+          path: reader
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 310ff028da1e3e9e3232b06a9e410055000d9e56
+          path: target
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Read the live snapshot artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api /repos/Obaaf/OBAAF/actions/artifacts/15117966105/zip > "$RUNNER_TEMP/settings-384.zip"
+          cd "$RUNNER_TEMP"
+          echo '36c0dce1136aa1c6e9f70ea3aec250fe63c1d257943e126c5fd19d4027aff92b  settings-384.zip' | sha256sum --check
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          with ZipFile("settings-384.zip") as archive:
+              info = archive.getinfo("with-token.json")
+              assert 0 < info.file_size <= 20_000_000
+              Path("settings-384.json").write_bytes(archive.read(info))
+          PY
+      - name: Check the committed and published snapshots with the installed CLI
+        env:
+          READER: ${{ matrix.reader }}
+        run: |
+          set -euo pipefail
+          export TMPDIR="$(mktemp -d "$RUNNER_TEMP/obaaf-snapshot.XXXXXX")"
+          if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          test "$(git -C reader rev-parse HEAD)" = "$READER"
+          test "$(git -C target rev-parse HEAD)" = 310ff028da1e3e9e3232b06a9e410055000d9e56
+          python -m pip install --constraint reader/actions/setup-obaaf/constraints.txt ./reader
+          cd target
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          snapshot = Path(".github/obaaf-settings.json")
+          old = snapshot.read_bytes()
+          new = (Path(os.environ["RUNNER_TEMP"]) / "settings-384.json").read_bytes()
+          environments = json.loads(new)["settings"]["environments"]["value"]
+          assert any("custom_protection_rules" in env for env in environments)
+          try:
+              for label, contents in (("committed", old), ("published", new)):
+                  snapshot.write_bytes(contents)
+                  for command, option in (("audit", "--from-snapshot"), ("check", "--settings")):
+                      result = subprocess.run(
+                          ["obaaf", command, ".", option, str(snapshot), "--fail-on", "never"],
+                          text=True, capture_output=True,
+                      )
+                      rejected = os.environ["READER"] == "8caddd6f06c50b9266d8116fd672f39b55770477" and label == "published"
+                      print(label, command, "exit", result.returncode, flush=True)
+                      if rejected:
+                          assert result.returncode != 0
+                          assert "additionalProperties" in result.stderr + result.stdout
+                          print("The reader rejected an unrecognized property in the snapshot.")
+                      else:
+                          assert result.returncode == 0, result.stderr[:500]
+          finally:
+              snapshot.write_bytes(old)
+          PY
