@@ -2334,7 +2334,12 @@ class WorkflowRules:
     # and workflow's `env` the widest way (flagship slice 2d.19c, from its review): more than `_SETS_FOR_LATER_RE`,
     # whose wider reading would change the `$NAME` put-in too.
     _ENV_CONTEXT_WRITERS_RE = re.compile(r"GITHUB_ENV|github\s*\.\s*env\b|\[\s*['\"]env['\"]\s*\]|exportVariable"
-                                         r"|_runner_file_commands|set-env|ACTIONS_ALLOW_UNSECURE_COMMANDS", re.I)
+                                         r"|_runner_file|set_env_|set-env|ACTIONS_ALLOW_UNSECURE_COMMANDS"
+                                         r"|toJSON\s*\(\s*github\s*\)|@actions/core", re.I)
+    # The functions whose value `env_expr` works out as GitHub does for this purpose. `fromJSON` is parsed more
+    # strictly than the runner parses it (single quotes, comments, trailing commas: found by the second review),
+    # `toJSON` may escape otherwise, and the others give true or false: each refuses.
+    _ENV_ONLY_FUNCTIONS = frozenset({"format", "join"})
     # The words that may stand at the head of a reference in an expression the checker works out for
     # OBAAF-GHA-026: `env` and the literals. Any other context (`inputs`, `matrix`, `github`, `vars`, a step's
     # output) is a value the checker does not know, which `env_expr` reads as empty inside `format` and `join`
@@ -2368,19 +2373,54 @@ class WorkflowRules:
         cache[key] = (worked, step, job)
         return worked
 
+    def _first_env_writer(self, job: Job) -> int:
+        """The index of the job's first step that may set a variable of the `env` context for the steps after it
+        (`_ENV_CONTEXT_WRITERS_RE` in any text or key of the step, or a github-script step), -1 where the job's or
+        workflow's `env` names such a thing, and the number of steps where none does. Worked out once for the job,
+        each mapping and text read once, so a YAML alias is not read again (found by the second review: the
+        steps' texts read for every step took 75 s for 6,000 steps and 1 GB for a 1 KB alias bomb)."""
+        cache = self.__dict__.setdefault("_first_env_writer_cache", {})
+        key = id(job)
+        if key not in cache:
+            seen: set = set()
+
+            def writes(value) -> bool:
+                stack = [value]
+                while stack:
+                    item = stack.pop()
+                    if isinstance(item, str):
+                        if self._ENV_CONTEXT_WRITERS_RE.search(item):
+                            return True
+                        continue
+                    if not isinstance(item, (dict, list, tuple)) or id(item) in seen:
+                        continue
+                    seen.add(id(item))
+                    if isinstance(item, dict):
+                        stack.extend(k for k in item if isinstance(k, str))
+                        stack.extend(item.values())
+                    else:
+                        stack.extend(item)
+                return False
+
+            first = len(job.steps)
+            if writes(job.raw.get("env")) or writes(self.wf.raw.get("env")):
+                first = -1
+            else:
+                for n, other_step in enumerate(job.steps):
+                    if other_step.uses_action("actions/github-script") or writes(other_step.raw):
+                        first = n
+                        break
+            cache[key] = (first, job)
+        return cache[key][0]
+
     def _env_expressions_known(self, job: Job, step: Step, text: str) -> bool:
         """Whether every `${{ }}` expression of `text` that reads `env` gives a text the checker knows (see
         `_env_expressions_worked`)."""
         if step.via is not None:
             return False
         index = next((n for n, other_step in enumerate(job.steps) if other_step is step), 0)
-        for scope in (job.raw.get("env"), self.wf.raw.get("env")):
-            if scope is not None and self._ENV_CONTEXT_WRITERS_RE.search(json.dumps(scope, default=str)):
-                return False
-        for other_step in job.steps[:index]:
-            if other_step.uses_action("actions/github-script") or self._ENV_CONTEXT_WRITERS_RE.search(
-                    json.dumps(other_step.raw, default=str)):
-                return False
+        if self._first_env_writer(job) < index:
+            return False
         try:
             found = env_expr.spans(text)
             names = env_expr.names_read(text)
@@ -2394,7 +2434,9 @@ class WorkflowRules:
                     if kind != "id" or (i and toks[i - 1] == ("op", ".")):
                         continue
                     if i + 1 < len(toks) and toks[i + 1] == ("op", "("):
-                        continue                    # a function's name
+                        if word.lower() not in self._ENV_ONLY_FUNCTIONS:
+                            return False
+                        continue
                     if word.lower() not in self._ENV_ONLY_HEADS:
                         return False
             env = env_expr.Env(step._env_scopes(), env_expr.env_case(step.job))

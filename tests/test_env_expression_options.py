@@ -8,6 +8,7 @@ medium "cannot tell" (`command-computed`) where the same option written out is h
 read (`Rules._env_expressions_worked`), and as written otherwise.
 """
 
+import time
 import unittest
 
 from helpers import TempDir
@@ -223,6 +224,43 @@ class WhatTheReviewFoundTest(unittest.TestCase):
         with TempDir() as tmp:
             result = check(tmp, flow("claude ${{ env.X }} -p hi", job_env=job_env))
         self.assertIsNotNone(result)
+
+
+class TheSecondReviewTest(unittest.TestCase):
+    """The second review of 2d.19c: each way past and cost it found."""
+
+    def test_fromjson_and_tojson_are_read_as_written(self):
+        # Python's JSON reader refuses what the runner's reads (single quotes, comments, trailing commas), and
+        # took the refused text for empty.
+        for expression, value in (("fromJSON(env.J)", f"\"'{SKIP}'\""),
+                                  ("fromJSON(env.J).flags", f"\"{{flags: '{SKIP}'}}\""),
+                                  ("fromJSON(env.J)[0]", f"'[\"{SKIP}\",]'"),
+                                  ("fromJSON(env.J)", f"'\"{SKIP}\" // default'"),
+                                  ("toJSON(env.J)", "--model sonnet"),
+                                  ("contains(env.J, 'x') && '--model sonnet' || '--model haiku'", "x")):
+            with self.subTest(expression=expression):
+                self.assertEqual(gha026(flow(f"claude ${{{{ {expression} }}}} -p hi", job_env=f"{{J: {value}}}")),
+                                 CANNOT_TELL)
+
+    def test_more_writers(self):
+        for writer in ('for f in "$RUNNER_TEMP"/_runner_file_command*/set_env_*; do echo "FLAGS=x" >> "$f"; done',
+                       "echo '${{ toJSON(github) }}' | jq -r .env",
+                       "node -e \"require('@actions/core')['export' + 'Variable']('FLAGS', 'x')\""):
+            with self.subTest(writer=writer):
+                text = flow("claude ${{ env.FLAGS }} -p review", job_env="{FLAGS: --model x}").replace(
+                    "    steps:\n", f"    steps:\n      - run: |\n          {writer}\n", 1)
+                self.assertEqual(gha026(text), CANNOT_TELL)
+
+    def test_an_alias_bomb_before_the_step_is_read_once(self):
+        lines = ["x0: &x0 [" + ", ".join(["aaaaaaaaaa"] * 5) + "]"]
+        for n in range(1, 25):
+            lines.append(f"x{n}: &x{n} [*x{n - 1}, *x{n - 1}]")
+        bomb = "".join(f"          {line}\n" for line in lines)
+        text = flow("claude ${{ env.FLAGS }} -p review", job_env="{FLAGS: --model x}").replace(
+            "    steps:\n", "    steps:\n      - uses: some/action@" + "a" * 40 + "\n        with:\n" + bomb, 1)
+        started = time.monotonic()
+        self.assertEqual(gha026(text), [])
+        self.assertLess(time.monotonic() - started, 10)
 
 
 class NothingElseChangesTest(unittest.TestCase):
