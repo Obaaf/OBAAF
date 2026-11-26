@@ -1984,8 +1984,11 @@ class PutInBudget:
     of the step it is made for (`Step.seq`); `made` counts how many times each text has been made with it,
     so that the same text made twice in one reading is two readings."""
 
-    def __init__(self, ledger: "PutInLedger | None" = None, place: int = 0) -> None:
-        self.room = ENV_PUT_IN_EXTRA
+    def __init__(self, ledger: "PutInLedger | None" = None, place: int = 0, scale: int = 1) -> None:
+        # `scale` (flagship slice 2d.18): a text made of that many readings of the same lines takes that many times
+        # as much.
+        self.room = ENV_PUT_IN_EXTRA * scale
+        self.free = ENV_PUT_IN_TIMES * scale
         self.times: dict = {}
         self.ledger, self.place = ledger, place
         self.made: dict = {}
@@ -1993,7 +1996,7 @@ class PutInBudget:
     def take(self, value: str) -> bool:
         times = self.times.get(id(value), 0) + 1
         self.times[id(value)] = times
-        if times > ENV_PUT_IN_TIMES:
+        if times > self.free:
             self.room -= len(value)
         return self.room >= 0
 
@@ -2101,6 +2104,15 @@ class Step:
     # its own, which has only its own bound (`PutInBudget`).
     put_ins: "PutIns | None" = field(default=None, repr=False, compare=False)
     seq: int = field(default=0, repr=False, compare=False)
+    # Flagship slice 2d.18 (#377): the mappings whose `env` the step runs with under its own, nearest first (its
+    # job's, then its workflow's), read when asked, so a value put in later in place (D-084) is the one read.
+    # Empty for a step read on its own, and for a step of a local action read for an agent (2d.4a), whose
+    # caller's environment is put into its own `env` (`_with_env`). The steps the second pass reads through a
+    # local action (2d.4b2) run in the using step's job and have its mappings.
+    inherited: tuple = field(default=(), repr=False, compare=False)
+    # How many readings of its command lines a step of a local action read for an agent is made of, where an
+    # input's expression gives several (flagship slice 2d.18): its own bound (D-137) is that many times as wide.
+    readings: int = field(default=1, repr=False, compare=False)
 
     @property
     def name(self) -> str:
@@ -2147,6 +2159,26 @@ class Step:
     def env(self) -> dict:
         value = self.raw.get("env")
         return value if isinstance(value, dict) else {}
+
+    @property
+    def run_env(self) -> dict:
+        """The `env` the step runs with as the workflow writes it (flagship slice 2d.18): its own over its job's
+        over its workflow's, as GitHub gives them, text names with text values only. A scope written as one
+        expression (`env: ${{ fromJSON(...) }}`) adds nothing, as a step's own did before; a name a nearer scope
+        sets to a value that is not text (a number) is not put in, though an outer scope sets it to text; what an
+        earlier step writes to `GITHUB_ENV` is not read."""
+        out: dict = {}
+        scopes = [holder.get("env") if isinstance(holder, dict) else None for holder in reversed(self.inherited)]
+        for scope in [*scopes, self.raw.get("env")]:
+            if not isinstance(scope, dict):
+                continue
+            for name, value in scope.items():
+                if isinstance(name, str):
+                    if isinstance(value, str):
+                        out[name] = value
+                    else:
+                        out.pop(name, None)
+        return out
 
     @property
     def action(self) -> str | None:
@@ -2269,8 +2301,17 @@ class Step:
         the workflow's ledger, whichever step asks; each step's use of it is settled there once, by the step's
         number, because each step hands what is found in it on to the rules (found by the review: 300 steps
         that YAML makes of one mapping took 72 s when the text was counted once for all of them)."""
-        env = {k: v for k, v in self.env.items() if isinstance(k, str) and isinstance(v, str)}
-        if not env or not own or "$" not in own:
+        if not own or "$" not in own:
+            return None, own, None
+        # The `env` the step runs with: its own over its job's over its workflow's (flagship slice 2d.18; before,
+        # its own alone, so `$CLAUDE -p x` with `CLAUDE` in the workflow's `env` was in no agent lane). Only the
+        # names the lines use are kept, so a job's other values do not make each step's text a new one.
+        given = self.run_env
+        if not given:
+            return None, own, None
+        env = {name: given[name] for name in dict.fromkeys(m.group(1) for m in _ENV_NAME_RE.finditer(own))
+               if name in given}
+        if not env:
             return None, own, None
         put_ins = self.put_ins
         key = (own, tuple((name, id(value)) for name, value in env.items()))
@@ -2279,7 +2320,7 @@ class Step:
             # What would be put in is counted first, and the text is made only once a step's use of it is
             # settled, so a text past either bound is never made (found by the second review: 1,000 steps
             # past the workflow's bound made and kept 800,000,000 characters).
-            budget = PutInBudget()
+            budget = PutInBudget(scale=max(1, min(self.readings, 16)))
             size = 0
             for match in _ENV_NAME_RE.finditer(own):
                 value = env.get(match.group(1))
@@ -3598,6 +3639,8 @@ def _input_problem(step_raw: dict) -> str | None:
 def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
     """Flatten a job's steps, including the steps inside `parallel` groups, in order."""
     groups = 0
+    # Each step runs with its job's and its workflow's `env` under its own (flagship slice 2d.18).
+    inherited = (job.raw, workflow.raw)
 
     def inputs_checked(raw: dict, number: int) -> None:
         problem = _input_problem(raw)
@@ -3640,7 +3683,7 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
                     inputs_checked(sub, number)
                     job.steps.append(Step(index=len(job.steps), raw=sub, line=getattr(sub, "line", line),
                                           group=groups, background=True, put_ins=workflow.put_ins,
-                                          seq=workflow.put_ins.number()))
+                                          seq=workflow.put_ins.number(), inherited=inherited))
             continue
         inputs_checked(step_raw, number)
         if not ({"run", "uses"} & set(step_raw)) and not (CONTROL_STEP_KEYS & set(step_raw)):
@@ -3648,7 +3691,7 @@ def _add_steps(workflow: Workflow, job: Job, steps: list) -> None:
                                      "the checker knows, so it cannot check what the step does")
         background = as_text(step_raw.get("background", "")).strip().lower() not in ("", "false")
         job.steps.append(Step(index=len(job.steps), raw=step_raw, line=line, background=background,
-                              put_ins=workflow.put_ins, seq=workflow.put_ins.number()))
+                              put_ins=workflow.put_ins, seq=workflow.put_ins.number(), inherited=inherited))
 
 
 def declared_lane(value) -> str | None:
