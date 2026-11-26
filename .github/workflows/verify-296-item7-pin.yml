@@ -1,0 +1,85 @@
+name: Compare the generated checker pin with the item 7 draft
+on:
+  push:
+    branches: [lead/check-296-item7-d0e32ca]
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        checker: [generated, draft]
+    steps:
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Use temporary storage outside Git
+        run: |
+          root=$(mktemp -d "$RUNNER_TEMP/obaaf-pin-check.XXXXXX")
+          if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          echo "TMPDIR=$root" >> "$GITHUB_ENV"
+      - if: matrix.checker == 'generated'
+        uses: Obaaf/OBAAF/actions/setup-obaaf@8caddd6f06c50b9266d8116fd672f39b55770477
+      - if: matrix.checker == 'draft'
+        uses: Obaaf/OBAAF/actions/setup-obaaf@d0e32ca5ff8b79068a778984a80e03ce20097f2a
+      - name: Read identical static workflows with the installed CLI
+        env:
+          CHECKER: ${{ matrix.checker }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          version = os.environ["CHECKER"]
+          action_sha = "b" * 40
+          for command in ("sh", "cat"):
+              with tempfile.TemporaryDirectory() as temp:
+                  root = Path(temp)
+                  gh = root / ".github"
+                  workflows = gh / "workflows"
+                  workflows.mkdir(parents=True)
+                  (gh / "egress-firewall.yaml").write_text("mode: enforce\nallow:\n  - api.example.com\n")
+                  (gh / "CODEOWNERS").write_text("* @example/maintainers\n")
+                  workflow = {
+                      "on": "workflow_dispatch",
+                      "permissions": {"contents": "read"},
+                      "jobs": {
+                          "build": {
+                              "runs-on": "ubuntu-24.04-firewall",
+                              "steps": [
+                                  {"run": "claude -p review"},
+                                  {"uses": f"actions/upload-artifact@{action_sha}",
+                                   "with": {"name": "report", "path": "report.txt"}},
+                              ],
+                          },
+                          "reader": {
+                              "needs": "build", "runs-on": "ubuntu-24.04",
+                              "steps": [
+                                  {"uses": f"actions/download-artifact@{action_sha}",
+                                   "with": {"name": "report", "path": "result"}},
+                                  {"name": "inspect", "run": f"{command} result/report.txt"},
+                              ],
+                          },
+                      },
+                  }
+                  (workflows / "pipeline.yml").write_text(json.dumps(workflow, indent=2))
+                  outcome = subprocess.run(
+                      ["obaaf", "check", ".", "--format", "json", "--fail-on", "never"],
+                      cwd=root, check=True, text=True, capture_output=True,
+                  )
+                  report = json.loads(outcome.stdout)
+                  producers = [(group, c["verdict"]) for group in ("findings", "fixed")
+                               for f in report.get(group, []) if f["job"] == "build" and f["rule"] == "OBAAF-GHA-020"
+                               for c in f.get("controls", [])]
+                  consumers = [(f["job"], f["step"], f["severity"]) for f in report["findings"] if f["rule"] == "OBAAF-GHA-027"]
+                  print("Observation", json.dumps([version, command, outcome.returncode, producers, consumers]), flush=True)
+                  assert len(producers) == 1
+                  assert producers[0][0] == ("fixed" if version == "draft" else "findings")
+                  assert consumers == ([("reader", "inspect", "medium")] if version == "draft" and command == "sh" else [])
+          PY
