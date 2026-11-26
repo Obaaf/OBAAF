@@ -442,18 +442,25 @@ jobs:
           assert ran and skipped
 
   env-context-case-premise:
-    # What slice 2d.19 (#382) must know before the checker folds `env` names: on a GitHub-hosted Linux
-    # runner, does `${{ env.NAME }}` in a step's `run` find a value set under another letter case, and
-    # which value does it give when the job's `env` and the step's own `env` set one name in two cases?
-    # The shell's environment is printed beside it. It checks nothing out, holds no secret and writes
-    # nothing. Plan slice 2d.19a.
-    name: "Runner premise: letter case in the env context (2d.19)"
-    runs-on: ubuntu-24.04
+    # What slice 2d.19 (#382) must know before the checker folds `env` names: on a GitHub-hosted runner,
+    # does `${{ env.NAME }}` in a step's `run` find a value set under another letter case, and which value
+    # does it give when the job's `env` and the step's own `env` set one name in two cases? The process
+    # environment is printed beside it. It checks nothing out, holds no secret and writes nothing. Plan
+    # slice 2d.19a. What the first run showed on ubuntu-24.04 (image 20261122.23.1, run 45856719413) is
+    # asserted below for Linux: the context is case-sensitive, both spellings keep their own value, a
+    # spelling nobody set is empty, `env['name']` is the same as `env.name`, and the step's own value of
+    # one name wins over the job's. macOS and Windows are printed and not yet asserted.
+    name: "Runner premise: letter case in the env context (2d.19, ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     # Advisory: it is not a required check of main, so its failure is reported and does not fail the
     # run (OBAAF-SET-008). A maintainer may make it required.
     continue-on-error: true
     permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     env:
       PREMISE_TWO_CASES: from-job
       PREMISE_JOB_ONLY: job-only
@@ -464,19 +471,32 @@ jobs:
           premise_two_cases: from-step
           PREMISE_SAME: same-from-step
           PREMISE_SEEN_IN_STEP_ENV: ${{ env.premise_job_only }}
-        shell: /usr/bin/python3 -I -S {0}
+        shell: pwsh
         run: |
-          import json, os
-          seen = {
-              "env.PREMISE_TWO_CASES": "${{ env.PREMISE_TWO_CASES }}",
-              "env.premise_two_cases": "${{ env.premise_two_cases }}",
-              "env.Premise_Two_Cases": "${{ env.Premise_Two_Cases }}",
-              "env['premise_two_cases']": "${{ env['premise_two_cases'] }}",
-              "env.premise_job_only": "${{ env.premise_job_only }}",
-              "env.PREMISE_SAME": "${{ env.PREMISE_SAME }}",
+          # A list of objects, not a hashtable: PowerShell's hashtables fold the case of their keys.
+          $seen = @(
+            [pscustomobject]@{ read = 'env.PREMISE_TWO_CASES'; got = '${{ env.PREMISE_TWO_CASES }}'; linux = 'from-job' }
+            [pscustomobject]@{ read = 'env.premise_two_cases'; got = '${{ env.premise_two_cases }}'; linux = 'from-step' }
+            [pscustomobject]@{ read = 'env.Premise_Two_Cases'; got = '${{ env.Premise_Two_Cases }}'; linux = '' }
+            [pscustomobject]@{ read = "env['premise_two_cases']"; got = '${{ env['premise_two_cases'] }}'; linux = 'from-step' }
+            [pscustomobject]@{ read = 'env.premise_job_only'; got = '${{ env.premise_job_only }}'; linux = '' }
+            [pscustomobject]@{ read = 'env.PREMISE_SAME'; got = '${{ env.PREMISE_SAME }}'; linux = 'same-from-step' }
+            [pscustomobject]@{ read = 'step env: env.premise_job_only'; got = $env:PREMISE_SEEN_IN_STEP_ENV; linux = '' }
+          )
+          "image: $env:ImageOS $env:ImageVersion ($env:RUNNER_OS)"
+          $seen | Format-Table read, got -AutoSize | Out-String -Width 200
+          'process environment, names as the process holds them:'
+          Get-ChildItem env: | Where-Object Name -like 'premise_*' | Sort-Object Name |
+            Format-Table Name, Value -AutoSize | Out-String -Width 200
+          if ($env:RUNNER_OS -eq 'Linux') {
+            foreach ($row in $seen) {
+              if (-not ("$($row.got)" -ceq $row.linux)) { throw "$($row.read) gave '$($row.got)', expected '$($row.linux)'" }
+            }
+            # `-ceq` and `-not`, not the case-sensitive "not equal" operator, whose letters OBAAF-GHA-026 reads as a
+            # tool's name in a script it cannot read to the end (#388).
+            if (-not ([Environment]::GetEnvironmentVariable('premise_two_cases') -ceq 'from-step' -and
+                      [Environment]::GetEnvironmentVariable('PREMISE_TWO_CASES') -ceq 'from-job')) {
+              throw 'the process environment did not keep both spellings'
+            }
+            'Linux: as recorded.'
           }
-          names = ("PREMISE_TWO_CASES", "premise_two_cases", "Premise_Two_Cases", "PREMISE_JOB_ONLY",
-                   "premise_job_only", "PREMISE_SAME", "PREMISE_SEEN_IN_STEP_ENV")
-          process = {name: os.environ.get(name) for name in names}
-          print("image:", os.environ.get("ImageOS"), os.environ.get("ImageVersion"))
-          print(json.dumps({"expressions": seen, "process": process}, indent=1))
