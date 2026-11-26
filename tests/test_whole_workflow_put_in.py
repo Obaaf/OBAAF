@@ -40,6 +40,9 @@ ACTIONS_ERROR = f"{ENV_PUT_IN_ACTIONS_UNREAD}, so the checker cannot tell whethe
 LONG = "ab " * 33_333
 # A step that puts `LONG` in eight times puts in 799,992 characters: six such steps fit, the seventh does not.
 FIT = ENV_PUT_IN_WORKFLOW // (8 * len(LONG))
+# What a check may make at the bound: the bound, and the command lines the values are put into.
+BOUND = ENV_PUT_IN_WORKFLOW + 50_000
+ONE_STEP = 8 * len(LONG) + 1_000
 
 
 def head(env=""):
@@ -76,6 +79,46 @@ def timed(tmp, text, files=None):
 
 def put_in_errors(result):
     return [e for e in result.errors if "put into the command lines" in e]
+
+
+class Made:
+    """The characters the put-ins make during a check: `lanes` (`Step.env_put_in`) and `options`
+    (OBAAF-GHA-026's `_substitute`). The heavy tests measure this work, which the bounds limit, rather than
+    seconds, which depend on the machine (CI's Python 3.10 runs about twice as slowly as the runs that wrote
+    these tests; #372 was a timing test that failed so)."""
+
+    def __enter__(self):
+        self.lanes = self.options = 0
+        self._sub, self._re = agent_flags._substitute, wf._ENV_NAME_RE
+        made, real_sub, real_re = self, self._sub, self._re
+
+        def substitute(text, variables, budget=None):
+            out = real_sub(text, variables, budget)
+            if out is not None and out is not text:
+                made.options += len(out)
+            return out
+
+        class Counted:
+            def __getattr__(self, name):
+                return getattr(real_re, name)
+
+            def sub(self, repl, text):
+                out = real_re.sub(repl, text)
+                made.lanes += len(out)
+                return out
+
+        agent_flags._substitute, wf._ENV_NAME_RE = substitute, Counted()
+        return self
+
+    def __exit__(self, *exc):
+        agent_flags._substitute, wf._ENV_NAME_RE = self._sub, self._re
+        return False
+
+
+def measured(tmp, text, files=None):
+    with Made() as made:
+        result = check(tmp, text, files)
+    return result, made
 
 
 class TheLedgerTest(unittest.TestCase):
@@ -116,8 +159,8 @@ class TheLanesAcrossStepsTest(unittest.TestCase):
         """The case measured by 2d.16's reviewer, with each step's script its own: 100 steps that each put one
         100 KB value in eight times took 19 s on `2454e7c` here, with no error."""
         with TempDir() as tmp:
-            result, took = timed(tmp, aliased(100, 8))
-        self.assertLess(took, 12)
+            result, made = measured(tmp, aliased(100, 8))
+        self.assertLessEqual(made.lanes, BOUND)
         errors = put_in_errors(result)
         self.assertEqual(FIT, 6)
         self.assertEqual(errors[0], f".github/workflows/wf.yml: job 'a', step 'step 7': {WORKFLOW_ERROR}")
@@ -138,8 +181,8 @@ class TheLanesAcrossStepsTest(unittest.TestCase):
         each step hands what is found in it on to the rules, so each step is counted (found by the review:
         with `claude` instead of `echo`, 300 such steps took 72 s when they were counted as one)."""
         with TempDir() as tmp:
-            result, took = timed(tmp, aliased(100, 8, apart=False))
-        self.assertLess(took, 12)
+            result, made = measured(tmp, aliased(100, 8, apart=False))
+        self.assertLessEqual(made.lanes, ONE_STEP)
         self.assertEqual(len(put_in_errors(result)), 100 - FIT)
         w = wf.parse("wf.yml", aliased(100, 8, apart=False))
         for step in w.jobs["a"].steps:
@@ -154,8 +197,9 @@ class TheLanesAcrossStepsTest(unittest.TestCase):
         text = head() + ("      - &s\n        run: claude -p x " + " ".join(["$P"] * 8) + "\n        shell: bash\n"
                          f"        env:\n          P: {LONG}\n") + "      - *s\n" * 19
         with TempDir() as tmp:
-            result, took = timed(tmp, text)
-        self.assertLess(took, 20)
+            result, made = measured(tmp, text)
+        self.assertLessEqual(made.lanes, ONE_STEP)
+        self.assertLessEqual(made.options, BOUND)
         self.assertEqual(len(put_in_errors(result)), 20 - FIT)
 
     def test_a_value_used_once_in_a_few_dozen_steps_is_read(self):
@@ -291,9 +335,9 @@ class ALocalActionAcrossStepsTest(unittest.TestCase):
             user = ("on: workflow_dispatch\njobs:\n  j:\n    runs-on: ubuntu-latest\n    permissions: {contents: read}\n"
                     f"    steps:\n      - uses: ./act\n        with:\n          p: {LONG}\n")
             with TempDir() as tmp:
-                result, took = timed(tmp, user, {"act/action.yml": body})
+                result, made = measured(tmp, user, {"act/action.yml": body})
             with self.subTest(program=program):
-                self.assertLess(took, 12)       # 19.4 s for ten steps on `2454e7c` (the reviewer's run)
+                self.assertLessEqual(made.lanes, 2 * BOUND)     # the check's ledger for 2d.4a, the workflow's for 2d.4b2
                 self.assertEqual(put_in_errors(result), errors)
 
     def test_an_action_within_the_bound_is_no_error(self):
@@ -335,8 +379,8 @@ class OBAAFGHA026AcrossStepsTest(unittest.TestCase):
         """The issue's case: 20 steps that each put a 100 KB workflow-level `W` in eight times took 42 s on
         #375's head (21.6 s on `2454e7c` here). The first steps are read; the rest are "cannot tell"."""
         with TempDir() as tmp:
-            result, took = timed(tmp, workflow_level(20, 8))
-        self.assertLess(took, 15)
+            result, made = measured(tmp, workflow_level(20, 8))
+        self.assertLessEqual(made.options, BOUND)
         found = self.gha026(result)
         self.assertEqual({f.kind for f in found}, {"command-computed"})
         unread = [f for f in found if any(agent_flags.PUT_IN_UNREAD in w for w in f.facts["words"])]
@@ -363,8 +407,7 @@ class OBAAFGHA026AcrossStepsTest(unittest.TestCase):
         prompt = (words * (40_000 // len(words) + 1))[:40_000].strip()
         text = workflow_level(48, 1, before="claude -p", value=prompt, after="--dangerously-skip-permissions --model m")
         with TempDir() as tmp:
-            result, took = timed(tmp, text)
-        self.assertLess(took, 15)
+            result = check(tmp, text)
         self.assertEqual([(f.kind, f.severity) for f in self.gha026(result)], [("command-option", "high")] * 48)
 
     def test_the_second_pass_through_local_actions_counts_nothing_again(self):
@@ -386,8 +429,8 @@ class OBAAFGHA026AcrossStepsTest(unittest.TestCase):
             text += ("      - run: a=cla; b=ude; $a$b -p x " + " ".join(["$W"] * 8) + f" step{n}\n"
                      "        shell: bash\n")
         with TempDir() as tmp:
-            result, took = timed(tmp, text)
-        self.assertLess(took, 15)
+            result, made = measured(tmp, text)
+        self.assertLessEqual(made.options, BOUND)
         unread = {f.step for f in self.gha026(result)
                   if f.kind == "command-computed" and any(agent_flags.PUT_IN_UNREAD in w for w in f.facts["words"])}
         self.assertEqual(unread, {f"step {n}" for n in range(FIT + 1, 21)})
@@ -401,8 +444,8 @@ class OBAAFGHA026AcrossStepsTest(unittest.TestCase):
             text += ("      - run: |\n" + "          bash -c 'echo $W'\n" * 9 + f"          claude -p x s{n}\n"
                      "        shell: bash\n")
         with TempDir() as tmp:
-            result, took = timed(tmp, text)
-        self.assertLess(took, 15)
+            result, made = measured(tmp, text)
+        self.assertLessEqual(made.options, BOUND)
         unread = {f.step for f in self.gha026(result)
                   if f.kind == "command-computed" and any(agent_flags.PUT_IN_UNREAD in w for w in f.facts["words"])}
         fits = ENV_PUT_IN_WORKFLOW // (9 * len(LONG))
@@ -467,8 +510,8 @@ class OBAAFGHA026AcrossStepsTest(unittest.TestCase):
         caller = ("on: workflow_dispatch\njobs:\n  c:\n    permissions: {contents: read}\n"
                   f"    uses: ./.github/workflows/called.yml\n    with:\n      p: \"{LONG}\"\n")
         with TempDir() as tmp:
-            result, took = timed(tmp, caller, {".github/workflows/called.yml": called})
-        self.assertLess(took, 15)
+            result, made = measured(tmp, caller, {".github/workflows/called.yml": called})
+        self.assertLessEqual(made.lanes, BOUND)
         self.assertEqual(len(put_in_errors(result)), 45 - FIT)
 
 
