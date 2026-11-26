@@ -75,6 +75,124 @@ class EvidenceTests(unittest.TestCase):
         self.settings["environment_secrets"] = {"status": "read", "value": {"release": ["PACKAGE_INDEX_TOKEN"]}}
         self.assertIn("inventories disagree", self.result().reason)
 
+    def test_partial_environment_reads_use_the_named_environments_branch_policies(self):
+        entry = self.settings["environments"]
+        other = entry["value"][0]
+        other["custom_protection_rules"] = None
+        problem = {"key": other["name"], "what": "custom rules", "reason_code": "forbidden",
+                   "reason": "rules unavailable"}
+        entry.update(status="partial", needs="read", problems=[problem])
+        self.assertEqual(self.result().verdict, "verified")
+        self.env["deployment_branches"] = "any"
+        self.env.pop("branch_policies")
+        self.assertEqual(self.result().verdict, "not met")
+
+        other.update(deployment_branches="selected", branch_policies=None)
+        problem.update(what="branch policies", reason="patterns unavailable")
+        # Earlier snapshots recorded branch-policy failures before the custom rules field existed.
+        for env in entry["value"]:
+            env.pop("custom_protection_rules", None)
+        evidence = self.read()
+        self.assertEqual(evidence.assess("PACKAGE_INDEX_TOKEN", "release").verdict, "not met")
+        limited = evidence.assess("PACKAGE_INDEX_TOKEN", other["name"])
+        self.assertEqual(limited.verdict, "cannot tell")
+        self.assertIn("patterns unavailable", limited.reason)
+
+        problem["key"] = "unlisted"
+        evidence = self.read()
+        for env in entry["value"]:
+            self.assertEqual(evidence.assess("PACKAGE_INDEX_TOKEN", env["name"]).verdict, "cannot tell")
+
+    def _partial(self, *problems):
+        """Make the environment list partly read with these (key, what, reason) problems."""
+        entry = self.settings["environments"]
+        entry.update(status="partial", needs="read", problems=[
+            {"key": key, "what": what, "reason_code": "forbidden", "reason": reason}
+            for key, what, reason in problems])
+        return {env["name"]: env for env in entry["value"]}
+
+    def test_review_386_another_environments_patterns_unread_in_an_earlier_snapshot(self):
+        """Review of #386: the verified path for a snapshot from before custom rules were read."""
+        envs = self._partial(("main-only", "branch patterns", "patterns unavailable"))
+        envs["main-only"].update(deployment_branches="selected", branch_policies=None)
+        for env in envs.values():
+            env.pop("custom_protection_rules")
+        result = self.result()
+        self.assertEqual(result.verdict, "verified", result.reason)
+
+    def test_review_386_the_named_environments_own_patterns_unread(self):
+        """Review of #386: the case that matters for safety, in either letter case, and its reason."""
+        envs = self._partial(("release", "branch patterns", "patterns unavailable"))
+        envs["release"]["branch_policies"] = None
+        for wanted in ("release", "RELEASE"):
+            with self.subTest(wanted=wanted):
+                result = self.read().assess("PACKAGE_INDEX_TOKEN", wanted)
+                self.assertEqual(result.verdict, "cannot tell")
+                self.assertIn("release: patterns unavailable", result.reason)
+
+    def test_review_386_the_reason_names_the_problem_that_matters(self):
+        """Review of #386: three other environments' custom rules sorted first hid the named one's patterns."""
+        value = self.settings["environments"]["value"]
+        for name in ("a", "b", "c"):
+            other = copy.deepcopy(value[0])
+            other.update(name=name, custom_protection_rules=None)
+            value.insert(0, other)
+            self.settings["environment_secrets"]["value"][name] = []
+        self._partial(("a", "custom rules", "rules unavailable"), ("b", "custom rules", "rules unavailable"),
+                      ("c", "custom rules", "rules unavailable"),
+                      ("release", "branch patterns", "patterns unavailable"))
+        self.env["branch_policies"] = None
+        result = self.result()
+        self.assertEqual(result.verdict, "cannot tell")
+        self.assertIn("release: patterns unavailable", result.reason)
+        self.assertNotIn("rules unavailable", result.reason)
+        # An unlisted name may mean the list is incomplete; it is named before anything else.
+        self.settings["environments"]["problems"].append(
+            {"key": "gone", "what": "custom rules", "reason_code": "forbidden", "reason": "list may be short"})
+        result = self.result()
+        self.assertIn("gone: list may be short", result.reason)
+        self.assertNotIn("patterns unavailable", result.reason)
+        # Only the unlisted names, not merely first (second review of #386).
+        self.settings["environments"]["problems"] = [
+            p for p in self.settings["environments"]["problems"] if p["key"] in ("gone", "release")]
+        result = self.result()
+        self.assertIn("gone: list may be short", result.reason)
+        self.assertNotIn("patterns unavailable", result.reason)
+
+    def test_review_386_a_null_pattern_list_with_no_problem_of_its_own(self):
+        """Second review of #386: a matching environment's patterns null, no problem under its name (an edited
+        file): the recorded problems are named, as before, and the answer stays "cannot tell"."""
+        self._partial(("main-only", "custom rules", "rules unavailable"))
+        self.env["branch_policies"] = None
+        result = self.result()
+        self.assertEqual(result.verdict, "cannot tell")
+        self.assertIn("environments partial: main-only: rules unavailable", result.reason)
+
+    def test_review_386_a_name_that_differs_only_in_case_outside_ascii(self):
+        """Second review of #386: GitHub may or may not fold this case; its unread patterns count."""
+        value = self.settings["environments"]["value"]
+        other = copy.deepcopy(self.env)
+        other.update(name="Ünicode", branch_policies=None)
+        value.append(other)
+        self.settings["environment_secrets"]["value"]["Ünicode"] = []
+        self._partial(("Ünicode", "branch patterns", "patterns unavailable"))
+        result = self.read().assess("PACKAGE_INDEX_TOKEN", "ünicode")
+        self.assertEqual(result.verdict, "cannot tell")
+        self.assertIn("Ünicode: patterns unavailable", result.reason)
+        self.assertEqual(self.result().verdict, "verified")
+
+    def test_review_386_the_inventory_lines_with_no_environment_named(self):
+        """Review of #386: `report_settings` asks about every environment when protected_secrets is empty."""
+        envs = self._partial(("main-only", "custom rules", "rules unavailable"))
+        envs["main-only"]["custom_protection_rules"] = None
+        self.assertFalse([r for r in self.read().inventory_limitations() if r.startswith("environments")])
+        self.settings["environments"]["problems"][0].update(what="branch patterns", reason="patterns unavailable")
+        envs["main-only"].update(deployment_branches="selected", branch_policies=None)
+        reasons = [r for r in self.read().inventory_limitations() if r.startswith("environments")]
+        self.assertEqual(reasons, ["environments partial: main-only: patterns unavailable"])
+        # Named, only a matching environment's patterns count.
+        self.assertFalse([r for r in self.read().inventory_limitations("release") if r.startswith("environments")])
+
     def test_evidence_of_another_copy_or_an_unprotected_branch(self):
         for key in ("repository_secrets", "organization_secrets"):
             self.settings[key]["value"].append("package_index_token")
@@ -175,6 +293,17 @@ class EvidenceTests(unittest.TestCase):
             self.assertIn(self.data["taken_at"], finding["controls"][1]["detail"])
             self.assertFalse(any(f["rule"] == rule for f in complete["findings"]))
             self.assertEqual(complete["summary"]["fixed"], before["summary"]["fixed"] + 1)
+            envs = self.settings["environments"]
+            partial = copy.deepcopy(envs)
+            other = partial["value"][0]
+            other["custom_protection_rules"] = None
+            partial.update(status="partial", needs="read", problems=[
+                {"key": other["name"], "what": "custom rules", "reason_code": "forbidden", "reason": "read refused"}])
+            self.settings["environments"] = partial
+            snapshot.write(self.data, self.path)
+            self.assertTrue(any(f["rule"] == rule for f in report(*selected)["fixed"]))
+            self.settings["environments"] = envs
+            snapshot.write(self.data, self.path)
             # The PR workflow selects the target snapshot even when the PR changed or deleted it.
             def git(*arguments):
                 return subprocess.run(

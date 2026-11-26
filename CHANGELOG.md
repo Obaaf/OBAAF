@@ -4,6 +4,15 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### A partly read environment list in `obaaf check --settings`
+
+Issue #385; decision D-104, with a proposed clarification. `obaaf check --settings`, and `obaaf fix --settings`, which uses the same evidence; nothing else. When a snapshot's `environments` was only partly read, the environment control of OBAAF-GHA-005 was "cannot tell" for every environment, whatever part was missing.
+
+- **Now a part that this control does not use no longer stops it.** Custom deployment protection rules not read, the named environment's own or another's, and another environment's branch patterns not read, in a snapshot from any version since the audit read each, leave the answer to what was read: "verified" when the name is only in the named environment and only protected branches may use it, "not met" when, for example, the environment permits any branch, holds no such secret, or is not in the list. Before, each was "cannot tell". (In a snapshot from before slice 2b.9b, the missing custom rules never stopped the control.)
+- **Still "cannot tell":** the selected-branch patterns not read of the named environment, or of one whose name differs from it only in letter case, and any problem under a name the list does not hold, which may mean the list itself is short.
+- **Can fail a gate that passed:** when this verifies the last control of OBAAF-GHA-005, the finding is fixed and a baseline entry that accepted it no longer matches.
+- **The reason printed for "cannot tell"** names the problems that made it, at most three, and no longer the first three recorded (review of #386); in a file whose patterns are null with no problem under that environment's name, it names the recorded ones, as before. With `protected_secrets` empty, the `Settings evidence:` line for `environments` is printed only when some selected environment's branch patterns were not read or a problem names an environment the list does not hold.
+
 ### Custom deployment protection rules beside OBAAF-SET-001, 002 and 003
 
 Slice 2b.9b, from #212 item 2; decision D-141. `obaaf audit` only. A custom deployment protection rule is a GitHub App that must approve a job that names an environment before the job runs. The audit weighed only an environment's required reviewers, so a finding beside such a rule overstated what was open.
@@ -14,7 +23,7 @@ Slice 2b.9b, from #212 item 2; decision D-141. `obaaf audit` only. A custom depl
 - **Drift:** a committed snapshot taken before this slice holds no custom rules, so its environments are "not compared" (`not_recorded`) and the check fails until the snapshot is taken again. Where both sides read an environment only in part, a field only one side read is "not compared" (a failure) and one neither read is "not covered"; before, a null against a value was reported as a change.
 - **A part of an environment that was not read no longer makes the list of environments look incomplete** (found by the slice's review): an environment that a job or `protected_secrets` names and the list does not have is reported when another environment's branch patterns or custom rules could not be read, where it was "cannot tell", and `OBAAF-SET-003`'s low "protects nothing" finding is no longer left out with no word there. This can fail an `obaaf audit` that passed.
 - **An earlier `obaaf` refuses a snapshot this version writes**, because its schema does not know the new field.
-- **Not changed:** `obaaf check`, except that `--settings` with a snapshot whose custom rules could not be read answers "cannot tell" for the environment control. On GitHub ([run 45820220198](https://github.com/Obaaf/OBAAF/actions/runs/45820220198)) the endpoint answered 200 with no rule for every environment of this repository and the first adopter, with a token and without; no repository with a custom rule was read.
+- **Not changed:** `obaaf check`, except that `--settings` with a snapshot whose custom rules could not be read answered "cannot tell" for the environment control; since #385 (the section above) it answers from what was read. On GitHub ([run 45820220198](https://github.com/Obaaf/OBAAF/actions/runs/45820220198)) the endpoint answered 200 with no rule for every environment of this repository and the first adopter, with a token and without; no repository with a custom rule was read.
 
 ### OBAAF-SET-011 follows GitHub's page on reusing workflows
 
