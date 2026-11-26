@@ -2103,7 +2103,7 @@ def _local_steps(root: Path, uses: str, given: dict, given_env: dict, outer: dic
             # the job's own steps; the step has a number of its own there, which its copies keep.
             step = wf_mod.Step(index=0, raw=put, line=top.line, via=top, shown_name=name, written=step_raw,
                                put_ins=top.put_ins, seq=top.put_ins.number() if top.put_ins is not None else 0,
-                               inherited=top.inherited)
+                               inherited=top.inherited, job=top.job)
             out.append(step)
             unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             inner_uses = step_raw.get("uses")
