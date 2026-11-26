@@ -1351,11 +1351,13 @@ def _action_inputs(raw: dict, given: dict) -> dict:
     return out
 
 
-def _put_in(text: str, inputs: dict, folder: str, problems: list, env: dict | None = None) -> str:
+def _put_in(text: str, inputs: dict, folder: str, problems: list, env: dict | None = None,
+            counts: list | None = None) -> str:
     """`text` with what the checker can work out put in: each expression that reads the action's
     inputs (every value it can give, one reading per line, when there are several) and the action's
     own folder for `github.action_path`. An expression that reads an input in a way the checker does
-    not work out is added to `problems`."""
+    not work out is added to `problems`. How many readings the text was made of is added to `counts`
+    (flagship slice 2d.18), where there are several."""
     text = _ACTION_PATH_EXPR_RE.sub(lambda _m: f"./{folder}", text)
     if "${{" not in text:
         return text
@@ -1375,30 +1377,34 @@ def _put_in(text: str, inputs: dict, folder: str, problems: list, env: dict | No
             problems.append(f"an expression that reads an input or the environment can give more than "
                             f"{_VALUE_LIMIT} texts, and the checker reads only {_VALUE_LIMIT} "
                             f"('{wf_mod.one_line(whole, 60)}')")
-    out = "\n".join(dict.fromkeys(readings))
+    unique = list(dict.fromkeys(readings))
+    out = "\n".join(unique)
     if len(out) > LOCAL_ACTION_TEXT:
         problems.append("its inputs, put in, make a text longer than the checker reads")
         return text
+    if counts is not None and len(unique) > 1:
+        counts.append(len(unique))
     return out
 
 
-def _put_inputs(value, inputs: dict, folder: str, problems: list, _done: dict | None = None, env: dict | None = None):
+def _put_inputs(value, inputs: dict, folder: str, problems: list, _done: dict | None = None, env: dict | None = None,
+                counts: list | None = None):
     """A step of a composite action with `_put_in` applied to every text it holds. A value YAML gives
     many times through an alias is worked on once (a file of a few kilobytes can name a million)."""
     done = {} if _done is None else _done
     if id(value) in done:
         return done[id(value)]
     if isinstance(value, str):
-        out = _put_in(value, inputs, folder, problems, env)
+        out = _put_in(value, inputs, folder, problems, env, counts)
     elif isinstance(value, dict):
         out = {}
         done[id(value)] = out
         for key, item in value.items():
-            out[key] = _put_inputs(item, inputs, folder, problems, done, env)
+            out[key] = _put_inputs(item, inputs, folder, problems, done, env, counts)
     elif isinstance(value, list):
         out = []
         done[id(value)] = out
-        out.extend(_put_inputs(item, inputs, folder, problems, done, env) for item in value)
+        out.extend(_put_inputs(item, inputs, folder, problems, done, env, counts) for item in value)
     else:
         out = value
     done[id(value)] = out
@@ -1526,10 +1532,13 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
     raws, missing, read_names, size, env_words = cache[files_key]
     if inherited_env:
         # The job's and the workflow's `env`, under the using step's own (flagship slice 2d.18): only the names the
-        # action's files hold as words, so that jobs whose other values differ share one reading; all of them where
+        # action's files or the inputs and `env` the using step gives hold as words (a script path `$TOOLS/x.sh`
+        # handed in through `with:`), so that jobs whose other values differ share one reading; all of them where
         # a step of the action uses another local action, which may read any.
+        if env_words is not None:
+            env_words = env_words | (_env_words([given, given_env]) or frozenset())
         given_env = {**{name: value for name, value in inherited_env.items()
-                        if env_words is None or name in env_words}, **given_env}
+                        if env_words is None or name.casefold() in env_words}, **given_env}
 
     def fixed(mapping, names=None):
         return tuple(sorted((str(name), wf_mod.as_text(value)) for name, value in mapping.items()
@@ -1579,6 +1588,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 continue
             problems: list = []
             put, done, ignored = {}, {}, {}
+            counts: list = []           # readings of each command field, where an input's expression gives several
             merged = _with_env(step_raw, given_env)
             # The step's `env` first, with its inputs put in, so `${{ env.T }}` elsewhere reads what GitHub
             # gives it (`T: ${{ inputs.tool }}`).
@@ -1589,7 +1599,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 if key_name == "env":
                     put[key_name] = step_env
                 elif key_name in _COMMAND_FIELDS:
-                    put[key_name] = _put_inputs(value, inputs, folder, problems, done, step_env)
+                    put[key_name] = _put_inputs(value, inputs, folder, problems, done, step_env, counts)
                 else:
                     put[key_name] = _put_inputs(value, inputs, folder, [], ignored, step_env)
             # One ledger for every reading of a local action in the check (flagship slice 2d.17): the readings
@@ -1597,8 +1607,11 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             put_ins = cache.get(_PUT_INS)
             if put_ins is None:
                 put_ins = cache[_PUT_INS] = wf_mod.PutIns(wf_mod.ENV_PUT_IN_ACTIONS_UNREAD)
+            # A command line made of several readings holds each `$NAME` once in each, so the step's own bound
+            # (D-137) is that many times as wide (flagship slice 2d.18, from its second review: four `inputs.x ||
+            # 'default'` made 16 readings of `--prompt "$PROMPT"`, past the bound for a 13 KB prompt).
             step = wf_mod.Step(index=number - 1, raw=put, line=getattr(step_raw, "line", 0), put_ins=put_ins,
-                               seq=put_ins.number())
+                               seq=put_ins.number(), readings=max(counts, default=1))
             # What a caller hands the action (the text its inputs add) is worked on again at each reading,
             # so it is paid for too; the action's own text is in the size of its files.
             added = (sum(_text_size(put.get(name)) for name in _COMMAND_FIELDS)
@@ -1671,14 +1684,15 @@ def _action_size(root: Path, folder: str) -> int:
     return total
 
 
-_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 
 
 def _env_words(raws) -> frozenset | None:
-    """The words in the text of a local action's files (flagship slice 2d.18): the names of the job's and the
-    workflow's `env` that a reading of the action can use; None when a step of the action uses another local
-    action, or a `uses` that holds an expression, whose reading may use any. Each value is visited once, however
-    many times YAML names it through an alias."""
+    """The words in the text of a local action's files (flagship slice 2d.18), in lower case and with `-` kept in
+    them (`env['MY-TOOL']`), as the reader folds a name's case: the names of the job's and the workflow's `env`
+    that a reading of the action can use; None when a step of the action uses another local action, or a `uses`
+    that holds an expression, whose reading may use any. Each value is visited once, however many times YAML
+    names it through an alias."""
     words: set = set()
     seen: set = set()
     stack = list(raws)
@@ -1698,7 +1712,7 @@ def _env_words(raws) -> frozenset | None:
                 seen.add(id(value))
                 stack.extend(value)
         elif isinstance(value, str):
-            words.update(_WORD_RE.findall(value))
+            words.update(word.casefold() for word in _WORD_RE.findall(value))
     return frozenset(words)
 
 

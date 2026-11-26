@@ -1984,8 +1984,11 @@ class PutInBudget:
     of the step it is made for (`Step.seq`); `made` counts how many times each text has been made with it,
     so that the same text made twice in one reading is two readings."""
 
-    def __init__(self, ledger: "PutInLedger | None" = None, place: int = 0) -> None:
-        self.room = ENV_PUT_IN_EXTRA
+    def __init__(self, ledger: "PutInLedger | None" = None, place: int = 0, scale: int = 1) -> None:
+        # `scale` (flagship slice 2d.18): a text made of that many readings of the same lines takes that many times
+        # as much.
+        self.room = ENV_PUT_IN_EXTRA * scale
+        self.free = ENV_PUT_IN_TIMES * scale
         self.times: dict = {}
         self.ledger, self.place = ledger, place
         self.made: dict = {}
@@ -1993,7 +1996,7 @@ class PutInBudget:
     def take(self, value: str) -> bool:
         times = self.times.get(id(value), 0) + 1
         self.times[id(value)] = times
-        if times > ENV_PUT_IN_TIMES:
+        if times > self.free:
             self.room -= len(value)
         return self.room >= 0
 
@@ -2107,6 +2110,9 @@ class Step:
     # caller's environment is put into its own `env` (`_with_env`). The steps the second pass reads through a
     # local action (2d.4b2) run in the using step's job and have its mappings.
     inherited: tuple = field(default=(), repr=False, compare=False)
+    # How many readings of its command lines a step of a local action read for an agent is made of, where an
+    # input's expression gives several (flagship slice 2d.18): its own bound (D-137) is that many times as wide.
+    readings: int = field(default=1, repr=False, compare=False)
 
     @property
     def name(self) -> str:
@@ -2314,7 +2320,7 @@ class Step:
             # What would be put in is counted first, and the text is made only once a step's use of it is
             # settled, so a text past either bound is never made (found by the second review: 1,000 steps
             # past the workflow's bound made and kept 800,000,000 characters).
-            budget = PutInBudget()
+            budget = PutInBudget(scale=max(1, min(self.readings, 16)))
             size = 0
             for match in _ENV_NAME_RE.finditer(own):
                 value = env.get(match.group(1))

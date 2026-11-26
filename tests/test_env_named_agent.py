@@ -132,6 +132,38 @@ class TheLanesTest(unittest.TestCase):
             result = check(tmp, "on: workflow_dispatch\njobs:\n" + jobs, files)
         self.assertTrue(any("units" in error for error in result.errors), result.errors)
 
+    def test_a_local_action_is_given_the_names_its_caller_hands_it(self):
+        """From the second review: a script path handed in through `with:` (`$TOOLS/review.sh`) names a job's value
+        the action's files never hold as a word."""
+        files = {f"{ACTION_DIR}/action.yml": composite("    - run: bash ${{ inputs.script }}\n      shell: bash\n"),
+                 "ci/review.sh": "#!/bin/bash\nclaude --dangerously-skip-permissions -p review\n"}
+        text = flow("", job_env="{TOOLS: ./ci}", uses=f"./{ACTION_DIR}").replace(
+            "        env:\n", "        with: {script: $TOOLS/review.sh}\n        env:\n", 1)
+        self.assertEqual(self.lane(text, files), "agent")
+
+    def test_a_local_action_names_a_value_in_any_letter_case_and_with_a_hyphen(self):
+        """From the second review: the reader folds an `env` name's case and keeps `-` in `env['MY-TOOL']`."""
+        for job_env, run in (("{CLAUDE: claude}", "${{ env.claude }}"), ("{MY-TOOL: claude}", "${{ env['MY-TOOL'] }}")):
+            with self.subTest(run=run):
+                files = {f"{ACTION_DIR}/action.yml": composite(f"    - run: {run} -p review\n      shell: bash\n")}
+                self.assertEqual(self.lane(flow("", job_env=job_env, uses=f"./{ACTION_DIR}"), files), "agent")
+
+    def test_readings_an_inputs_default_makes_do_not_pass_a_steps_bound(self):
+        """From the second review: four `${{ inputs.x || 'default' }}` make 16 readings of the step, each holding
+        `$PROMPT` once; with a 13 KB prompt in the job's `env` that passed D-137's bound for one reading, an error.
+        The bound is as many times as wide as the readings."""
+        run = ("./summarize --model ${{ inputs.model || 'small' }} --lang ${{ inputs.lang || 'en' }} "
+               "--fmt ${{ inputs.fmt || 'md' }} --out ${{ inputs.out || 'out.md' }} --prompt \"$PROMPT\"")
+        action = ("name: sum\ninputs:\n  model: {description: m}\n  lang: {description: l}\n  fmt: {description: f}\n"
+                  "  out: {description: o}\nruns:\n  using: composite\n  steps:\n"
+                  f"    - shell: bash\n      run: {run}\n")
+        prompt = "Review the change and report problems. " * 340
+        for scope in ("job_env", "step_env"):
+            with self.subTest(scope=scope), TempDir() as tmp:
+                text = flow("", uses=f"./{ACTION_DIR}", **{scope: "{PROMPT: '" + prompt + "'}"})
+                result = check(tmp, text, {f"{ACTION_DIR}/action.yml": action})
+                self.assertEqual(result.errors, [])
+
     def test_in_a_local_action_the_using_steps_env_outranks_the_jobs(self):
         files = {f"{ACTION_DIR}/action.yml": composite("    - run: $AGENT -p 'fix the bug'\n      shell: bash\n")}
         text = flow("", job_env="{AGENT: claude}", step_env="{AGENT: echo}", uses=f"./{ACTION_DIR}")
