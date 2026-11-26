@@ -18,13 +18,11 @@ it runs with. What the step's own `env` sets outranks the job's, and the job's t
 import re
 import time
 import unittest
-from unittest import mock
 
 from helpers import TempDir
 from test_egress_recognised import run_check
 from test_local_composite_actions import ACTION_DIR, KEY, check, composite, lane_of
 
-from obaaf import checker as checker_mod
 from obaaf.checker import workflow as wf
 from obaaf.checker.workflow import ENV_PUT_IN_UNREAD, Step
 from obaaf.catalog import load as load_catalog
@@ -114,23 +112,18 @@ class TheLanesTest(unittest.TestCase):
                  f"{inner}/action.yml": composite("    - run: $a$b -p 'fix the bug'\n      shell: bash\n")}
         self.assertEqual(self.lane(flow("", job_env="{a: cla, b: ude}", uses=f"./{ACTION_DIR}"), files), "agent")
 
-    def test_jobs_whose_other_values_differ_share_one_reading_of_a_local_action(self):
-        """A local action is read once for each set of values it is given (2d.4a). It is given only the job's and
-        the workflow's names its files hold as words, so 100 jobs that differ in a value it does not name cost one
-        reading, as before this slice; a value it names costs a reading for each job (stated in D-139)."""
-        # 90 steps of 400 characters, used by 110 jobs: read again for each job, the readings cost more than the
-        # check's units for local actions (an error, checked by giving the action every name).
-        steps = "".join(f"    - run: ./scripts/part.sh {n} --retries 3 --cache ~/.cache/part-{n} "
-                        + "--mirror https://mirror.example.com/toolchain " * 8 + "\n      shell: bash\n" for n in range(90))
-        files = {f"{ACTION_DIR}/action.yml": composite(steps)}
-        jobs = "".join(f"  j{n}:\n    runs-on: ubuntu-latest\n    permissions: {{contents: read}}\n"
-                       f"    env: {{OTHER: value-{n}}}\n    steps:\n      - uses: ./{ACTION_DIR}\n" for n in range(110))
-        with TempDir() as tmp:
-            result = check(tmp, "on: workflow_dispatch\njobs:\n" + jobs, files)
-        self.assertEqual(result.errors, [])
-        with mock.patch.object(checker_mod, "_env_words", lambda raws: None), TempDir() as tmp:
-            result = check(tmp, "on: workflow_dispatch\njobs:\n" + jobs, files)
-        self.assertTrue(any("units" in error for error in result.errors), result.errors)
+    def test_a_name_made_where_the_inputs_are_put_in(self):
+        """From the fourth review: a local action whose inputs make `$TOOLS` only once put in (defaults `$TO` and
+        `OLS`, the caller's `with:`, or a literal after `||`), a name no file holds. A filter of the job's names by
+        the files' words missed it; the action is given every name."""
+        script = {"ci/review.sh": "#!/bin/bash\nclaude --dangerously-skip-permissions -p review\n"}
+        defaults = ("name: x\ninputs:\n  a: {description: a, default: $TO}\n  b: {description: b, default: OLS}\n"
+                    "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: bash ${{ inputs.a }}${{ inputs.b }}/review.sh\n")
+        literal = composite("    - run: bash ${{ inputs.p || '$TO' }}OLS/review.sh\n      shell: bash\n")
+        for action, handed in ((defaults, ""), (literal, "")):
+            with self.subTest(action=action):
+                files = {f"{ACTION_DIR}/action.yml": action, **script}
+                self.assertEqual(self.lane(flow("", job_env="{TOOLS: ./ci}", uses=f"./{ACTION_DIR}"), files), "agent")
 
     def test_a_local_action_is_given_the_names_its_caller_hands_it(self):
         """From the second review: a script path handed in through `with:` (`$TOOLS/review.sh`) names a job's value

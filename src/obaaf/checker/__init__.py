@@ -1528,18 +1528,14 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             else:
                 missing.append(why)
         size = sum(_action_size(root, folder) for folder in folders)
-        cache[files_key] = (raws, missing, _inputs_read(raw for _, raw in raws), size, _env_words(raw for _, raw in raws))
-    raws, missing, read_names, size, env_words = cache[files_key]
+        cache[files_key] = (raws, missing, _inputs_read(raw for _, raw in raws), size)
+    raws, missing, read_names, size = cache[files_key]
     if inherited_env:
-        # The job's and the workflow's `env`, under the using step's own (flagship slice 2d.18): only the names the
-        # action's files or the inputs and `env` the using step gives hold as words (a script path `$TOOLS/x.sh`
-        # handed in through `with:`), so that jobs whose other values differ share one reading; all of them where
-        # a step of the action uses another local action, which may read any.
-        if env_words is not None:
-            handed = _env_words([given, given_env])
-            env_words = None if handed is None else env_words | handed
-        given_env = {**{name: value for name, value in inherited_env.items()
-                        if env_words is None or name.casefold() in env_words}, **given_env}
+        # The job's and the workflow's `env`, under the using step's own (flagship slice 2d.18), whole: a name the
+        # action's files never hold can still be made where its inputs are put in (`${{ inputs.a }}${{ inputs.b }}`
+        # with defaults `$TO` and `OLS`; found by the fourth review, after a filter by the files' words), so an
+        # action is read again for each job whose values differ, as for each set of inputs.
+        given_env = {**inherited_env, **given_env}
 
     def fixed(mapping, names=None):
         return tuple(sorted((str(name), wf_mod.as_text(value)) for name, value in mapping.items()
@@ -1687,42 +1683,6 @@ def _action_size(root: Path, folder: str) -> int:
         except (OSError, RuntimeError):
             continue
     return total
-
-
-_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
-_NAME_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
-def _env_words(raws) -> frozenset | None:
-    """The words in the text of a local action's files (flagship slice 2d.18), in lower case, each with `-` kept in
-    it (`env['MY-TOOL']`) and each name in it (`$TOOLS-dir`), as the reader folds a name's case: the names of the job's and the workflow's `env`
-    that a reading of the action can use; None when a step of the action uses another local action, or a `uses`
-    that holds an expression, whose reading may use any. Each value is visited once, however many times YAML
-    names it through an alias."""
-    words: set = set()
-    seen: set = set()
-    stack = list(raws)
-    while stack:
-        value = stack.pop()
-        if isinstance(value, dict):
-            if id(value) in seen:
-                continue
-            seen.add(id(value))
-            uses = value.get("uses")
-            if _is_local_like(uses) or (isinstance(uses, str) and expr_mod.OPEN in uses):
-                return None
-            stack.extend(value.keys())
-            stack.extend(value.values())
-        elif isinstance(value, list):
-            if id(value) not in seen:
-                seen.add(id(value))
-                stack.extend(value)
-        elif isinstance(value, str):
-            # A word with `-` and each name in it: `env['MY-TOOL']` reads `MY-TOOL`, and bash reads `$TOOLS-dir` as
-            # `$TOOLS` (found by the third review).
-            words.update(word.casefold() for word in _WORD_RE.findall(value))
-            words.update(word.casefold() for word in _NAME_WORD_RE.findall(value))
-    return frozenset(words)
 
 
 def _inputs_read(raws) -> set:
