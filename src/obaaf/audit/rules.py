@@ -79,7 +79,8 @@ RULES: tuple[Rule, ...] = (
          "who can push a branch can add a job that names the environment and reads its secrets. With required "
          "reviewers the only gate left is one person's approval; without them there is none. A custom deployment "
          "protection rule (a GitHub App that must approve the job) counts as reviewers do, and what it decides on "
-         "is not read: beside one, an environment any branch may use is medium, and a narrower limit that reviewers "
+         "is not read: beside one, an environment any branch may use is medium (low with no secret), and a narrower "
+         "limit that reviewers "
          "would make no finding is \"cannot tell\". Where such rules were not read (a snapshot an earlier version "
          "took, or an answer that failed), the finding stands and says that it may overstate. An environment a "
          "job names that the settings do not have gets no protection from them. Not followed: who may bypass the "
@@ -1209,6 +1210,24 @@ def _other_gates(env: dict) -> tuple[list[str], str]:
     return gates, unread
 
 
+def _listed_whole(run: _Run) -> bool:
+    """Whether the list of environments is whole, so that an environment it does not hold does not exist.
+
+    The reader records a list it could not read as not read, and the whole setting as not read when an entry of
+    it has another shape. So a setting read in part is a whole list of which some environment's parts (its
+    branch patterns, its custom deployment protection rules) were not read, and those do not say that an
+    environment is missing. A problem keyed by a name the list does not hold, which only an edited file has, may
+    be an environment left out, and then the list is not whole (the review of slice 2b.9b: before it, any part
+    not read made every environment's existence "cannot tell", and the low finding of OBAAF-SET-003 vanish)."""
+    entry = run.settings["environments"]
+    if entry["status"] == "read":
+        return True
+    if entry["status"] != "partial":
+        return False
+    names = {env["name"] for env in entry["value"]}
+    return all(problem["key"] in names for problem in entry.get("problems", []))
+
+
 def _unread_gate_clause(unread: str) -> str:
     """The sentence a finding ends with when an environment's custom deployment protection rules are not known."""
     return (f" Whether a custom deployment protection rule also stands in the way is not known ({unread}); with one, "
@@ -1234,7 +1253,8 @@ def rule_001(run: _Run) -> None:
         if not run.results:
             run.idle = "no job names an environment"
         return
-    environments, whole = run.got("environments")
+    environments, _ = run.got("environments")
+    whole = _listed_whole(run)
     if environments is None:
         run.unread("environments", f"{_n(len(wanted), 'environment')} that jobs name could not be compared",
                    "environments")
@@ -1402,7 +1422,8 @@ def rule_002(run: _Run) -> None:
         if not run.results:
             run.idle = "no job that outsiders' events can start names an environment"
         return
-    environments, whole = run.got("environments")
+    environments, _ = run.got("environments")
+    whole = _listed_whole(run)
     repository, _ = run.got("repository")
     if environments is None or repository is None:
         run.unread("environments", f"{_do(len(exposed), 'job', 'that', 'that')} outsiders' events can start "
@@ -1465,7 +1486,8 @@ def rule_003(run: _Run) -> None:
     env_secrets, env_whole = run.got("environment_secrets")
     repo, repo_whole = run.got("repository_secrets")
     org, org_whole = run.got("organization_secrets")
-    environments, envs_whole = run.got("environments")
+    environments, _ = run.got("environments")
+    envs_whole = _listed_whole(run)
     read_by_jobs = {name.upper() for _, job in run.jobs() for name in job["secrets"]}
     # A job that can read every secret (toJSON(secrets), a computed index, `secrets: inherit`) reads each.
     reads_all = any(job["all_secrets"] or (job["passes"] and (job["passes"]["inherit"] or job["passes"]["all"]))
@@ -1533,7 +1555,8 @@ def rule_003(run: _Run) -> None:
                                     f"stay in {_q(env)}, and it is also stored in the environment "
                                     f"{_names(_q(e['name']) for e in gated)}, which any branch may use and which has no "
                                     "required reviewers. Its protection is "
-                                    f"{_names(g for e in gated for g in _other_gates(e)[0])}, whose decisions the "
+                                    f"{_names(dict.fromkeys(g for e in gated for g in _other_gates(e)[0]))}, whose "
+                                    "decisions the "
                                     "audit does not read, so whether a job on any branch can read the copy is not "
                                     "known.")
         if env and env_secrets is not None and envs_whole and env_whole:
@@ -1543,6 +1566,12 @@ def rule_003(run: _Run) -> None:
                 run.finding(f"protected_secrets entry {_q(pattern)}", "low",
                             f"No secret that matches {_q(pattern)} is stored in the environment {_q(env)}, "
                             "which the configuration names for it. The entry protects nothing that is there.")
+        elif env and env_secrets is not None and env_whole and environments is not None:
+            # The list of environments may not be whole: whether the entry protects anything is not known, and
+            # that is said, never left out (the review of slice 2b.9b).
+            run.unread(f"protected_secrets entry {_q(pattern)}",
+                       f"whether a secret that matches {_q(pattern)} is stored in the environment {_q(env)} is not "
+                       "known, because the list of environments may not be whole", "environments")
     for name in sorted(set(in_env) & set(stored_wide) - reported):
         if name in read_by_jobs or reads_all:
             run.finding(f"secret {_q(name)}", "medium",

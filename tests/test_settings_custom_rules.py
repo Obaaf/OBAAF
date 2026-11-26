@@ -175,6 +175,26 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(snapshot_mod.problems(before_the_slice(snap)), [])
 
 
+class GitHubsOwnAnswerTest(unittest.TestCase):
+    """GitHub's own answers to a caller with no token about this repository, as the live workflow printed them on
+    2026-11-26 at 12:30 UTC, on this slice's first commit (https://github.com/Obaaf/OBAAF/actions/runs/45820220198):
+    the first answers this project has from the endpoint. Both environments have no custom rule, and GitHub took
+    `per_page`, which its reference does not list, without complaint."""
+
+    def test_the_answer_is_read_as_none_for_each_environment(self):
+        entries = recording("live-obaaf-no-token-2026-11-26")
+        bodies = {e["path"]: e["body"] for e in entries}
+        for name in ("github-pages", "pypi"):
+            self.assertEqual(bodies[f"/repos/Obaaf/OBAAF/environments/{name}/deployment_protection_rules?per_page=100"],
+                             {"total_count": 0, "custom_deployment_protection_rules": []})
+        snap, transport = take(entries, repository="Obaaf/OBAAF")
+        self.assertEqual(transport.missing, [])
+        self.assertEqual([path for path, _ in transport.seen], [e["path"] for e in entries])
+        envs = snap["settings"]["environments"]
+        self.assertEqual(envs["status"], "read")
+        self.assertEqual([(e["name"], e[CUSTOM]) for e in envs["value"]], [("github-pages", []), ("pypi", [])])
+
+
 class EnvironmentAnyBranchMayUseTest(unittest.TestCase):
     """OBAAF-SET-001 beside a custom rule: the finding stands, at medium, and names the app."""
 
@@ -294,6 +314,10 @@ class OpenCopyTest(unittest.TestCase):
         self.assertIn('run by the app "b-gate"', res["message"])
         self.assertIn('run by the app "a-custom-app"', res["message"])
 
+    def test_one_app_behind_two_copies_is_named_once(self):
+        res, = self.secret({"staging": ["same-app"], "qa": ["same-app"]})
+        self.assertEqual(res["message"].count('run by the app "same-app"'), 1)
+
     def test_one_open_copy_is_still_a_finding_and_names_only_it(self):
         res, = self.secret({"staging": ["a-custom-app"]})
         self.assertEqual((res["state"], res["severity"]), ("finding", "high"))
@@ -345,6 +369,45 @@ class NotReadTest(unittest.TestCase):
         self.assertIn("this finding may overstate what is open", res[0]["message"])
 
 
+class TheListStaysWholeTest(unittest.TestCase):
+    """The review's B2: one environment's custom rules not read must not make the others' findings vanish."""
+
+    def entries(self):
+        entries = with_environments(ADMIN, [environment("staging"), environment("production", "custom")],
+                                    policies={"production": [("main", "branch")]},
+                                    secrets={"staging": ["DEPLOY_KEY"], "production": ["X"]})
+        path = f"{R}/environments/staging/deployment_protection_rules?per_page=100"
+        return answered_with(entries, path, {"message": "x"}, status=500)
+
+    def test_an_environment_the_list_does_not_hold_is_still_a_finding(self):
+        files = {"m.yml": wf("  push:\n", job("j", "    environment: missing-env\n"))}
+        found = assess(self.entries(), files)
+        missing, = [r for r in of(found, "OBAAF-SET-001") if r["subject"] == 'environment "missing-env"']
+        self.assertEqual((missing["state"], missing["severity"]), ("finding", "medium"))
+        nowhere, = [r for r in of(assess(self.entries(), files, config="protected_secrets:\n  OTHER_KEY: nowhere\n"),
+                                  "OBAAF-SET-003") if r["subject"] == 'environment "nowhere"']
+        self.assertEqual((nowhere["state"], nowhere["severity"]), ("finding", "high"))
+
+    def test_an_entry_that_protects_nothing_is_still_reported(self):
+        files = {"m.yml": wf("  push:\n", job("j"))}
+        found = assess(self.entries(), files, config="protected_secrets:\n  DEPLOY_KEY: production\n")
+        low = [r for r in of(found, "OBAAF-SET-003") if r["subject"] == 'protected_secrets entry "DEPLOY_KEY"']
+        self.assertEqual([(r["state"], r["severity"]) for r in low], [("finding", "low")])
+
+    def test_a_problem_for_a_name_the_list_does_not_hold_makes_it_not_whole_and_says_so(self):
+        snap, _ = take(self.entries(), token=TOKEN)
+        snap["settings"]["environments"]["problems"].append(
+            {"key": "secret-env", "what": "x", "reason_code": "network", "reason": "x"})
+        self.assertEqual(snapshot_mod.problems(snap), [])
+        files = {"m.yml": wf("  push:\n", job("j", "    environment: secret-env\n"))}
+        missing, = [r for r in of(evaluate(snap, files), "OBAAF-SET-001") if r["subject"] == 'environment "secret-env"']
+        self.assertEqual(missing["state"], "cannot-tell")
+        found = evaluate(snap, {"m.yml": wf("  push:\n", job("j"))}, "protected_secrets:\n  DEPLOY_KEY: production\n")
+        entry, = [r for r in of(found, "OBAAF-SET-003") if r["subject"] == 'protected_secrets entry "DEPLOY_KEY"']
+        self.assertEqual((entry["state"], entry["unread"]), ("cannot-tell", ["environments"]))
+        self.assertIn("the list of environments may not be whole", entry["message"])
+
+
 class ReportTest(unittest.TestCase):
     def line(self, snap: dict, name: str) -> str:
         text = report.to_text(snap)
@@ -367,6 +430,8 @@ class ReportTest(unittest.TestCase):
                        token=TOKEN)
         self.assertIn('custom deployment protection rules: app "a-custom-app" (not enabled)', self.line(snap, "main-only"))
         self.assertNotIn("custom deployment", self.line(snap, "release"))
+        # A rule GitHub marks as not enabled is nothing for an administrator to bypass.
+        self.assertNotIn("administrators may bypass", self.line(snap, "main-only"))
 
 
 class DriftTest(unittest.TestCase):
@@ -402,21 +467,56 @@ class DriftTest(unittest.TestCase):
                          {k for k, v in drift.compare(expected, live)["outcomes"].items() if v == "matches"}
                          - {"environments"})
 
-    def test_a_part_one_side_did_not_read_is_never_a_change(self):
+    def test_a_part_one_side_did_not_read_is_never_a_change_and_never_no_drift(self):
         # Both read the environment "release" in part: the expected snapshot's custom rules failed, and this
-        # run's branch patterns. Neither missing part is a change; a real change in the rest still is.
+        # run's branch patterns. Neither is reported as a change, and each is not compared, which fails the check.
+        patterns = f"{R}/environments/release/deployment-branch-policies?per_page=100"
         expected_entries = answered_with(ADMIN, RELEASE_RULES, {"message": "no"}, status=403)
-        live_entries = answered_with(ADMIN, f"{R}/environments/release/deployment-branch-policies?per_page=100",
-                                     {"message": "no"}, status=403)
+        live_entries = answered_with(ADMIN, patterns, {"message": "no"}, status=403)
         expected, live = self.snapshots(live_entries, expected_entries)
         found = drift.compare(expected, live)
         self.assertEqual(found["differences"], [])
-        self.assertIn("release", [e["item"] for e in found["not_covered"]])
-        live_env = next(e for e in live["settings"]["environments"]["value"] if e["name"] == "release")
-        live_env["wait_timer"] = 5
+        self.assertEqual(sorted((e["item"], e["reason_code"]) for e in found["not_compared"]),
+                         [("release", "forbidden"), ("release", "forbidden")])
+        whys = " ".join(e["why"] for e in found["not_compared"])
+        self.assertIn(f"its {CUSTOM} was read now and not by the expected snapshot", whys)
+        self.assertIn("its branch_policies is in the expected snapshot and could not be read now", whys)
+        self.assertTrue(drift.failed(found))
+        # A real change in what both read is still a change.
+        next(e for e in live["settings"]["environments"]["value"] if e["name"] == "release")["wait_timer"] = 5
         found = drift.compare(expected, live)
         self.assertEqual([(d["item"], c["path"]) for d in found["differences"] for c in d["changes"]],
                          [("release", "wait_timer")])
+
+    def test_a_gate_removed_while_both_sides_read_in_part_is_not_compared(self):
+        # The review's B1: both failed on the patterns; the expected snapshot read an app's rule, and this run could
+        # not read the rules. Before the fix this was "NO DRIFT".
+        patterns = f"{R}/environments/release/deployment-branch-policies?per_page=100"
+        failed_patterns = answered_with(ADMIN, patterns, {"message": "x"}, status=500)
+        expected_entries = answered_with(failed_patterns, RELEASE_RULES, rules_answer("a-custom-app"))
+        live_entries = answered_with(failed_patterns, RELEASE_RULES, {"message": "x"}, status=500)
+        expected, live = self.snapshots(live_entries, expected_entries)
+        found = drift.compare(expected, live)
+        self.assertTrue(drift.failed(found))
+        self.assertEqual([(e["item"], e["reason_code"]) for e in found["not_compared"]], [("release", "server_error")])
+        self.assertIn("release", [e["item"] for e in found["not_covered"]])  # the patterns, which neither read
+        # The same with an expected snapshot taken before the slice: its rules were never read.
+        found = drift.compare(before_the_slice(take(failed_patterns, token=TOKEN)[0]),
+                              take(answered_with(failed_patterns, RELEASE_RULES, rules_answer("a-custom-app")),
+                                   token=TOKEN)[0])
+        self.assertTrue(drift.failed(found))
+        self.assertIn(("release", "not_recorded"), [(e["item"], e["reason_code"]) for e in found["not_compared"]])
+        # And with a problem written into the committed file by hand, for an environment it read in full.
+        expected, _ = self.snapshots()
+        envs = expected["settings"]["environments"]
+        expected["settings"]["environments"] = {
+            "status": "partial", "value": envs["value"], "needs": "x",
+            "problems": [{"key": "release", "what": "x", "reason_code": "network", "reason": "x"}]}
+        self.assertEqual(snapshot_mod.problems(expected), [])
+        live = take(answered_with(ADMIN, RELEASE_RULES, {"message": "x"}, status=500), token=TOKEN)[0]
+        found = drift.compare(expected, live)
+        self.assertTrue(drift.failed(found))
+        self.assertIn(("release", "server_error"), [(e["item"], e["reason_code"]) for e in found["not_compared"]])
 
     def test_rules_not_read_now_are_not_compared(self):
         expected, live = self.snapshots(answered_with(ADMIN, MAIN_ONLY_RULES, {"message": "no"}, status=500))

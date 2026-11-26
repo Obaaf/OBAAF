@@ -957,13 +957,21 @@ class FirstReviewTest(unittest.TestCase):
     def test_an_environment_the_configuration_names_when_the_environments_were_not_all_read(self):
         files = {"x.yml": workflow("  push:\n", job("j"))}
         config = "protected_secrets:\n  DEPLOY_KEY: production\n"
-        partly = refused(ADMIN, f"{R}/environments/release/deployment-branch-policies?per_page=100")
-        for entries in (partly, refused(ADMIN, ENVIRONMENTS)):
-            results = [r for r in of(assess_files(entries, files, config=config), "OBAAF-SET-003")
-                       if r["subject"] == 'environment "production"']
-            self.assertEqual([(r["state"], r["unread"]) for r in results], [("cannot-tell", ["environments"])])
-        self.assertEqual(len([r for r in of(assess_files(ADMIN, files, config=config), "OBAAF-SET-003", "finding")
-                              if r["subject"] == 'environment "production"']), 1)
+
+        def production(entries):
+            return [r for r in of(assess_files(entries, files, config=config), "OBAAF-SET-003")
+                    if r["subject"] == 'environment "production"']
+
+        self.assertEqual([(r["state"], r["unread"]) for r in production(refused(ADMIN, ENVIRONMENTS))],
+                         [("cannot-tell", ["environments"])])
+        # Since slice 2b.9b: a part of another environment that was not read (its branch patterns, its custom
+        # rules) leaves the list whole, so an environment it does not hold does not exist. Before, this was
+        # "cannot tell" (the review of 2b.9b, B2).
+        for path in (f"{R}/environments/release/deployment-branch-policies?per_page=100",
+                     f"{R}/environments/release/deployment_protection_rules?per_page=100"):
+            self.assertEqual([(r["state"], r["severity"]) for r in production(refused(ADMIN, path))],
+                             [("finding", "high")], path)
+        self.assertEqual([(r["state"], r["severity"]) for r in production(ADMIN)], [("finding", "high")])
 
     # -- reusable workflows
     def test_ways_of_passing_an_environment_only_secret(self):

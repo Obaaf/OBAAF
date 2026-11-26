@@ -289,14 +289,28 @@ def _not_recorded(key: str, held: dict) -> dict[str, dict]:
             if isinstance(part, dict) and CUSTOM_RULES not in part}
 
 
+def _unread_field(part: dict, name: str) -> bool:
+    """Whether an environment's field was not read: null, or (for the custom rules) absent."""
+    return part.get(name) is None and (name in part or name == CUSTOM_RULES)
+
+
 def _both_read(key: str, expected, live) -> tuple:
-    """Two parts that both snapshots read only in part, without the fields either side did not read."""
+    """Two parts that both snapshots read only in part, as (expected, live, neither, one_side): the parts without
+    the fields that either side did not read, the fields neither side read, and the fields only one side read,
+    each with the side that did not ("expected" or "live"). A field only one side read is not compared and is
+    never "no change": the caller lists it as not compared."""
     if key != "environments" or not isinstance(expected, dict) or not isinstance(live, dict):
-        return expected, live
-    dropped = {f for f in PARTLY_READ_FIELDS for side in (expected, live)
-               if side.get(f, None) is None and (f in side or f == CUSTOM_RULES)}
+        return expected, live, [], []
+    neither, one_side = [], []
+    for name in PARTLY_READ_FIELDS:
+        missing = [side for side, part in (("expected", expected), ("live", live)) if _unread_field(part, name)]
+        if len(missing) == 2:
+            neither.append(name)
+        elif missing:
+            one_side.append((name, missing[0]))
+    dropped = set(neither) | {name for name, _ in one_side}
     return ({k: v for k, v in expected.items() if k not in dropped},
-            {k: v for k, v in live.items() if k not in dropped})
+            {k: v for k, v in live.items() if k not in dropped}, neither, one_side)
 
 
 def _branch_gaps(key: str, snap: dict, names: set[str]) -> dict[str, dict]:
@@ -386,12 +400,26 @@ def compare(expected: dict, live: dict, expected_name: str = "", live_name: str 
                     # what was read is compared, and a difference in it counts. What was not read is listed
                     # as not covered whether or not the rest differs.
                     parts_compared += 1
-                    found = changes(*_both_read(key, e_parts[ident], l_parts[ident]))
+                    left, right, neither, one_side = _both_read(key, e_parts[ident], l_parts[ident])
+                    found = changes(left, right)
                     if found:
                         differences.append({"setting": key, "item": ident, "what": what, "changes": found})
-                    not_covered.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
-                                        "why": unknown(e_unknown[ident], "both read it only in part, and the rest was "
-                                                                         "compared; not read by the expected one: ")})
+                    for field, absent in one_side:
+                        # Read by one side only (slice 2b.9b): whether it changed is not known, which is a failure.
+                        lacking = e_parts[ident] if absent == "expected" else l_parts[ident]
+                        side = (NOT_RECORDED if field not in lacking else
+                                e_unknown[ident] if absent == "expected" else l_unknown[ident])
+                        held = (f"both read it only in part, and its {field} was read now and not by the expected "
+                                "snapshot: " if absent == "expected" else
+                                f"both read it only in part, and its {field} is in the expected snapshot and could not "
+                                "be read now: ")
+                        not_compared.append({**here, "reason_code": side.get("reason_code"),
+                                             "why": unknown(side, held) + (". " + RETAKE if absent == "expected" else "")})
+                    if neither or not one_side:
+                        not_covered.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
+                                            "why": unknown(e_unknown[ident], "both read it only in part, and the rest "
+                                                                             "was compared; not read by the expected "
+                                                                             "one: ")})
                     continue
                 not_covered.append({**here, "reason_code": e_unknown[ident].get("reason_code"),
                                     "why": unknown(e_unknown[ident], "neither snapshot read it; the expected one: ")})

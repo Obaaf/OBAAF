@@ -182,7 +182,8 @@ def _environment_text(env: dict) -> str:
     # GitHub's setting "Allow administrators to bypass configured protection rules", as it gives it. It is
     # said only where there is a reviewer, a wait or another rule for an administrator to bypass.
     bypass = ""
-    if env["reviewers"] or env["wait_timer"] or env["other_protection_rules"] or custom:
+    if env["reviewers"] or env["wait_timer"] or env["other_protection_rules"] or any(
+            r["enabled"] for r in custom or ()):
         bypass = "; administrators may bypass these rules: " + _yes(env["can_admins_bypass"])
     return f"{quoted(env['name'])}: {branches}; {review}{wait}{other}{apps}{bypass}"
 
