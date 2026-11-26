@@ -16,16 +16,18 @@ job was in no agent lane and no agent rule applied.
   the step's value over the job's over the workflow's (`folded`); anywhere else (`both`) each reading is kept where
   the two differ.
 - **A reference not pinned to one name gives every value**: `env[matrix.key]`, the `env` object made into text
-  (`toJSON(env)`, `format('{0}', env)`, `env.*`) give each value `env` holds, one reading each, as the local-action
-  reader gives every input for `inputs[*]`. `join` over the whole `env`, a function the checker does not know
-  given `env`, or a form it does not read make the step an error of its file (`Unread`).
+  (`toJSON(env)`, `format('{0}', env)`, `env.*`, `join(env.*, sep)`) give each value `env` holds, one reading each,
+  as the local-action reader gives every input for `inputs[*]`. A function the checker does not know given what
+  an expression reads from `env`, or a form it does not read, make the step an error of its file (`Unread`).
 - **Each expression is read on its own**; readings are made line by line, never multiplied across a step: a line
   (with the lines a backslash continues or an expression spans) holding several expressions with several values
   each is read in every combination, at most `LINE_READINGS` of them (`SINGLE_READINGS` where only one expression
-  there has several values); past that the step is an error of its file.
-- A value the checker does not know (another context: `matrix`, `inputs`, `github`, a step's output) is left as
-  the expression is written; where it is one operand of `||`, `&&`, `format()` or `join()`, the other readings are
-  made too, with it as an empty text where it is a piece of the text.
+  there has several values); past that the step is an error of its file. What the readings copy is worked out
+  before they are made (`plan`), so the caller can count it for the whole workflow.
+- A value the checker does not know (another context: `matrix`, `inputs`, `github`, a step's output) makes no
+  reading where the expression has values the checker knows (the lines as written are read anyway); where it is
+  one operand of `||`, `&&`, `format()` or `join()`, the other readings are made, with it as an empty text where
+  it is a piece of the text; an expression with no value the checker knows is left as written.
 
 Nothing here is checked against a run on GitHub beyond what #387 asserts (letter case in the `env` context on
 GitHub-hosted runners). What an earlier step writes to `GITHUB_ENV` is not read; a scope written as one expression
