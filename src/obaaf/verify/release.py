@@ -117,6 +117,7 @@ class Decision:
     artifacts: list[dict] = field(default_factory=list)
     agent_commits: list[dict] = field(default_factory=list)
     approvals: list[str] = field(default_factory=list)
+    pre_approval: bool = False
 
     @property
     def ok(self) -> bool:
@@ -128,7 +129,13 @@ class Decision:
                 "approvals": self.approvals}
 
     def to_text(self) -> str:
-        lines = ["Release verification: " + ("PASSED, upload may proceed" if self.ok else "BLOCKED, do not upload")]
+        if not self.ok:
+            heading = "Release verification: BLOCKED, do not upload"
+        elif self.pre_approval:
+            heading = "Pre-approval checks: PASSED, release approval is still required"
+        else:
+            heading = "Release verification: PASSED, upload may proceed"
+        lines = [heading]
         for a in self.artifacts:
             lines.append(f"  artifact {a['name']} sha256:{a['sha256'][:16]}… provenance: {a['provenance']}, "
                          f"build record: {a['buildRecord']}, tier: {a.get('tier') or '?'}")
@@ -684,7 +691,7 @@ def verify_release(policy: Policy, artifacts: list[Path], *, gh: GhRunner | None
 
     `approvals` is GitHub's run approvals list, or a Jenkins build's JSON; `release_run` is the
     JSON of the Jenkins build that produced the artifacts."""
-    decision = Decision()
+    decision = Decision(pre_approval=pre_approval)
     if release_run is not None and not is_jenkins_run(release_run):
         decision.blocks.append("--release-run is not a Jenkins build's JSON (expected an 'actions' list)")
         release_run = None

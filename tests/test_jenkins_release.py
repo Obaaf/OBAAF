@@ -177,15 +177,23 @@ class JenkinsReleaseLaneTest(unittest.TestCase):
         (self.tmp / "publish-run.json").write_text(json.dumps(publish_run()))
         (self.tmp / "release-run.json").write_text(json.dumps(tag_build(self.rev)))
         args = ["verify", "release", "--policy", self.policy, "--artifacts", self.dist,
-                "--approvals", self.tmp / "publish-run.json", "--release-run", self.tmp / "release-run.json",
+                "--release-run", self.tmp / "release-run.json",
                 "--repo-dir", self.repo]
         for env in envelopes:
             args += ["--dsse", env]
+        code, out, err = run_cli(*args, "--source-revision", self.rev, "--pre-approval")
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual(out.splitlines()[0], "Pre-approval checks: PASSED, release approval is still required")
+        code, out, err = run_cli(*args, "--source-revision", self.rev)
+        self.assertEqual(code, 1, err or out)
+        self.assertEqual(out.splitlines()[0], "Release verification: BLOCKED, do not upload")
+        args += ["--approvals", self.tmp / "publish-run.json"]
         revision_file = self.tmp / "release-sha.txt"
         revision_file.write_text(self.rev + "\n", encoding="ascii")
         for revision in (["--source-revision", self.rev], ["--revision-file", revision_file]):
             code, out, err = run_cli(*args, *revision)
             self.assertEqual(code, 0, err or out)
+            self.assertEqual(out.splitlines()[0], "Release verification: PASSED, upload may proceed")
             self.assertIn("release approved by: carol", out)
         revision_file.write_text("b" * 40, encoding="ascii")
         self.assertEqual(run_cli(*args, "--revision-file", revision_file)[0], 1)
