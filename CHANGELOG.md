@@ -4,6 +4,17 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### What putting variables in makes is bounded for a whole workflow
+
+Slice 2d.17, from #376; decision D-138. The bound of slice 2d.16 is for one step. A value given once and reached by many steps, through a YAML alias into many steps' `env` or through the job's or the workflow's `env`, was put in again in each step, up to eight times each: 100 KB of YAML was read as 80,000,000 characters. Measured on the scheduled run's machine against `flagship` `2454e7c`: 100 steps that each put one aliased 100 KB value in eight times took 19.1 s and now take 3.4 s; 20 steps that each put a 100 KB workflow-level value in eight times took 21.6 s and now take 3.6 s.
+
+- **The rule of a step now holds for the whole workflow too.** Each value may be put in eight times in the workflow, whatever its length, and the times past the eighth may add up to 2,000,000 characters. Each of the three readings that put variables in (the lanes', and OBAAF-GHA-026's two) has its own bound. In the workflow a value is counted by its text, so equal values are one value.
+- **A step read again is counted once and not made again.** The text made for a step is kept for the check, so the six or so readings of an agent job's steps, another tool's reading, and the second pass through local actions add nothing.
+- **Past the bound the reading fails closed as past a step's.** For the lanes, which read the step's own `env`, the step is an error of its file, which fails the check: "its env values, put into the command lines it runs, would take the text the checker makes of its workflow's steps past what it reads (...)". OBAAF-GHA-020's egress control and OBAAF-GHA-005's `key-out-of-reach` say "cannot tell" for such a step. OBAAF-GHA-026 reads such a script as written and says "cannot tell", medium at most, for every option it warns about.
+- **Still read:** a 40 KB workflow-level prompt used once by each of 48 steps, with every warned option after it found; the 20 callers of #375's tests; and every step within the bound, which reads as before (a test compares the readings on 1,000 generated workflows).
+- **Known false error:** a reusable workflow whose callers' values make one long value to the checker (D-084 reads every caller's value as one), used by many steps. 40 callers that each hand 2.9 KB, used once by each of 30 steps, now fail on the last five steps.
+- **Not changed:** a value that YAML aliases into many steps is still *read* in each, where it is not put in (300 steps that alias one 100 KB `env` value take 7.8 s, 8.4 s before); OBAAF-GHA-026 still makes and reads a step's text again for each tool that may be named there.
+
 ### A step's variables are put into its command lines only up to a bound
 
 Slice 2d.16, from #372; decision D-137. To find an agent named through a variable (`run: $AGENT -p x` with `env: {AGENT: claude}`), the checker reads a step's command lines with its `env` values put in, and OBAAF-GHA-026 does the same with the job's and the workflow's `env` and the script's own assignments. Nothing bounded those texts: a `run` of 2,000 `$P` with a 2,000-character `P`, 8 KB of YAML, was read as 4,000,000 characters several times in one check, and 64 KB was read as 256,000,000. The time and memory grew with the square of the step's size.
