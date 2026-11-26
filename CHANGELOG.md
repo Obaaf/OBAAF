@@ -4,6 +4,16 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### OBAAF-SET-011 follows GitHub's page on reusing workflows
+
+Slice 2b.9, from #212; decision D-140. `obaaf audit` only. GitHub's page on reusing workflows, read on 2026-11-26, says a job that calls a reusable workflow cannot declare an environment, that a called job gets an environment's secret when it declares that environment itself and its caller still passes the secret, by name or with `secrets: inherit`, and that a secret the caller does not pass is an empty string, with no error. The rule now weighs each secret each called job in this repository reads by those sentences. Its title is now "A reusable workflow gets an empty value for a secret kept in an environment".
+
+- **A caller that passes nothing a called job reads from an environment is a finding** (medium, one for the call). This is the first adopter's incident of 2026-11-10 (Expectrail `ad3e0775`), which the rule did not apply to, because it weighed only callers that passed something. On a copy of Expectrail's files before that commit, with the two key names that commit's error message says `main-only` holds put into the recorded snapshot (which has no secret names), it now reports `jit-bench.yml#case`.
+- **A secret kept only in an environment, passed by name to a called job that declares that environment, is no longer a finding.** It was reported as empty "whatever the called workflow declares".
+- **The fix no longer says to stop passing the secret**, which by the page empties it: it says to declare the environment on the called job, pass the secret by name or with `secrets: inherit`, and mark it `required`.
+- **"Cannot tell"** where the page does not say: a secret passed under its own name with another value to a job that declares an environment holding it, a value that reads such a secret among other things, a second call, a key that is not plain text, and a workflow in another repository passed a secret kept only in an environment (a finding before).
+- **Not changed:** `obaaf check`; the audit on this repository and on Expectrail's current files gives the same results, with the rule's new words. Not run: no workflow was run on GitHub to see what a called job gets.
+
 ### What putting variables in makes is bounded for a whole workflow
 
 Slice 2d.17, from #376; decision D-138. The bound of slice 2d.16 is for one step. A value given once and reached by many steps, through a YAML alias into many steps' `env`, through the job's or the workflow's `env`, or as a value a caller hands a reusable workflow, was put in again in each step, up to eight times each: 100 KB of YAML was read as 80,000,000 characters. Measured on the scheduled run's machine against `flagship` `2454e7c`: 100 steps that each put one aliased 100 KB value in eight times took 19.1 s and now take 4.3 s; 20 steps that each put a 100 KB workflow-level value in eight times took 21.6 s and now take 6.5 s; 50 steps that YAML makes of one such step took 67 s on the reviewer's run and now take 10 s.

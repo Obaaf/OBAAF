@@ -217,11 +217,63 @@ def _runner(job: wf_mod.Job) -> str:
     return kind
 
 
+def _plain_secret(value) -> str | None:
+    """The secret a value passes when it is exactly ``${{ secrets.NAME }}`` or ``${{ secrets['NAME'] }}``, with
+    nothing round the expression and nothing else in it, in upper case; None for anything else (text round it,
+    ``||``, a function, a computed index, GITHUB_TOKEN). GitHub's page on reusing workflows documents what a
+    called job that declares an environment gets only for a secret passed this way (flagship slice 2b.9)."""
+    if not isinstance(value, str) or not (value.startswith(expr_mod.OPEN) and value.endswith(expr_mod.CLOSE)):
+        return None
+    try:
+        found = expr_mod.bodies(value)
+    except expr_mod.TooComplex:
+        return None
+    if len(found) != 1 or len(expr_mod.OPEN) + len(found[0]) + len(expr_mod.CLOSE) != len(value):
+        return None
+    toks = expr_mod.tokens(found[0])
+    kinds = [kind for kind, _ in toks]
+    if kinds == ["id", "op", "id"] and toks[1][1] == ".":
+        name = toks[2][1]
+    elif kinds == ["id", "op", "str", "op"] and (toks[1][1], toks[3][1]) == ("[", "]"):
+        name = toks[2][1]
+    else:
+        return None
+    if toks[0][1].lower() != "secrets" or not expr_mod.secret_refs(found[0]) == {name}:
+        return None
+    return None if name.upper() == "GITHUB_TOKEN" else name.upper()
+
+
+def _passed_by_name(passed) -> tuple[dict, bool]:
+    """What a calling job's ``secrets:`` mapping passes, by the name the called workflow reads it under (upper
+    case, as GitHub compares secret names): for each, the secret it plainly passes (`plain`, see _plain_secret)
+    and every secret its value reads (`reads`, `all` for one that can read any). The second value is True when
+    the mapping holds a key this reader does not take as a plain name (not text, empty, with space round it,
+    or two keys that differ only in letter case) or is neither a mapping nor `inherit`: whether a name is
+    passed is then not known."""
+    keys: dict = {}
+    if passed is None or isinstance(passed, str):
+        return keys, False
+    if not isinstance(passed, dict):
+        return keys, True
+    odd = False
+    for key, value in passed.items():
+        if not isinstance(key, str) or not key or key != key.strip() or key.upper() in keys:
+            odd = True
+            continue
+        reads = wf_mod.secret_names(value)
+        keys[key.upper()] = {"plain": _plain_secret(value),
+                             "reads": sorted(n.upper() for n in reads if not n.startswith("*")),
+                             "all": expr_mod.ALL in reads}
+    return keys, odd
+
+
 def _job(job: wf_mod.Job) -> dict:
     names = job.secret_names()
     passed = job.raw.get("secrets") if job.reusable else None
     # A caller can also hand a secret over as an input, under `with:`.
-    handed = (wf_mod.secret_names(passed) | wf_mod.secret_names(job.raw.get("with"))) if job.reusable else set()
+    given = wf_mod.secret_names(job.raw.get("with")) if job.reusable else set()
+    handed = (wf_mod.secret_names(passed) | given) if job.reusable else set()
+    keys, odd = _passed_by_name(passed) if job.reusable else ({}, False)
     used, loose, remote, unread_actions = _actions(job)
     return {
         "id": job.id, "line": job.line, "check": _check_name(job),
@@ -234,7 +286,10 @@ def _job(job: wf_mod.Job) -> dict:
         "passes": None if not job.reusable else {
             "inherit": isinstance(passed, str) and bool(passed.strip()),
             "names": sorted(n for n in handed if not n.startswith("*")),
-            "all": expr_mod.ALL in handed},
+            "all": expr_mod.ALL in handed,
+            # By the name the called workflow reads (slice 2b.9), and what is handed over as an input instead.
+            "keys": keys, "odd_keys": odd,
+            "inputs": sorted(n for n in given if not n.startswith("*")), "inputs_all": expr_mod.ALL in given},
         "permissions": _permissions(job),
         # Only the literal `true` counts: a job whose result GitHub always reports as a success.
         "advisory": job.raw.get("continue-on-error") is True,
