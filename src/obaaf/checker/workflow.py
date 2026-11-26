@@ -1958,6 +1958,21 @@ def permissions_problem(raw: Any, where: str) -> str | None:
             "cannot tell what the token may do")
 
 
+# Flagship slice 2d.16 (#372): how much longer than the text it is made from a step's command lines may be read
+# as once its `env` values are put in (`Step.env_put_in`, read by `Step.agent_text`). The text it is made from
+# is the command lines and every `env` value, each counted once, so a value put in once is always read,
+# whatever its length, and values put in many times may add this many characters more. Before, nothing
+# bounded it: a `run` of 2,000 `$P` with a 2,000-character `P` (6 KB of YAML) was read as 4,000,000
+# characters, about half a second for each of the six times a check read the step, and the text grew with the
+# square of the file. Past the bound the text is not made, and the step is an error of its file
+# (`WorkflowRules.unread_put_ins`), or, in a local action, named as not read: the checker cannot tell whether
+# an agent runs in it.
+ENV_PUT_IN_EXTRA = 100_000
+ENV_PUT_IN_UNREAD = (f"its env values, put into the command lines it runs, make a text longer than the checker reads "
+                     f"(more than {ENV_PUT_IN_EXTRA:,} characters longer than those lines and values together)")
+_ENV_NAME_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+
+
 @dataclass
 class Step:
     index: int
@@ -2101,18 +2116,50 @@ class Step:
                     found.append(variant)
                     break
         # `run: $AGENT -p x` with `env: {AGENT: claude}`: the script with the step's env values put in, read
-        # as commands like an input, so prose in an env value (`--notes "$NOTES"`) is not an agent.
-        env = {k: v for k, v in self.env.items() if isinstance(k, str) and isinstance(v, str)}
-        if env and own and "$" in own:
-            put = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: env.get(m.group(1), m.group(0)), own)
-            if put != own:
-                for variant in _readings(put):
-                    if any(matches_any(commands, candidate, anchored=True) for segment in command_segments(variant)
-                           for candidate in _first_word_forms(segment)):
-                        found.append(variant)
-                        break
+        # as commands like an input, so prose in an env value (`--notes "$NOTES"`) is not an agent. A text
+        # longer than the checker reads is not made (flagship slice 2d.16): `env_put_in_unread` says so.
+        put = self.env_put_in(own)
+        if put is not None and put != own:
+            for variant in _readings(put):
+                if any(matches_any(commands, candidate, anchored=True) for segment in command_segments(variant)
+                       for candidate in _first_word_forms(segment)):
+                    found.append(variant)
+                    break
         text = "\n".join(p for p in [own, *found] if p)
         return "\n".join(dict.fromkeys(v for v in _readings(text) if v))
+
+    def env_put_in(self, own: str | None = None) -> str | None:
+        """The command lines `agent_text` reads as written (`own`, by default `_command_text()`), with each
+        `$NAME` and `${NAME}` the step's `env` gives a text put in; the lines as written when the step's `env`
+        gives none or the lines have no `$`. None when the values put in, counted each time one is put in,
+        come to more than every `env` value counted once and `ENV_PUT_IN_EXTRA` characters more (flagship
+        slice 2d.16): the text is made only up to that bound, so what reading it costs grows with the step as
+        written, not with how often a value is put in."""
+        own = self._command_text() if own is None else own
+        env = {k: v for k, v in self.env.items() if isinstance(k, str) and isinstance(v, str)}
+        if not env or not own or "$" not in own:
+            return own
+        room = [sum(len(v) for v in env.values()) + ENV_PUT_IN_EXTRA]
+
+        def put(match):
+            value = env.get(match.group(1))
+            if value is None:
+                return match.group(0)
+            room[0] -= len(value)
+            if room[0] < 0:
+                raise OverflowError
+            return value
+
+        try:
+            return _ENV_NAME_RE.sub(put, own)
+        except OverflowError:
+            return None
+
+    @property
+    def env_put_in_unread(self) -> bool:
+        """Whether the step's `env` values, put into its command lines, make a text longer than the checker
+        reads (`env_put_in` is None), so that `agent_text` does not read them put in (flagship slice 2d.16)."""
+        return self.env_put_in() is None
 
     @property
     def clean_action(self) -> str | None:

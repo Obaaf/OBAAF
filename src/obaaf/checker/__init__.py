@@ -1435,8 +1435,11 @@ def _expand_variables(run: str, env: dict, problems: list) -> str:
     try:
         return _SHELL_VAR_RE.sub(put, run)
     except OverflowError:
-        problems.append("its environment, put into a script, makes a text longer than the checker reads")
+        problems.append(_ENV_TOO_LONG)
         return run
+
+
+_ENV_TOO_LONG = "its environment, put into a script, makes a text longer than the checker reads"
 
 
 def _action_folder_script(root: Path, folder: str, run: str, workdir, commands: list,
@@ -1600,6 +1603,10 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 text = step.agent_text(commands)
                 if text and wf_mod.matches_any(commands, text):
                     out.agent = f"runs an agent CLI in {where}"
+                elif step.env_put_in_unread:
+                    # `agent_text` did not read its env values put in (flagship slice 2d.16): named, as
+                    # `_expand_variables` names the same for a script, in the same words.
+                    out.unread.append((shown, f"step {number}: {_ENV_TOO_LONG}"))
             if out.agent is None and step.run:
                 expand_problems: list = []
                 run = _ACTION_PATH_VAR_RE.sub(f"./{folder}", _expand_variables(step.run, step.env, expand_problems))

@@ -451,7 +451,13 @@ class TheReviewersSecondPassTest(unittest.TestCase):
             return result
 
     def test_an_environment_put_into_a_script_is_capped(self):
-        body = composite("    - run: echo " + "$P " * 2000 + "\n      shell: bash\n      env:\n        P: " + "a" * 2000 + "\n")
+        """Both readings that put a step's env into its script stop at their bound: `_expand_variables`
+        (the scripts a step runs) and `Step.env_put_in` (the agent CLIs it runs; flagship slice 2d.16,
+        #372). Uncapped, 4,000 `$P` with a 4,000-character `P` is 16,000,000 characters, and either reading
+        alone took 6.5 s (`_expand_variables`) or 12 s (`env_put_in`) on the session that wrote this, against
+        0.23 s with both capped. Before 2d.16 the second had no cap, so this test ran at 2,000 by 2,000
+        and took 3.0 to 3.5 s on slower machines, its time spent in a reading it did not name."""
+        body = composite("    - run: echo " + "$P " * 4000 + "\n      shell: bash\n      env:\n        P: " + "a" * 4000 + "\n")
         result = self.timed({f"{ACTION_DIR}/action.yml": body})
         self.assertTrue(any("longer than the checker reads" in n for n in result.notes), result.notes)
 

@@ -4,6 +4,17 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### A step's env values are put into its command lines only up to a bound
+
+Slice 2d.16, from #372; decision D-137. To find an agent named through a variable (`run: $AGENT -p x` with `env: {AGENT: claude}`), the checker reads a step's command lines with its `env` values put in, and OBAAF-GHA-026 does the same with the job's and the workflow's `env` and the script's own assignments. Nothing bounded those texts: a `run` of 2,000 `$P` with a 2,000-character `P`, 6 KB of YAML, was read as 4,000,000 characters several times in one check, and 48 KB was read as 256,000,000. The time and memory grew with the square of the file.
+
+- **Each text is now made only while the values put in, counted each time, come to no more than every value counted once and 100,000 characters more.** A value put in once, such as a long prompt, is always read whatever its length. Within the bound nothing changes.
+- **A workflow's step past the bound is an error of its file, which fails the check**, because an agent named through its variables could go unseen: "its env values, put into the command lines it runs, make a text longer than the checker reads (...), so the checker cannot tell whether an agent runs in it". No baseline or `ignore` entry can accept an error.
+- **In a local action, such a step is named in the note on local actions not read through**, in the words already used when its environment, put into a script, is too long.
+- **OBAAF-GHA-020's egress control and OBAAF-GHA-005's `key-out-of-reach` say "cannot tell"** for such a step outside the confined command or before the step that holds the key.
+- **OBAAF-GHA-026 reads such a script as written and says "cannot tell"** where the step names the tool, or where the values it could not put in may make the tool's name (`a=cla; b=ude; $a$b ...`). Whether they may is decided without making the text.
+- The timing test of #372 now runs at 4,000 by 4,000 and takes about 0.2 s; uncapped, either reading would take 6 to 12 s, so the test measures the bounds it names.
+
 ### A respelled runner label or action reference
 
 Slice 2d.15, from #148 and #245; decision D-136. Two ways of writing a workflow made the checker read less than GitHub may run. Whether GitHub trims space round a runner label, and whether it refuses `openai//codex-action` or runs `openai/codex-action`, are not established, so both now fail closed.

@@ -47,7 +47,8 @@ import json
 import re
 from dataclasses import dataclass, field
 
-from obaaf.checker.workflow import _SHELLS, _command_positions, _sub_expressions, command_segments
+from obaaf.checker.workflow import (ENV_PUT_IN_EXTRA, _SHELLS, _command_positions, _sub_expressions,
+                                    command_segments)
 
 _EXPR = "\x02"           # a `${{ }}` expression is held as \x02<n>\x02 while a script is read
 _HOLE = "\x03"           # an expansion whose value is not known is marked \x03...\x03 in a word's text
@@ -666,12 +667,16 @@ class _Lexer:
         return i + 1
 
 
-def _substitute(text: str, variables: dict) -> str:
+def _substitute(text: str, variables: dict) -> str | None:
     """The script with each `$NAME` and `${NAME}` whose value is known put in, outside single quotes (a plain
     value has no quote, expansion or backslash, so bash would read the result as it reads the variable:
-    split into words outside double quotes, one word inside them)."""
+    split into words outside double quotes, one word inside them). None when the values put in, counted
+    each time one is put in, come to more than every value counted once and `ENV_PUT_IN_EXTRA` characters
+    more (flagship slice 2d.16): before, `claude -p $P $P ...` with 16,000 `$P` and a 16,000-character `P`
+    (48 KB of YAML) was read as 256,000,000 characters."""
     if not variables or "$" not in text:
         return text
+    room = sum(len(value) for value in variables.values()) + ENV_PUT_IN_EXTRA
     out, i, n, quote = [], 0, len(text), ""
     while i < n:
         ch = text[i]
@@ -702,6 +707,9 @@ def _substitute(text: str, variables: dict) -> str:
             if m:
                 name = m.group(1) or m.group(2)
                 if name in variables:
+                    room -= len(variables[name])
+                    if room < 0:
+                        return None
                     out.append(variables[name])
                     i = m.end()
                     continue
@@ -710,8 +718,18 @@ def _substitute(text: str, variables: dict) -> str:
     return "".join(out)
 
 
+# What reading a script says when its variables, put in, would make a text longer than it reads (2d.16).
+PUT_IN_UNREAD = "its variables, put in, make a text longer than the checker reads"
+
+
 def _lex(text: str, variables: dict) -> tuple[list, str]:
-    lexer = _Lexer(_substitute(text, variables), variables)
+    put = _substitute(text, variables)
+    if put is None:
+        # Read as written, with nothing put in, and "cannot tell" where the step names the tool.
+        lexer = _Lexer(text, {})
+        commands = lexer.commands()
+        return commands, lexer.problem or PUT_IN_UNREAD
+    lexer = _Lexer(put, variables)
     commands = lexer.commands()
     return commands, lexer.problem
 
@@ -1638,9 +1656,9 @@ def _fragments(text: str, flags: list, reading: Reading, where: str) -> None:
                     break
 
 
-def put_in_cheaply(text: str, scopes: list) -> str:
-    """A script with each plain assignment it makes and each plain `env` value put in for `$NAME` and
-    `${NAME}`, by a regular expression: only to decide whether the step names the tool."""
+def _cheap_values(text: str, scopes: list) -> dict:
+    """The values `put_in_cheaply` puts in: each plain `env` value, the nearest scope's, and each plain
+    assignment the script makes, its last."""
     values: dict = {}
     for scope in reversed(scopes):
         if isinstance(scope, dict):
@@ -1649,9 +1667,72 @@ def put_in_cheaply(text: str, scopes: list) -> str:
     for m in _LITERAL_ASSIGN_RE.finditer(text):
         value = m.group(2)
         values[m.group(1)] = value[1:-1] if value[:1] in "\"'" else value
+    return values
+
+
+_CHEAP_NAME_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+
+
+def put_in_cheaply(text: str, scopes: list) -> str | None:
+    """A script with each plain assignment it makes and each plain `env` value put in for `$NAME` and
+    `${NAME}`, by a regular expression: only to decide whether the step names the tool. None, as
+    `_substitute` gives, when the values put in would make a text longer than the checker reads (flagship
+    slice 2d.16); `names_when_put_in` then decides."""
+    values = _cheap_values(text, scopes)
     if not values:
         return text
-    return re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: values.get(m.group(1), m.group(0)), text)
+    room = [sum(len(value) for value in values.values()) + ENV_PUT_IN_EXTRA]
+
+    def put(match):
+        value = values.get(match.group(1))
+        if value is None:
+            return match.group(0)
+        room[0] -= len(value)
+        if room[0] < 0:
+            raise OverflowError
+        return value
+
+    try:
+        return _CHEAP_NAME_RE.sub(put, text)
+    except OverflowError:
+        return None
+
+
+def names_when_put_in(text: str, scopes: list, programs: list, packages: list) -> bool:
+    """`appears(put_in_cheaply(text, scopes), programs, packages)`, decided without making the text, for
+    when it is longer than the checker reads (flagship slice 2d.16). `appears` takes quotes and
+    backslashes out and folds case, one character at a time, so each piece of the text and each value can
+    be read on its own: a name is in a value, or it is in what is left when each value longer than twice
+    the longest name is cut to its first and last such stretch, joined by a character no name has. Where
+    bash's `$'...'` could be made (the text has `$'`, or a value has `$`, `'` or a backslash), the answer
+    is yes: what it decodes to is not worked out here. Only the values the text puts in are read."""
+    names = [n.casefold() for n in programs + packages if n]
+    if not names:
+        return False
+    values = _cheap_values(text, scopes)
+    found = [m for m in _CHEAP_NAME_RE.finditer(text) if m.group(1) in values]
+    used = {m.group(1): values[m.group(1)] for m in found}
+    if "$'" in text or any(ch in value for value in used.values() for ch in "$'\\"):
+        return True
+    width = max(len(n) for n in names)
+
+    def folded(piece: str) -> str:
+        return re.sub(r"[\"'\\]", "", piece).casefold()
+
+    short: dict = {}
+    for name, value in used.items():
+        whole = folded(value)
+        if any(n in whole for n in names):
+            return True
+        short[name] = whole if len(whole) <= 2 * width else whole[:width] + "\x00" + whole[-width:]
+    pieces, at = [], 0
+    for m in found:
+        pieces.append(folded(text[at:m.start()]))
+        pieces.append(short[m.group(1)])
+        at = m.end()
+    pieces.append(folded(text[at:]))
+    joined = "".join(pieces)
+    return any(n in joined for n in names)
 
 
 def appears(text: str, programs: list, packages: list) -> bool:

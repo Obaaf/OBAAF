@@ -29,7 +29,7 @@ from obaaf.checker.workflow import (
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION, AgentActions, leaves_repository,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup, image_outputs_push, through_matrix,
     bounded, digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
-    LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
+    ENV_PUT_IN_UNREAD, LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -788,6 +788,7 @@ class WorkflowRules:
 
     def run(self) -> list[Finding]:
         self.placeholders()
+        self.unread_put_ins()
         for job in self.wf.jobs.values():
             self.permissions_declared(job)
             self.secrets_untrusted(job)
@@ -807,6 +808,22 @@ class WorkflowRules:
         self.provenance_missing()
         self.through_local_actions()
         return self.findings
+
+    def unread_put_ins(self) -> None:
+        """Each step of a job whose `env` values, put into its command lines, make a text longer than the
+        checker reads (`Step.env_put_in_unread`, flagship slice 2d.16) is an error of the file: read past, it
+        could run an agent the lanes and the agent rules never see. Found here, after the values a caller
+        hands a called workflow are put in, and in the first pass only: a local action's step is named in
+        the note on local actions instead."""
+        if getattr(self, "_through", False):
+            return
+        for job in self.wf.jobs.values():
+            for step in job.steps:
+                if step.via is None and step.env_put_in_unread:
+                    message = (f"job '{one_line(job.id, 60)}', step '{one_line(step.name, 80)}': {ENV_PUT_IN_UNREAD}, "
+                               "so the checker cannot tell whether an agent runs in it")
+                    if message not in self.wf.problems:
+                        self.wf.problems.append(message)
 
     # ------------------------------------------------- the steps of local composite actions
     def through_local_actions(self) -> None:
@@ -2356,11 +2373,19 @@ class WorkflowRules:
         # An `env` written as one expression (`env: ${{ fromJSON(...) }}`) can set any name: none is known.
         scoped = not any(scope is not None and not isinstance(scope, dict) for scope in scopes)
         scopes = [scope if isinstance(scope, dict) else {} for scope in scopes]
+        named_unread = False
         if not any(agent_flags.appears(t, programs, packages) for t in named):
             # A name put together from variables the script sets (`a=cla; b=ude; $a$b`) is looked for only
-            # where the script has a `$` and an assignment, with a regular expression (kept cheap).
-            if not any("$" in text and "=" in text and agent_flags.appears(agent_flags.put_in_cheaply(
-                    text, scopes), programs, packages) for text, _b in parts):
+            # where the script has a `$` and an assignment, with a regular expression (kept cheap). Where the
+            # values put in make a text longer than the checker reads (flagship slice 2d.16), whether they make
+            # the name is decided without the text, and a step whose values may make it is read as one that
+            # names the tool, so that what cannot be read there is "cannot tell".
+            cheap = [(text, agent_flags.put_in_cheaply(text, scopes)) for text, _b in parts
+                     if "$" in text and "=" in text]
+            named_unread = any(put is None and agent_flags.names_when_put_in(text, scopes, programs, packages)
+                               for text, put in cheap)
+            if not named_unread and not any(put is not None and agent_flags.appears(put, programs, packages)
+                                            for _text, put in cheap):
                 return              # the tool's name is nowhere in the step (the common case, kept cheap)
         # A step before this one that can set a variable for later steps (GITHUB_ENV, `exportVariable`):
         # the job's and workflow's `env` values are then not known; the step's own `env` is.
@@ -2369,7 +2394,7 @@ class WorkflowRules:
         later = any(n < index for n in writes)
         trust_env = [scoped, scoped and not later, scoped and not later]
         known = {id(text): agent_flags.known_variables(scopes, text, trust_env) for text, _b in parts}
-        mentioned = any(agent_flags.mentions(t, programs, packages) for t in named)
+        mentioned = named_unread or any(agent_flags.mentions(t, programs, packages) for t in named)
         reading = agent_flags.Reading()
         for text, bash in parts:
             variables, unread = known[id(text)]
@@ -3476,6 +3501,10 @@ class WorkflowRules:
             if why or step.index in job.agent_script_steps:
                 agents_outside.append(f"step '{one_line(step.name, 80)}' "
                                       f"{why or job.agent_step_why.get(step.index, 'runs an agent in a script')}")
+            elif step.env_put_in_unread:
+                # Flagship slice 2d.16: an agent named through its env values is not looked for in it.
+                unsure.append(f"step '{one_line(step.name, 80)}': {ENV_PUT_IN_UNREAD}, so the checker cannot tell "
+                              "whether an agent runs there, outside the confined command")
         # Where each credential given to a confined step goes (slice 2c.5). A name the action refuses
         # makes it refuse to run; a credential that reaches the command or AWF's API proxy is the
         # evidence that the agent is the confined command.
@@ -4089,6 +4118,10 @@ class WorkflowRules:
                                 "the step that holds the key, as the same user, and can reach the key through what "
                                 "it leaves for that step (its environment, its PATH, a process left running)")
                 continue
+            if step.env_put_in_unread:
+                # Flagship slice 2d.16: an agent named through its env values is not looked for in it.
+                unsure.append(f"{where}: {ENV_PUT_IN_UNREAD}, so the checker cannot tell whether an agent runs "
+                              "there, outside the sandbox, before or beside the step that holds the key")
             given = self._credentials(step.raw)
             if given and not self._secret_refs(given):      # a secret of the job is said above
                 problems.append(f"{where} is given {self._names(given)}, before or beside the step that holds the "
