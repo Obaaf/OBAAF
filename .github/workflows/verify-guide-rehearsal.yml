@@ -1,0 +1,40 @@
+name: Verify the reconciled adoption walkthrough
+on:
+  push:
+    branches: [lead/verify-guide-6049c52]
+permissions:
+  contents: read
+jobs:
+  walkthrough:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 6049c5249e6402aea78814d6345ecbdbd3e8e0c8
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Verify the rehearsal commit and prepare the checker
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 6049c5249e6402aea78814d6345ecbdbd3e8e0c8
+          test "$(git show -s --format=%P)" = "1c82c0c79e6bb4f603d0f18313895f5c297dff38 d884604e00e7ef660a0e13667581dc8430d33a38"
+          git diff --check HEAD^1 HEAD
+          test "$(git diff --name-only HEAD^1 HEAD)" = "$(printf '%s\n' docs/from-report-to-gate.md docs/upgrading.md)"
+          export TMPDIR="$(mktemp -d "$RUNNER_TEMP/guide.XXXXXXXX")"
+          python -c 'import os; from pathlib import Path; p=Path(os.environ["TMPDIR"]).resolve(); assert not any(os.path.lexists(d/".git") for d in (p,*p.parents))'
+          echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e '.[keys]'
+      - name: Run the guide tests and repository checks
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -p test_adoption_path.py
+          obaaf catalog > /dev/null
+          obaaf docs build --check
+          python site/build.py --output "$TMPDIR/site"
+          obaaf check . --baseline .github/obaaf-baseline.json --fail-on medium > /dev/null
+      - name: Run the full suite on the rehearsal commit
+        run: python -m unittest discover -s tests
