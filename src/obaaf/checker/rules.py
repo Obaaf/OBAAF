@@ -29,7 +29,7 @@ from obaaf.checker.workflow import (
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION, AgentActions, leaves_repository,
     UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup, image_outputs_push, through_matrix,
     bounded, digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
-    ENV_PUT_IN_UNREAD, LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, PutInBudget, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
+    LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, PutInBudget, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
 
 PLACEHOLDER_SHA = "0" * 40
@@ -821,8 +821,9 @@ class WorkflowRules:
             return
         for job in self.wf.jobs.values():
             for step in job.steps:
-                if step.via is None and step.env_put_in_unread:
-                    message = (f"job '{one_line(job.id, 60)}', step '{one_line(step.name, 80)}': {ENV_PUT_IN_UNREAD}, "
+                why = step.env_put_in_why if step.via is None else None
+                if why is not None:
+                    message = (f"job '{one_line(job.id, 60)}', step '{one_line(step.name, 80)}': {why}, "
                                "so the checker cannot tell whether an agent runs in it")
                     if message not in self.wf.problems:
                         self.wf.problems.append(message)
@@ -2390,7 +2391,11 @@ class WorkflowRules:
         # without the text, and a step whose values may make it is read as one that names the tool, so that what
         # cannot be read there is "cannot tell", also where the name is somewhere else in the step (a token
         # named `CLAUDE_CODE_OAUTH_TOKEN` in the job's `env`; found by the review).
-        cheap = [(text, agent_flags.put_in_cheaply(text, scopes)) for text, _b in parts if "$" in text and "=" in text]
+        # What is put in is bounded for the whole workflow too (flagship slice 2d.17), on the step's own number.
+        put_ins = step.put_ins
+        cheap = [(text, agent_flags.put_in_cheaply(text, scopes, put_ins.names if put_ins is not None else None,
+                                                   (step.seq, n))) for n, (text, _b) in enumerate(parts)
+                 if "$" in text and "=" in text]
         named_unread = any(put is None and agent_flags.names_when_put_in(text, scopes, programs, packages)
                            for text, put in cheap)
         if not named_unread and not any(agent_flags.appears(t, programs, packages) for t in named) and not any(
@@ -2406,8 +2411,12 @@ class WorkflowRules:
         mentioned = named_unread or any(agent_flags.mentions(t, programs, packages) for t in named)
         reading = agent_flags.Reading()
         # One budget for every script of the step that is read (flagship slice 2d.16, from the review): a value
-        # may be put in eight times in the step, not eight times in each of its `env` values and inputs.
-        budget = PutInBudget()
+        # may be put in eight times in the step, not eight times in each of its `env` values and inputs. What it
+        # makes is settled on the workflow's ledger too, by the step (2d.17): another tool's reading of it and the
+        # second pass settle the same texts again and add nothing. Each tool's reading still makes and lexes them
+        # again (#380); charging each tool instead gave false "cannot tell" findings where a prompt only holds
+        # tools' names in its words ("decline" holds cline; found by the third review).
+        budget = PutInBudget(put_ins.options if put_ins is not None else None, step.seq)
         for text, bash in parts:
             variables, unread = known[id(text)]
             if bash:
@@ -3493,7 +3502,7 @@ class WorkflowRules:
                                       f"{why or job.agent_step_why.get(step.index, 'runs an agent in a script')}")
             elif step.env_put_in_unread:
                 # Flagship slice 2d.16: an agent named through its env values is not looked for in it.
-                unsure.append(f"step '{one_line(step.name, 80)}': {ENV_PUT_IN_UNREAD}, so the checker cannot tell "
+                unsure.append(f"step '{one_line(step.name, 80)}': {step.env_put_in_why}, so the checker cannot tell "
                               "whether an agent runs there, outside the confined command")
         # Where each credential given to a confined step goes (slice 2c.5). A name the action refuses
         # makes it refuse to run; a credential that reaches the command or AWF's API proxy is the
@@ -4110,7 +4119,7 @@ class WorkflowRules:
                 continue
             if step.env_put_in_unread:
                 # Flagship slice 2d.16: an agent named through its env values is not looked for in it.
-                unsure.append(f"{where}: {ENV_PUT_IN_UNREAD}, so the checker cannot tell whether an agent runs "
+                unsure.append(f"{where}: {step.env_put_in_why}, so the checker cannot tell whether an agent runs "
                               "there, outside the sandbox, before or beside the step that holds the key")
             given = self._credentials(step.raw)
             if given and not self._secret_refs(given):      # a secret of the job is said above

@@ -672,10 +672,17 @@ def _substitute(text: str, variables: dict, budget: PutInBudget | None = None) -
     split into words outside double quotes, one word inside them). None when the `PutInBudget` runs out
     (flagship slice 2d.16): before, `claude -p $P $P ...` with 16,000 `$P` and a 16,000-character `P`
     (64 KB of YAML) was read as 256,000,000 characters. `budget` is the step's, which every nested script
-    shares (`bash -c '... $P ...'` read again; found by the review); a new one by default."""
+    shares (`bash -c '... $P ...'` read again; found by the review); a new one by default. None too when the
+    values put in would take its workflow's OBAAF-GHA-026 put-ins past their bound (the budget's `ledger`,
+    flagship slice 2d.17). The text is settled there by the budget's `place` (the step's number), the
+    script, the values put in and how many times the same text has been made in this reading of the step, so
+    the same step read again for another tool or in the second pass is counted once (though made again), and
+    a script written twice in it (`bash -c '...'` twice) is counted twice (found by the review)."""
     if not variables or "$" not in text:
         return text
     budget = PutInBudget() if budget is None else budget
+    size = 0
+    named: dict = {}
     out, i, n, quote = [], 0, len(text), ""
     while i < n:
         ch = text[i]
@@ -706,13 +713,22 @@ def _substitute(text: str, variables: dict, budget: PutInBudget | None = None) -
             if m:
                 name = m.group(1) or m.group(2)
                 if name in variables:
-                    if not budget.take(variables[name]):
+                    value = variables[name]
+                    if not budget.take(value):
                         return None
-                    out.append(variables[name])
+                    size += len(value)
+                    named[name] = value
+                    out.append(value)
                     i = m.end()
                     continue
         out.append(ch)
         i += 1
+    # Settled before the text is joined, so a text past the workflow's bound is never made (2d.17).
+    if named and budget.ledger is not None:
+        reading = (text, frozenset(named.items()))
+        times = budget.made[reading] = budget.made.get(reading, 0) + 1
+        if not budget.ledger.settle((budget.place, times, reading), size):
+            return None
     return "".join(out)
 
 
@@ -1686,28 +1702,30 @@ def _cheap_values(text: str, scopes: list) -> dict:
 _CHEAP_NAME_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 
 
-def put_in_cheaply(text: str, scopes: list) -> str | None:
+def put_in_cheaply(text: str, scopes: list, ledger=None, place=0) -> str | None:
     """A script with each plain assignment it makes and each plain `env` value put in for `$NAME` and
     `${NAME}`, by a regular expression: only to decide whether the step names the tool. None, as
     `_substitute` gives, when the values put in would make a text longer than the checker reads (flagship
-    slice 2d.16); `names_when_put_in` then decides."""
+    slice 2d.16), or would take its workflow's past their bound (`ledger`, a `PutInLedger`, with `place` the
+    step's number and which of its scripts this is; flagship slice 2d.17); `names_when_put_in` then decides."""
     values = _cheap_values(text, scopes)
     if not values:
         return text
+    # What would be put in is counted first, so a text past either bound is never made (2d.17).
     budget = PutInBudget()
-
-    def put(match):
+    size = 0
+    named: dict = {}
+    for match in _CHEAP_NAME_RE.finditer(text):
         value = values.get(match.group(1))
         if value is None:
-            return match.group(0)
+            continue
         if not budget.take(value):
-            raise OverflowError
-        return value
-
-    try:
-        return _CHEAP_NAME_RE.sub(put, text)
-    except OverflowError:
+            return None
+        size += len(value)
+        named[match.group(1)] = value
+    if named and ledger is not None and not ledger.settle((place, text, frozenset(named.items())), size):
         return None
+    return _CHEAP_NAME_RE.sub(lambda m: values.get(m.group(1), m.group(0)), text)
 
 
 def names_when_put_in(text: str, scopes: list, programs: list, packages: list) -> bool:
