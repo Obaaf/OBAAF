@@ -18,7 +18,7 @@ from helpers import ROOT
 from test_settings_audit import SETTINGS_DIR
 
 from obaaf import audit
-from obaaf.audit import cli as audit_cli, report, rules, snapshot as snapshot_mod, workflows
+from obaaf.audit import cli as audit_cli, report, rules, settings as settings_mod, snapshot as snapshot_mod, workflows
 
 FIXTURE = SETTINGS_DIR / "live-expectrail-2026-11-13"
 PAGE = ROOT / "docs" / "expectrail-settings-audit.md"
@@ -57,10 +57,25 @@ class TheRecordIsGitHubsAnswersTest(unittest.TestCase):
 
     def test_the_snapshot_is_what_the_recorded_answers_give(self):
         # The page's reproduction starts from the snapshot; this ties the snapshot to GitHub's own answers.
+        # Since slice 2b.9b the reader also asks for each environment's custom deployment protection rules, which
+        # the recording of that day does not hold. This undoes that one change and compares the rest exactly: the
+        # extra requests, each answered with nothing, the field they fill (null), and the problems they add.
         snap, again = committed(), replayed()
+        custom = [r for r in again["requests"] if r["path"].endswith("/deployment_protection_rules?per_page=100")]
+        self.assertEqual(custom, [{"path": f"/repos/{ADOPTER}/environments/{name}/deployment_protection_rules"
+                                           "?per_page=100", "status": 0}
+                                  for name in ("github-pages", "main-only", "unity")])
+        envs = again["settings"]["environments"]
+        self.assertEqual([(p["key"], p["reason_code"]) for p in envs["problems"]],
+                         [("github-pages", "network"), ("main-only", "network"), ("unity", "network")])
+        self.assertTrue(all(p["what"].startswith("the custom deployment protection rules of environment ")
+                            for p in envs["problems"]))
+        for env in envs["value"]:
+            self.assertIsNone(env.pop(settings_mod.CUSTOM_RULES))
+        again["settings"]["environments"] = {"status": "read", "value": envs["value"]}
         self.assertEqual(again["settings"], snap["settings"])
         self.assertEqual(again["branches"], snap["branches"])
-        self.assertEqual(again["requests"], snap["requests"])
+        self.assertEqual([r for r in again["requests"] if r not in custom], snap["requests"])
 
     def test_the_recording_holds_eight_get_answers_and_nothing_a_token_could_be_in(self):
         data = json.loads((FIXTURE / "responses.json").read_text(encoding="utf-8"))
@@ -93,10 +108,15 @@ class WhatThePageSaysTest(unittest.TestCase):
                 return line
             return line[:first.end()] + quoted_name.sub(lambda m: m.group(1), line[first.end():])
 
+        # Since slice 2b.9b the line of an environment of a snapshot that predates the read of custom deployment
+        # protection rules says so; that clause is taken out too.
+        predates = "; custom deployment protection rules: not read (this snapshot predates them)"
         usage = workflows.not_read("not part of this test")
         text = report.to_text(self.snap, assessment=rules.evaluate(self.snap, usage), usage=usage)
         now = text.split("READ: 5 of 15\n")[1].split("\n\n")[0]
-        self.assertEqual(self.page_block().rstrip("\n"), "\n".join(as_then(line) for line in now.splitlines()))
+        self.assertEqual(now.count(predates), 3)
+        self.assertEqual(self.page_block().rstrip("\n"),
+                         "\n".join(as_then(line.replace(predates, "")) for line in now.splitlines()))
 
     def test_the_page_says_the_block_is_worded_as_it_was_printed_then(self):
         # The current report quotes the names the block prints bare; the page must say so (issue #125).

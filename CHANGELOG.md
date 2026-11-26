@@ -4,6 +4,17 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Custom deployment protection rules beside OBAAF-SET-001, 002 and 003
+
+Slice 2b.9b, from #212 item 2; decision D-141. `obaaf audit` only. A custom deployment protection rule is a GitHub App that must approve a job that names an environment before the job runs. The audit weighed only an environment's required reviewers, so a finding beside such a rule overstated what was open.
+
+- **It reads them.** For each environment, `GET /repos/{owner}/{repo}/environments/{name}/deployment_protection_rules` (GitHub's REST reference, read on 2026-11-26: "Anyone with read access to the repository can use this endpoint", and without a token for a public repository), one request more per environment. Each environment in the snapshot has a new field, `custom_protection_rules`: each rule by the app that runs it and whether GitHub marks it enabled, an empty list when there is none, or null with a problem under the environment's name when its answer failed or did not have the documented shape. The report's line for an environment names each app, or says the rules were not read.
+- **The rules weigh an enabled one as a gate whose decisions the audit cannot read.** `OBAAF-SET-001`: an environment any branch may use, or one behind a pattern of only `*` and `/`, is medium beside one where it was high, and names the app; a wildcard, a tag pattern or a branch anyone can push to, with no reviewers, is "cannot tell" beside one where it was a finding. `OBAAF-SET-002` is "cannot tell" beside one ("asks nobody" was false). `OBAAF-SET-003`'s copy in another open environment is "cannot tell" when every such copy is behind one. A protection rule of a type the audit does not know (`other_protection_rules`) is weighed the same, where it counted for nothing.
+- **Where they were not read**, in a snapshot taken before this slice or after a failed answer, each finding stands as before and ends by saying that it may overstate what is open.
+- **Drift:** a committed snapshot taken before this slice holds no custom rules, so its environments are "not compared" (`not_recorded`) and the check fails until the snapshot is taken again. Where both sides read an environment only in part, a field one side did not read is no longer reported as a change.
+- **An earlier `obaaf` refuses a snapshot this version writes**, because its schema does not know the new field.
+- **Not changed:** `obaaf check`, except that `--settings` with a snapshot whose custom rules could not be read answers "cannot tell" for the environment control. Not run on GitHub at the time of writing; the pull request links the live audit's run.
+
 ### OBAAF-SET-011 follows GitHub's page on reusing workflows
 
 Slice 2b.9, from #212; decision D-140. `obaaf audit` only. GitHub's page on reusing workflows, read on 2026-11-26, says a job that calls a reusable workflow cannot declare an environment, that a called job gets an environment's secret when it declares that environment itself and its caller still passes the secret, by name or with `secrets: inherit`, and that a secret the caller does not pass is an empty string, with no error. The rule now weighs each secret each called job in this repository reads by those sentences. Its title is now "A reusable workflow gets an empty value for a secret kept in an environment".

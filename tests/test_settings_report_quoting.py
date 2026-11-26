@@ -45,7 +45,8 @@ class ListedNamesTest(unittest.TestCase):
                                    {"name": "v*", "type": "tag"}, {"name": "x", "type": None},
                                    {"name": "y", "type": "branch, tag"}],
                "reviewers": [{"type": "User", "name": "a, b"}], "prevent_self_review": True,
-               "other_protection_rules": ["custom; reviewers: nobody"], "can_admins_bypass": False}
+               "other_protection_rules": ["custom; reviewers: nobody"], "custom_protection_rules": [],
+               "can_admins_bypass": False}
         self.assertEqual(report._environment_text(env),
                          '"prod": may deploy: branch "main; no required reviewers", tag "v*", pattern "x", '
                          '"branch, tag" "y"; reviewers: "a, b" (self-review prevented); other rules: '

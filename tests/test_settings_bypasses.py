@@ -70,11 +70,20 @@ def environment(name, mode=None, reviewers=False):
             "deployment_branch_policy": policy}
 
 
-def with_environments(entries, envs, policies=None, secrets=None):
-    """Replace the environments, their branch policies (name -> [(pattern, type)]) and their secrets."""
-    policies, secrets = policies or {}, secrets or {}
+def with_environments(entries, envs, policies=None, secrets=None, custom=None):
+    """Replace the environments, their branch policies (name -> [(pattern, type)]), their secrets and their
+    custom deployment protection rules (name -> [app slug], each enabled; none where not given)."""
+    policies, secrets, custom = policies or {}, secrets or {}, custom or {}
     out = drop(entries, f"{R}/environments")
     out.append(ok(ENVS, {"total_count": len(envs), "environments": envs}))
+    for env in envs:
+        apps = custom.get(env["name"], [])
+        out.append(ok(f"{R}/environments/{env['name']}/deployment_protection_rules?per_page=100",
+                      {"total_count": len(apps), "custom_deployment_protection_rules": [
+                          {"id": n, "node_id": "r", "enabled": True,
+                           "app": {"id": 100 + n, "node_id": "a", "slug": app,
+                                   "integration_url": f"https://api.github.com/apps/{app}"}}
+                          for n, app in enumerate(apps, 1)]}))
     for name, patterns in policies.items():
         out.append(ok(f"{R}/environments/{name}/deployment-branch-policies?per_page=100",
                       {"total_count": len(patterns), "branch_policies": [
