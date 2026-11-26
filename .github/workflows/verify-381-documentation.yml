@@ -1,0 +1,39 @@
+name: Verify the #381 documentation revision with #366
+on:
+  push:
+    branches: [lead/verify-381-docs-e19aee5]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: d0e32ca5ff8b79068a778984a80e03ce20097f2a
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compare both native merge trees and replay the wording changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TMPDIR="$(mktemp -d "$RUNNER_TEMP/obaaf-docs.XXXXXX")"
+          if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          old_tree=$(git merge-tree --write-tree d0e32ca5ff8b79068a778984a80e03ce20097f2a 2f6284eaac746858e75f08592a790b7611331a43)
+          test "$old_tree" = bedb73f09bb5a6bb9b28ee9f3acc8d5bd0e5d6d3
+          new_tree=$(git merge-tree --write-tree d0e32ca5ff8b79068a778984a80e03ce20097f2a e19aee58bc4e1236f050663dbcd75e9407453698)
+          git diff --name-only "$old_tree" "$new_tree" > "$TMPDIR/integration.paths"
+          printf '%s\n' CHANGELOG.md DECISIONS.md > "$TMPDIR/expected.paths"
+          cmp "$TMPDIR/integration.paths" "$TMPDIR/expected.paths"
+          git diff --full-index 2f6284eaac746858e75f08592a790b7611331a43 e19aee58bc4e1236f050663dbcd75e9407453698 > "$TMPDIR/review.patch"
+          export GIT_INDEX_FILE="$TMPDIR/replay.index"
+          git read-tree "$old_tree"
+          git apply --cached --whitespace=error "$TMPDIR/review.patch"
+          replay=$(git write-tree)
+          test "$replay" = "$new_tree"
+          git diff --check "$old_tree" "$new_tree"
+          echo "Previous tested tree $old_tree"
+          echo "Integrated tree $new_tree"
+          echo "Replayed tree $replay"
+          git diff --numstat "$old_tree" "$new_tree"
