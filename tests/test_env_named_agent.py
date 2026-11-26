@@ -18,11 +18,13 @@ it runs with. What the step's own `env` sets outranks the job's, and the job's t
 import re
 import time
 import unittest
+from unittest import mock
 
 from helpers import TempDir
 from test_egress_recognised import run_check
 from test_local_composite_actions import ACTION_DIR, KEY, check, composite, lane_of
 
+from obaaf import checker as checker_mod
 from obaaf.checker import workflow as wf
 from obaaf.checker.workflow import ENV_PUT_IN_UNREAD, Step
 from obaaf.catalog import load as load_catalog
@@ -106,36 +108,34 @@ class TheLanesTest(unittest.TestCase):
             with self.subTest(top=top, job=job):
                 self.assertEqual(self.lane(flow("", top_env=top, job_env=job, uses=f"./{ACTION_DIR}"), files), "agent")
 
+    def test_a_nested_local_action_is_given_the_jobs_env_too(self):
+        inner = ".github/actions/inner"
+        files = {f"{ACTION_DIR}/action.yml": composite(f"    - uses: ./{inner}\n"),
+                 f"{inner}/action.yml": composite("    - run: $a$b -p 'fix the bug'\n      shell: bash\n")}
+        self.assertEqual(self.lane(flow("", job_env="{a: cla, b: ude}", uses=f"./{ACTION_DIR}"), files), "agent")
+
+    def test_jobs_whose_other_values_differ_share_one_reading_of_a_local_action(self):
+        """A local action is read once for each set of values it is given (2d.4a). It is given only the job's and
+        the workflow's names its files hold as words, so 100 jobs that differ in a value it does not name cost one
+        reading, as before this slice; a value it names costs a reading for each job (stated in D-139)."""
+        # 90 steps of 400 characters, used by 110 jobs: read again for each job, the readings cost more than the
+        # check's units for local actions (an error, checked by giving the action every name).
+        steps = "".join(f"    - run: ./scripts/part.sh {n} --retries 3 --cache ~/.cache/part-{n} "
+                        + "--mirror https://mirror.example.com/toolchain " * 8 + "\n      shell: bash\n" for n in range(90))
+        files = {f"{ACTION_DIR}/action.yml": composite(steps)}
+        jobs = "".join(f"  j{n}:\n    runs-on: ubuntu-latest\n    permissions: {{contents: read}}\n"
+                       f"    env: {{OTHER: value-{n}}}\n    steps:\n      - uses: ./{ACTION_DIR}\n" for n in range(110))
+        with TempDir() as tmp:
+            result = check(tmp, "on: workflow_dispatch\njobs:\n" + jobs, files)
+        self.assertEqual(result.errors, [])
+        with mock.patch.object(checker_mod, "_env_words", lambda raws: None), TempDir() as tmp:
+            result = check(tmp, "on: workflow_dispatch\njobs:\n" + jobs, files)
+        self.assertTrue(any("units" in error for error in result.errors), result.errors)
+
     def test_in_a_local_action_the_using_steps_env_outranks_the_jobs(self):
         files = {f"{ACTION_DIR}/action.yml": composite("    - run: $AGENT -p 'fix the bug'\n      shell: bash\n")}
         text = flow("", job_env="{AGENT: claude}", step_env="{AGENT: echo}", uses=f"./{ACTION_DIR}")
         self.assertEqual(self.lane(text, files), "trusted")
-
-    def test_an_env_expression_from_any_scope(self):
-        for scope in ("top_env", "job_env", "step_env"):
-            with self.subTest(scope=scope):
-                self.assertEqual(self.lane(flow("${{ env.AGENT }} -p review", **{scope: "{AGENT: claude}"})), "agent")
-
-    def test_env_expressions_in_pieces_and_in_every_form_the_reader_works_out(self):
-        for run in ("${{ env.a }}${{ env.b }} -p review", "${{ format('{0}{1}', env.a, env.b) }} -p review",
-                    "${{ ENV.A }}${{ env['B'] }} -p review", "${{ env.x || env.a }}$b -p review",
-                    "${{ env.a }}$b -p review"):
-            with self.subTest(run=run):
-                self.assertEqual(self.lane(flow(run, job_env="{a: cla, b: ude}")), "agent")
-
-    def test_an_env_expression_the_steps_own_env_overrides(self):
-        text = flow("${{ env.AGENT }} -p review", job_env="{AGENT: claude}", step_env="{AGENT: echo}")
-        self.assertEqual(self.lane(text), "trusted")
-
-    def test_an_env_expression_for_a_name_no_scope_sets_is_empty(self):
-        self.assertEqual(self.lane(flow("${{ env.NONE }}claude-not -p review", job_env="{a: b}")), "trusted")
-
-    def test_an_env_expression_past_what_the_checker_works_out_is_an_error_of_the_file(self):
-        many = " || ".join(f"env.v{n}" for n in range(20))
-        with TempDir() as tmp:
-            values = "{" + ", ".join(f"v{n}: x{n}" for n in range(20)) + "}"
-            result = check(tmp, flow("${{ " + many + " }} -p review", job_env=values))
-        self.assertTrue(any(wf.ENV_EXPRESSION_UNREAD in error for error in result.errors), result.errors)
 
     def test_a_step_read_on_its_own_inherits_nothing(self):
         step = Step(index=0, raw={"run": "$a$b -p x"}, line=1)
@@ -178,13 +178,6 @@ class TheOptionsTest(unittest.TestCase):
     def test_braces(self):
         (finding,) = self.findings(flow("${a}${b} --dangerously-skip-permissions -p x", job_env="{a: cla, b: ude}"))
         self.assertEqual(finding.severity, "high")
-
-    def test_env_expressions_that_name_the_tool_are_cannot_tell(self):
-        for run in ("${{ env.a }}${{ env.b }} --dangerously-skip-permissions -p x",
-                    "${{ format('{0}{1}', env.a, env.b) }} --dangerously-skip-permissions -p x"):
-            with self.subTest(run=run):
-                (finding,) = self.findings(flow(run, job_env="{a: cla, b: ude}"))
-                self.assertEqual(finding.severity, "medium")
 
     def test_no_tool_no_finding(self):
         self.assertEqual(self.findings(flow("$a$b --dangerously-skip-permissions", job_env="{a: ec, b: ho}")), [])

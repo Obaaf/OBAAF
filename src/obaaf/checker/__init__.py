@@ -1472,7 +1472,8 @@ def _action_folder_script(root: Path, folder: str, run: str, workdir, commands: 
 
 def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions", commands: list, depth: int = 0,
                            seen: frozenset = frozenset(), cache: dict | None = None,
-                           given: dict | None = None, given_env: dict | None = None) -> _ActionReading:
+                           given: dict | None = None, given_env: dict | None = None,
+                           inherited_env: dict | None = None) -> _ActionReading:
     """Whether the local action `uses` (`./path`, `$/path` or `.\\path`) runs an agent (flagship slice
     2d.4a). A composite action's steps are read for an agent as a job's steps are, with more put in: an
     agent action; an agent CLI in any command line `Step.agent_text` reads, with each expression that
@@ -1508,6 +1509,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
         return out
     given = given or {}
     given_env = given_env or {}
+    inherited_env = inherited_env or {}
     cache = {} if cache is None else cache
     files_key = ("files", tuple(folders))
     if files_key not in cache:
@@ -1520,8 +1522,14 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             else:
                 missing.append(why)
         size = sum(_action_size(root, folder) for folder in folders)
-        cache[files_key] = (raws, missing, _inputs_read(raw for _, raw in raws), size)
-    raws, missing, read_names, size = cache[files_key]
+        cache[files_key] = (raws, missing, _inputs_read(raw for _, raw in raws), size, _env_words(raw for _, raw in raws))
+    raws, missing, read_names, size, env_words = cache[files_key]
+    if inherited_env:
+        # The job's and the workflow's `env`, under the using step's own (flagship slice 2d.18): only the names the
+        # action's files hold as words, so that jobs whose other values differ share one reading; all of them where
+        # a step of the action uses another local action, which may read any.
+        given_env = {**{name: value for name, value in inherited_env.items()
+                        if env_words is None or name in env_words}, **given_env}
 
     def fixed(mapping, names=None):
         return tuple(sorted((str(name), wf_mod.as_text(value)) for name, value in mapping.items()
@@ -1663,6 +1671,37 @@ def _action_size(root: Path, folder: str) -> int:
     return total
 
 
+_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _env_words(raws) -> frozenset | None:
+    """The words in the text of a local action's files (flagship slice 2d.18): the names of the job's and the
+    workflow's `env` that a reading of the action can use; None when a step of the action uses another local
+    action, or a `uses` that holds an expression, whose reading may use any. Each value is visited once, however
+    many times YAML names it through an alias."""
+    words: set = set()
+    seen: set = set()
+    stack = list(raws)
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            if id(value) in seen:
+                continue
+            seen.add(id(value))
+            uses = value.get("uses")
+            if _is_local_like(uses) or (isinstance(uses, str) and expr_mod.OPEN in uses):
+                return None
+            stack.extend(value.keys())
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            if id(value) not in seen:
+                seen.add(id(value))
+                stack.extend(value)
+        elif isinstance(value, str):
+            words.update(_WORD_RE.findall(value))
+    return frozenset(words)
+
+
 def _inputs_read(raws) -> set:
     """The inputs the expressions in action files read, by name in lower case, with `*` when one reads
     `inputs` in another way (`toJSON(inputs)`, a computed index). Each value is visited once, however
@@ -1706,8 +1745,9 @@ def _apply_local_action_detection(workflow, root: Path | None, actions: "wf_mod.
             try:
                 # The `env` the using step runs with, its job's and its workflow's under its own, which the
                 # action's steps inherit (flagship slice 2d.18; before, the step's own alone).
+                inherited = {name: value for name, value in step.run_env.items() if name not in step.env}
                 reading = _agent_in_local_action(root, step.uses, actions, commands, cache=cache, given=step.with_,
-                                                 given_env=step.run_env)
+                                                 given_env=step.env, inherited_env=inherited)
             except _ActionFileError as exc:
                 errors.append(f"{where} {wf_mod.one_line(str(exc), 500)}, so the checker cannot tell whether an "
                               "agent runs in it")
