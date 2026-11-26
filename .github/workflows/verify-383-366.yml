@@ -40,7 +40,7 @@ jobs:
           
           target = sys.argv[1]
           ours = git("rev-parse", "HEAD").strip().decode()
-          result = subprocess.run(["git", "merge", "--no-ff", "--no-commit", target])
+          result = subprocess.run(["git", "-c", "user.name=Verification Runner", "-c", "user.email=verification@localhost", "merge", "--no-ff", "--no-commit", target])
           paths = git("diff", "--name-only", "--diff-filter=U").decode().splitlines()
           assert result.returncode == 1 and paths == ["CHANGELOG.md", "DECISIONS.md"], paths
           for path in paths:
