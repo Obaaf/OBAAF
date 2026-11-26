@@ -244,6 +244,7 @@ _READINGS = "readings"      # the counter's key in the cache, which no (folders,
 
 
 _OWN = "own"                # what is left of the units of the step being read, which no other step may spend
+_PUT_INS = "put-ins"        # the check's `PutIns` for the steps of local actions read for an agent (2d.17)
 
 
 def _charge(cache: dict, units: int) -> None:
@@ -1583,7 +1584,13 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                     put[key_name] = _put_inputs(value, inputs, folder, problems, done, step_env)
                 else:
                     put[key_name] = _put_inputs(value, inputs, folder, [], ignored, step_env)
-            step = wf_mod.Step(index=number - 1, raw=put, line=getattr(step_raw, "line", 0))
+            # One ledger for every reading of a local action in the check (flagship slice 2d.17): the readings
+            # are kept for the check, whichever workflow asked first, so what they make is the check's.
+            put_ins = cache.get(_PUT_INS)
+            if put_ins is None:
+                put_ins = cache[_PUT_INS] = wf_mod.PutIns(wf_mod.ENV_PUT_IN_ACTIONS_UNREAD)
+            step = wf_mod.Step(index=number - 1, raw=put, line=getattr(step_raw, "line", 0), put_ins=put_ins,
+                               seq=put_ins.number())
             # What a caller hands the action (the text its inputs add) is worked on again at each reading,
             # so it is paid for too; the action's own text is in the size of its files.
             added = (sum(_text_size(put.get(name)) for name in _COMMAND_FIELDS)
@@ -1614,7 +1621,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             if out.agent is None and unread_put_in:
                 # `agent_text` did not read its env values put in (flagship slice 2d.16): an error, as for a
                 # workflow's step, since the action's author writes it as freely (found by the review).
-                raise _ActionFileError(f"in its step {number} {wf_mod.ENV_PUT_IN_UNREAD}")
+                raise _ActionFileError(f"in its step {number} {step.env_put_in_why}")
             raw_uses = step_raw.get("uses")
             if _is_local_like(raw_uses) and "${{" in raw_uses:
                 out.unread.append((wf_mod.one_line(raw_uses, 120), "its path holds an expression"))
@@ -2066,7 +2073,10 @@ def _local_steps(root: Path, uses: str, given: dict, given_env: dict, outer: dic
             name = f"{prefix}: {wf_mod.one_line(own, 120)}"
             if len(pairs) > 1:
                 name += f" ({folder})"
-            step = wf_mod.Step(index=0, raw=put, line=top.line, via=top, shown_name=name, written=step_raw)
+            # The workflow's ledgers bound what putting its variables in makes (flagship slice 2d.17), as for
+            # the job's own steps; the step has a number of its own there, which its copies keep.
+            step = wf_mod.Step(index=0, raw=put, line=top.line, via=top, shown_name=name, written=step_raw,
+                               put_ins=top.put_ins, seq=top.put_ins.number() if top.put_ins is not None else 0)
             out.append(step)
             unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             inner_uses = step_raw.get("uses")
