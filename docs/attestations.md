@@ -118,11 +118,23 @@ A record without a patch cannot accompany a commit that changes files. A merge m
 
 `obaaf verify release` and `obaaf verify agent-run` read `.github/obaaf-policy.yaml` ([example](../templates/github-actions/obaaf-policy.example.yaml)) from the default branch. It sets:
 
-- which workflow may sign provenance, and from which refs (required);
+- with `signing: sigstore`, which workflow may sign provenance, and from which refs (required);
 - the allowed isolation tiers;
 - the protected branch the released commit must be on;
 - the release environments, and how many distinct approvers they need;
 - the commit after which agent commits are checked (`agents.since`);
 - where agent records live, and which workflows must sign them.
+
+The policy decides what may ship, so both commands read it strictly. Each field must have its YAML type: text, `true` or `false`, a whole number of 0 or more written in plain decimal digits (`min_approvals`), or a list of non-empty texts, even with one entry (`source_refs: ["refs/tags/v*"]`, not `source_refs: refs/tags/v*`). Booleans follow YAML 1.2, so `no`, `off` and `"false"` are text, not false; a whole number such as `010` or `0x10`, which PyYAML reads as YAML 1.1 does (8 and 16), is refused. These are each an `error:` naming the file, and the command ends with status 2 before it checks anything:
+
+- a value of another type, or an empty list (leaving the key out means no restriction for `approvers` and `runner_environments` and the default for `allowed_tiers`, `environments` and `effect_identities`; `source_refs` with Sigstore and each role under `keys` need an entry);
+- a field written with no value (a section with nothing under it, `keys` included, is read as absent);
+- a key the policy does not define (a misspelling such as `min_aprovals`), and a field only Sigstore checks written with `signing: keys`: that kind of signing checks each record's key and not the workflow, ref, runner or issuer, so `provenance` may hold none of its four fields and `agents` neither `propose_workflow`, `apply_workflow` nor `source_ref`; with `signing: sigstore`, a `keys` section with anything in it;
+- both `release.environment` and `release.environments`;
+- YAML that cannot be read, and a file that is not UTF-8.
+
+The error names the field and its line where it can; an error from the YAML loader names the line where the loader gives one. Remove a key to use its default. `branch: ""` still turns the protected-branch check off, `since: ""` still means not set, and an empty text still gives the other text fields that have a default (`signer_workflow`, `issuer`, `environment`, `records_dir`, the two agent workflows, `source_ref`, where the `signing` allows them) that default.
+
+With `signing: keys`, the policy's `repository` is not checked against the records: the verifier checks that each record is signed with a policy key, not which repository the record says it was built from ([#406](https://github.com/Obaaf/OBAAF/issues/406)). Whoever holds a key can sign a record for any build.
 
 Missing certificate fields fail verification. An attestation that fails the policy is ignored, with a warning, when a valid one exists for the same file.

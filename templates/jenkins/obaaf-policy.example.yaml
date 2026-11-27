@@ -3,6 +3,8 @@
 # .obaaf/keys/release.pub.pem, and replace OWNER/REPO. Protect both with code owners: whoever can edit
 # them decides what may ship. The publish job reads them from the default branch.
 format: obaaf-policy/v0.1
+# With signing: keys, the records are not checked against this repository, only against the keys below
+# (https://github.com/Obaaf/OBAAF/issues/406): whoever holds a key can sign a record for any build.
 repository: OWNER/REPO
 
 # Jenkins has no identity that the public Sigstore service accepts for a job, so records are DSSE
