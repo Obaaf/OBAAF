@@ -4,6 +4,13 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### A value put into a local action's text no longer hides the lines after it
+
+Slice 2d.20a, from #401; decision D-147. The second pass reads a local composite action's steps with the caller's `with:` put into the action's text. A value put in as text could join the text around it into an expression GitHub never reads: in `# ${{ inputs.a }}{{ x` given `$`, the text read `# ${{ x`, an expression up to the next `}}`, so a `claude ${{ env.F }} -p hi` or an `npm install -g @anthropic-ai/claude-code` on the next line was inside it and OBAAF-GHA-026 and OBAAF-GHA-025 said nothing, where GitHub runs both.
+
+- **Now such a value is written as an expression that gives it** (`${{ '$' }}`), in the second pass's text and in the lines slice 2d.19f builds, so no rule finds an expression GitHub does not; the same for the action's folder put in for `${{ github.action_path }}`. A text the checker cannot build so is an error of the check.
+- **Can fail a gate that passed** (no finding to the step's findings), and a line 2d.19f refused is now worked out ("cannot tell" to high, or to no finding). `docs/upgrading.md` has the row. On this repository and on the first adopter the reports are byte-identical with `flagship` `686c5e7`.
+
 ### OBAAF-GHA-026 in a local composite action's steps
 
 Slice 2d.19f, from #382; decision D-146. D-143 made OBAAF-GHA-026 read `claude ${{ env.FLAGS }} -p review` in a workflow's own step as GitHub runs it. In a local composite action's step it still read the line as written: with `FLAGS: --dangerously-skip-permissions` in the job's `env` it was the medium "cannot tell", where GitHub runs the warned option.
