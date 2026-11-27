@@ -32,9 +32,15 @@ for the `Env` of the step's scopes and its runner (`env_case`), read the widest 
   one operand of `||`, `&&`, `format()` or `join()`, the other readings are made, with it as an empty text where
   it is a piece of the text; an expression with no value the checker knows is left as written.
 
+- **A scope written as one expression** (flagship slice 2d.19d: `env: ${{ fromJSON(vars.E) }}`, `env: ${{ matrix.env
+  }}`) may give any name any text: a name that no mapping nearer the step sets, under the runner's comparison of
+  names, and the whole `env` give `FROM_SCOPE`. It makes no reading, as a value of another context does, but the
+  plan names each expression whose text may hold it (`Plan.scoped`), and the lanes make the step an error of its
+  file where one stands where a command's program goes (`workflow._scope_at_program`). Before, such a scope gave a
+  value of another context, so `run: ${{ env.AGENT }} -p x` under it was in no agent lane, with no error.
+
 Nothing here is checked against a run on GitHub beyond what #387 asserts (letter case in the `env` context on
-GitHub-hosted runners). What an earlier step writes to `GITHUB_ENV` is not read; a scope written as one expression
-(`env: ${{ fromJSON(...) }}`) gives values the checker does not know.
+GitHub-hosted runners). What an earlier step writes to `GITHUB_ENV` is not read.
 """
 
 from __future__ import annotations
@@ -101,6 +107,19 @@ class _AllValues:
 ALL_VALUES = _AllValues()
 
 
+class _FromScope:
+    """What an `env` written as one expression the checker does not read may give (flagship slice 2d.19d): any
+    text, or nothing. An expression whose text may hold it is named in its plan (`Plan.scoped`)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "FROM_SCOPE"
+
+
+FROM_SCOPE = _FromScope()
+
+
 def env_case(job) -> str:
     """How the runner of `job` compares the names of the `env` context (#387, F-405): `exact` on a known
     GitHub-hosted Linux or macOS runner, `folded` on a known GitHub-hosted Windows runner, `both` where the runner
@@ -131,20 +150,33 @@ def env_case(job) -> str:
 class Env:
     """The `env` context a step's expressions see, by letter-case mode: `exact` looks a name up as written,
     `folded` without regard to case (the nearest scope's value), `both` gives each where they differ. Each table
-    is built once per reading of a step (the review of 2d.18 found it rebuilt for every reference)."""
+    is built once per reading of a step (the review of 2d.18 found it rebuilt for every reference).
 
-    def __init__(self, scopes: list, case: str) -> None:
-        # `scopes`: the `env` mappings, outermost first (the workflow's, the job's, the step's). A scope that is
-        # not a mapping (one expression) makes every name possibly something the checker does not know.
+    A scope that is not a mapping is written as one expression the checker does not read (flagship slice 2d.19d):
+    the tables hold only the mappings nearer the step than the nearest such scope, and a name they do not settle,
+    and the whole `env`, may then be anything (`FROM_SCOPE`)."""
+
+    def __init__(self, scopes: list, case: str, labels: list | None = None) -> None:
+        # `scopes`: the `env` mappings, outermost first (the workflow's, the job's, the step's).
         self.case = case
-        self.unknown_scope = any(scope is not None and not isinstance(scope, dict) for scope in scopes)
+        if labels is None:
+            labels = ["the workflow's", "the job's", "the step's own"] if len(scopes) == 3 else \
+                ["the step's own"] * len(scopes)
+        last = max((i for i, scope in enumerate(scopes) if scope is not None and not isinstance(scope, dict)),
+                   default=-1)
+        # The nearest scope the checker does not read, which decides what a name it does not settle may be.
+        self.unread = last >= 0
+        self.where = labels[last] if self.unread else None
         exact: dict = {}
         folded: dict = {}
         # Values under a name the checker may not spell as GitHub does: a key YAML gives as a number, a boolean
         # or null (GitHub names it by its text, not checked here), or a text key that YAML 1.2, which GitHub reads,
         # may read as one (`0o7`, `yes` is text to both). Every lookup may give them (found by the review of 2d.19).
         self.odd: list = []
-        for scope in scopes:
+        # Such text keys settle no name (found by the review of 2d.19d: GitHub names `0o7` `7`, so `env['0o7']`
+        # comes from an outer scope).
+        odd_names: set = set()
+        for scope in scopes[last + 1:]:
             if not isinstance(scope, dict):
                 continue
             for name, value in scope.items():
@@ -154,6 +186,7 @@ class Env:
                         self.odd.append(text)
                     if not isinstance(name, str):
                         continue
+                    odd_names.add(name)
                 if text is None:
                     # Not text (a mapping, a list): GitHub refuses it, or gives what the checker does not know.
                     exact.pop(name, None)
@@ -162,6 +195,8 @@ class Env:
                 exact[name] = text
                 folded[fold(name)] = text
         self.exact, self.folded = exact, folded
+        self.odd_folded = {fold(name) for name in odd_names}
+        self.odd_names = odd_names
         # On Windows a name outside ASCII is compared by .NET's own mapping, which the checker does not copy (the
         # second review: U+1FB3 and U+1FBC are one name there), so such a lookup may give any such name's value.
         self.outside_ascii = [value for name, value in exact.items() if not name.isascii()]
@@ -177,15 +212,19 @@ class Env:
         # A name outside ASCII may fold otherwise on Windows than here (.NET's ordinal comparison maps letter by
         # letter: `ß` is not `SS`), so there both tables are read.
         case = "both" if self.case == "folded" and not name.isascii() else self.case
+        settled = True
         if case in ("exact", "both"):
             out.append(self.exact.get(name))
+            settled = name in self.exact and name not in self.odd_names
         if case in ("folded", "both"):
-            out.append(self.folded.get(fold(name)))
+            key = fold(name)
+            out.append(self.folded.get(key))
             if not name.isascii():
                 out.extend(self.outside_ascii)
+            settled = settled and name.isascii() and key in self.folded and key not in self.odd_folded
         out.extend(self.odd)
-        if self.unknown_scope:
-            out.append(UNKNOWN)
+        if self.unread and not settled:
+            out.append(FROM_SCOPE)
         return _unique(out)
 
     def every(self) -> list:
@@ -197,12 +236,14 @@ class Env:
             values.extend(self.folded.values())
         values.extend(self.odd)
         values.append(None)
-        if self.unknown_scope:
-            values.append(UNKNOWN)
+        if self.unread:
+            values.append(FROM_SCOPE)
         return _unique(values)
 
     def joined(self, sep: str) -> list:
         """`join(env.*, sep)`: the values in the order the workflow writes them, in each table."""
+        if self.unread:
+            return [FROM_SCOPE]
         out = []
         tables = []
         if self.case in ("exact", "both"):
@@ -218,7 +259,9 @@ class Env:
         return out
 
     def as_dict(self) -> list:
-        """The object(s) `toJSON(env)` serialises."""
+        """The object(s) `toJSON(env)` serialises (none where a scope is not read: `every` gives `FROM_SCOPE`)."""
+        if self.unread:
+            return []
         out = []
         if self.case in ("exact", "both"):
             out.append(dict(self.exact))
@@ -274,7 +317,7 @@ def _number_text(value) -> str:
 
 
 def _key(value):
-    if value is UNKNOWN or value is ENV_OBJECT or value is ALL_VALUES:
+    if value is UNKNOWN or value is ENV_OBJECT or value is ALL_VALUES or value is FROM_SCOPE:
         return ("special", id(value))
     if isinstance(value, (dict, list)):
         return ("id", id(value))
@@ -293,7 +336,7 @@ def _unique(values: list) -> list:
 
 def _truthy(value):
     """True, False, or None where the checker cannot tell."""
-    if value is UNKNOWN:
+    if value is UNKNOWN or value is FROM_SCOPE:
         return None
     if value is None:
         return False
@@ -308,9 +351,10 @@ def _truthy(value):
 
 def text_of(value, env: Env) -> list:
     """The texts a value gives where GitHub puts it into a string (`${{ }}` in `run`, an argument of `format`).
-    An object made into text gives every value `env` holds (the checker reads it the widest way)."""
-    if value is UNKNOWN:
-        return [UNKNOWN]
+    An object made into text gives every value `env` holds (the checker reads it the widest way). What a scope the
+    checker does not read may give stays `FROM_SCOPE` (flagship slice 2d.19d)."""
+    if value is UNKNOWN or value is FROM_SCOPE:
+        return [value]
     if value is None:
         return [""]
     if isinstance(value, bool):
@@ -404,7 +448,12 @@ class _Reader:
             out: list = []
             for value in left:
                 truth = _truthy(value)
-                if truth is None:
+                if value is FROM_SCOPE:
+                    # Falsy, what a scope gives is an empty text, or false, 0 or null through `fromJSON` (found by
+                    # the review of 2d.19d: `${{ env.DEBUG && 'V=1' || '' }}` can only be `V=1` or empty).
+                    out.extend(["", False, 0])
+                    out.extend(right)
+                elif truth is None:
                     out.append(value)
                     out.extend(right)
                 elif truth:
@@ -448,8 +497,8 @@ class _Reader:
                 values = _unique([v for value in values for v in self.member(value, [name])])
             elif self.peek() == ("op", ".") and self.peek(1) == ("op", "*"):
                 self.pos += 2
-                values = _unique([ALL_VALUES if value is ENV_OBJECT else UNKNOWN if value is UNKNOWN
-                                  else self._star(value) for value in values])
+                values = _unique([ALL_VALUES if value is ENV_OBJECT else value if value is UNKNOWN
+                                  or value is FROM_SCOPE else self._star(value) for value in values])
             elif self.op("["):
                 keys = self.or_(depth + 1)
                 if not self.op("]"):
@@ -467,8 +516,8 @@ class _Reader:
 
     def member(self, value, keys: list) -> list:
         """What `value.KEY` or `value[KEY]` gives for each key the index can be."""
-        if value is UNKNOWN:
-            return [UNKNOWN]
+        if value is UNKNOWN or value is FROM_SCOPE:
+            return [value]
         if len(keys) > EXPRESSION_VALUES:
             raise Unread(f"has an index that can give more than {EXPRESSION_VALUES:,} values")
         if value is ENV_OBJECT:
@@ -596,8 +645,8 @@ class _Reader:
                 return [UNKNOWN]
             out: list = []
             for value in args[0]:
-                if value is UNKNOWN:
-                    out.append(UNKNOWN)
+                if value is UNKNOWN or value is FROM_SCOPE:
+                    out.append(value)
                 elif value is ENV_OBJECT:
                     for table in env.as_dict():
                         out.append(json.dumps(table, ensure_ascii=False, indent=2))
@@ -637,6 +686,8 @@ class _Reader:
             if not args:
                 return [UNKNOWN]
             seps = [s for v in (args[1] if len(args) > 1 else [","]) for s in text_of(v, env)]
+            if any(sep is FROM_SCOPE for sep in seps):
+                return [FROM_SCOPE]
             out = []
             for value in args[0]:
                 if value is ENV_OBJECT or value is ALL_VALUES:
@@ -645,6 +696,9 @@ class _Reader:
                     for sep in seps:
                         out.extend(env.joined("" if sep is UNKNOWN else sep))
                     out.extend(text_of(ALL_VALUES, env))
+                    continue
+                if value is FROM_SCOPE:
+                    out.append(FROM_SCOPE)
                     continue
                 if isinstance(value, list):
                     pieces = []
@@ -667,6 +721,9 @@ class _Reader:
             if not args:
                 return [UNKNOWN]
             pieces = [[t for v in values for t in text_of(v, env)] for values in args]
+            if any(t is FROM_SCOPE for piece in pieces for t in piece):
+                # Any text, in the template or an argument: the result may be any text (flagship slice 2d.19d).
+                return [FROM_SCOPE]
             count = 1
             for p in pieces:
                 count *= len(p)
@@ -854,12 +911,14 @@ class Plan:
     text with the values of their expressions, the characters of values put in in every reading (`size`, which
     the lanes ledger counts as D-138 counts `$NAME`), the characters the text made comes to past the text as
     written (`copies`: the first reading's values, and for each reading past the first its line again with its
-    values), and the most readings of one line (`readings`)."""
+    values), the most readings of one line (`readings`), and (start, end) of each expression whose text may hold
+    what a scope written as one expression gives (`scoped`, flagship slice 2d.19d)."""
 
-    __slots__ = ("units", "size", "copies", "readings")
+    __slots__ = ("units", "size", "copies", "readings", "scoped")
 
-    def __init__(self, units, size, copies, readings) -> None:
+    def __init__(self, units, size, copies, readings, scoped=()) -> None:
         self.units, self.size, self.copies, self.readings = units, size, copies, readings
+        self.scoped = tuple(scoped)
 
 
 def plan(text: str, env: Env, room: int | None = None) -> Plan:
@@ -881,6 +940,7 @@ def _plan(text: str, env: Env, room: int | None, state: list) -> Plan:
     the work goes, so a step past it costs little (found by the second review)."""
     room = COPIES_TEXT * 1000 if room is None else room
     whole_room = room
+    scoped: list = []
     try:
         found = spans(text)
     except expr_mod.TooComplex as error:
@@ -902,7 +962,13 @@ def _plan(text: str, env: Env, room: int | None, state: list) -> Plan:
         texts: list = []
         for value in values:
             texts.extend(text_of(value, env))
-        known = _unique([t for t in texts if t is not UNKNOWN])
+        if any(t is FROM_SCOPE for t in texts):
+            # GitHub puts in what that scope gives, which the checker does not read: like a value of another
+            # context it makes no reading, and the lanes make the step an error where it stands where a command's
+            # program goes (flagship slice 2d.19d; before, nothing was said, so `${{ env.AGENT }} -p x` was in no
+            # agent lane, with no error).
+            scoped.append((start, end))
+        known = _unique([t for t in texts if t is not UNKNOWN and t is not FROM_SCOPE])
         # Each value is in at least one reading: what they come to is a floor of what the readings make.
         room -= sum(len(t) for t in known)
         state[0] = whole_room - room
@@ -914,7 +980,7 @@ def _plan(text: str, env: Env, room: int | None, state: list) -> Plan:
         # them in one `helm` command were an error).
         work.append((start, end, known or [text[start:end]]))
     if not work:
-        return Plan([], 0, 0, 1)
+        return Plan([], 0, 0, 1, scoped)
     units_ = _units(text, [(start, end) for start, end, _texts in work])
     planned: list = []
     size = copies = firsts = 0
@@ -959,7 +1025,7 @@ def _plan(text: str, env: Env, room: int | None, state: list) -> Plan:
         if copies + firsts > whole_room:
             raise NoRoom
         planned.append((u_start, u_end, here))
-    return Plan(planned, size, copies + firsts, most)
+    return Plan(planned, size, copies + firsts, most, scoped)
 
 
 def build(text: str, made: Plan) -> str:

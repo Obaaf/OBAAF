@@ -329,7 +329,9 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(sorted(self.values("env.agent", [{"AGENT": "claude"}], "both")), ["", "claude"])
 
     def test_a_scope_written_as_one_expression(self):
-        self.assertIn(env_expr.UNKNOWN, self.values("env.A", ["${{ fromJSON(inputs.e) }}", {"B": "x"}]))
+        # Since slice 2d.19d a name such a scope may set is `FROM_SCOPE` (any text), no longer a value of another
+        # context, which made no reading (tests/test_env_scope_expression.py).
+        self.assertIn(env_expr.FROM_SCOPE, self.values("env.A", ["${{ fromJSON(inputs.e) }}", {"B": "x"}]))
 
     def test_numbers_and_booleans_in_env(self):
         self.assertEqual(self.values("env.N", [{"N": 3}]), ["3"])

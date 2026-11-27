@@ -142,6 +142,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-141 | The settings audit reads each environment's custom deployment protection rules; an enabled one, or a protection rule of a type it does not know, is a gate whose decisions it cannot read: beside it an open environment is medium, a finding reviewers would suppress is "cannot tell", and where the rules were not read the finding stands and says it may overstate | Proposed |
 | D-142 | The lanes work out the `${{ }}` expressions in a step's command lines that read `env`, as GitHub does before the shell starts: letter case by the runner (#387), every value for a reference not pinned to one name, readings made line by line and counted before they are made, and an error of the file for what the checker does not work out | Proposed |
 | D-143 | OBAAF-GHA-026 reads the options that `${{ }}` expressions reading only `env` give in a step's command lines, where the checker knows the one text GitHub puts in; otherwise "cannot tell" as before | Proposed |
+| D-144 | In the lanes, an `env` written as one expression (`${{ fromJSON(vars.E) }}`, `${{ matrix.env }}`) may give any name a mapping nearer the step does not set: such a value makes no reading, and the step is an error of its file where an agent's name in its place would be read as its command line or where a command's program goes | Proposed |
 
 ---
 
@@ -1403,3 +1404,43 @@ The first version of this slice gave each value eight free times in the workflow
 **Consequences.** A step that gives an agent a warned option through such an expression gets the high finding it gets with the option written out, where it got a medium: **a gate can go red where it passed** at `--fail-on high`, and a baseline entry that accepted the medium no longer matches. A step whose expression gives a harmless value is no longer reported: a gate can go green. A name not set anywhere is not taken for empty ("cannot tell"), though GitHub gives empty, because a step the checker does not read may set it. Stated limits, shared with D-139's `$NAME` put-in: a writer the checker cannot see (a script file the step runs, an action's own code, an action's `pre:`) can set a name the checker takes as known. Not read: an expression in another action's inputs, a `docker://` step's arguments, a `shell` or an `env` value (F-411); a local action's steps (read as written). On this repository and on the first adopter, text, JSON, SARIF, `--summary` and `--lanes` are byte-identical with the base.
 
 **Status.** Proposed 2026-11-26 (slice 2d.19c).
+
+### D-144 An `env` written as one expression, in the lanes
+
+**Decision.** From slice 2d.19d (#382, part (a) of what F-418 left in 2d.19). It amends D-142's "a scope written as one expression makes every name possibly something the checker does not know". A workflow's, a job's or a step's `env` that is not a mapping (`env: ${{ fromJSON(vars.E) }}`, `env: ${{ matrix.env }}`, any other text, a list) is a scope the checker does not read.
+
+- **What it may give.** A name that no mapping nearer the step sets, under the runner's comparison of names (#387), may be any text; so may the whole `env` (`toJSON(env)`, `env[matrix.k]`, `join(env.*, ' ')`). The `env` tables hold only the mappings nearer the step than the nearest such scope. A key YAML 1.2 reads otherwise (`0o7`), and a name outside ASCII on a runner that may be Windows, settle nothing. Through `&&` a falsy such value is an empty text (or `false`, `0`, null through `fromJSON`).
+- **What the lanes do with it.** Like a value of another context it makes no reading; an expression with no other value is read as written, as before.
+- **When it is an error of the file.** The plan names each expression whose text may hold it (`env_expr.Plan.scoped`). The step is an error of its file, which fails the check, where one stands, in a line of its command lines (`run`, a github-script script, the egress action's command; with the lines a backslash continues, and a PowerShell backtick or a cmd caret at a line's end):
+  - where an agent's name in its place would match the catalog's pattern for that agent's command line, searched for as the lanes search a line with the name written out (`${{ env.AGENT }} -p x`, `if x; then ${{ env.AGENT }} -p y; fi`, `xvfb-run ${{ env.AGENT }} -p y`, `bash --noprofile -c "${{ env.AGENT }} -p y"`). This covers the tools whose pattern needs a keyword after the name (`-p`, `--print`, `--prompt`, `exec`, `run`, `-x`, `--execute`, `--headless`, `--pr_url`, `--issue_url`, `--no-interactive`). A test holds every such catalog pattern to the shape the search rests on;
+  - or where a command's program goes, as the lanes read commands (after assignments, wrappers such as `sudo`, `env`, `npx`, a shell's `-c`, the shell's own words such as `then` and `!`, `eval`, cmd's `call`, PowerShell's `iex` and `Start-Process`, and a redirection), in the first word's last part after `/` or `\` (`${{ env.P }}claude` is an error; `${{ env.DIR }}/bin/tool` is not). This covers Cline and Aider, whose patterns need only the name and a space.
+- **Another expression on the line** that reads `env` is read as its first known value; one of another context as a plain word. A line a PowerShell backtick or a cmd caret continues is read with the next, up to 32 lines, and the next lines are read again on their own.
+- **Not changed.** `env: ${{ matrix.env }}` is not read through the matrix. OBAAF-GHA-026 (D-143) still gives "cannot tell" beside any such scope, even where a nearer mapping sets the name. The fast path, where every scope is a mapping, is as before.
+
+**Reason.** F-418: on `flagship` `03b3c9b`, `run: ${{ env.AGENT }} -p x` under `env: ${{ fromJSON(vars.E) }}` put the job in no agent lane, with no error and no finding, so D-142 did not fail closed there as 2d.19's done-when asks.
+
+Two narrower or wider versions were reviewed and taken back (F-420):
+- An error for every such expression anywhere in a line. This gave new errors on ordinary lines (`echo ${{ env.VERSION }}`, `mkdir -p ${{ env.CCACHE_DIR }}`, an existing OBAAF-GHA-010 test). GitHub's code search, on 2026-11-27, counted 1,088 workflow files that hold `env: ${{ matrix.env }}`, 321 of them with `${{ env.` too (its counts are estimates; the files were not read one by one).
+- Reading `env: ${{ matrix.KEY }}` through a written matrix, one table for each choice of mapping. This cost up to nine times the base where its cache held (a 74 KB file took 122 s against 14 s), about twenty times once its cache of 64 scopes was full (an 88 KB file, 336 s against 17 s), and 1.73 GB against 127 MB for a 1 MB file. It also multiplied a line's readings across mappings, giving false errors and an agent lane no combination runs.
+
+The line is drawn where an agent's name written out would be seen. A value at any other place in a line is like every value of another context the lanes read as written (`${{ vars.AGENT }} -p x` is open on the base too). Those are left as they were.
+
+**Consequences.**
+- **Can fail a check that passed.** A step that runs a program named through such a scope, or names one where an agent's pattern would see it, is now an error of its file. This includes the ordinary idiom's program places under `env: ${{ matrix.env }}` (`${{ env.CC }} --version`). It also includes any word from such a scope that is followed in the same piece of a line by one of the agents' keywords: `psql -h ${{ env.PGHOST }} -p 5432`, `npm --prefix ${{ env.APP_DIR }} run build`, `docker compose -f ${{ env.F }} run app`. The fix is to write the `env` out as a mapping, or to write the value into the script through `$NAME`.
+- **A default still makes its reading.** The base read `${{ env.AGENT || 'claude' }} -p x` under such a scope as an agent job; it still does, and the step is also an error.
+- **Stated limits**, all of which the base had too:
+  - A value from such a scope that holds a whole command (`echo ${{ env.CMD }}` with `CMD: "x; claude -p y"`), at a place that is neither of the two above, is not seen. The same holds for every value of another context.
+  - A package's name in such a value (`deno run npm:${{ env.PKG }} -p x`) is not tried.
+  - Cline's and Aider's names are tried only where a command's program goes, so not behind a wrapper the lanes do not know (`xvfb-run`, `find -exec`).
+  - A line break between the name's place and its keyword without a continuation.
+  - A repository's own `agents.commands` are not tried.
+  - A PowerShell or cmd command continued over more than 32 lines, with the agent's keyword past the 32nd, is not seen.
+  - Another expression on the line is read as its first known value only, so `xvfb-run ${{ env.AGENT }} ${{ env.X == 'a' && '-q' || '-p' }} x`, and one whose value such a scope may set (`${{ env.F || '-p' }}`), are not seen.
+  - `$AGENT` under such a scope is not put in (D-139).
+  - A local composite action's steps under such a scope (its own step's `env`, the using step's, the job's or the workflow's) are not changed by this decision. In the lanes they are read as on the base, with no error. That is left in 2d.19 with its item (b) (F-421).
+- **Known false errors:**
+  - The program-place reading takes quotes out before splitting, so `echo "Version (${{ env.V }})"` is an error.
+  - A heredoc line that holds only such a value is an error, and so is `command -v ${{ env.TOOL }}`.
+- **Cost.** The cost of the reviewer's cases is the base's: 74 KB with 4,000 workflow `env` entries, 13.4 s against 14.7 s; a 12 KB line of spaces, 0.48 s against 0.44 s; 960 KB of such expressions side by side, 6.5 s against 6.2 s; 40,000 lines each ending in a PowerShell backtick, about twice the base (10.4 s against 5.5 s); 1.7 MB of 50,000 lines, 7.6 s against 6.5 s. On this repository and on the first adopter nothing changes (text, JSON, SARIF, `--summary` and `--lanes` byte-identical with `flagship` `03b3c9b`).
+
+**Status.** Proposed 2026-11-27 (slice 2d.19d).
