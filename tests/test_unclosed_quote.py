@@ -89,7 +89,9 @@ class AnUnclosedQuoteTest(unittest.TestCase):
                        # The second pass: `_balanced` counts every brace, where bash ends `${` at its first `}`.
                        f'echo "${{x:-{{}}"\n{line}', f'NAME=a{{b; CLEAN="${{NAME//{{/}}"\n{line}',
                        f'ARGS="${{ARGS:-{{"x":1}}"\n{line}', f'x=a{{b; echo "${{x//[{{]/}}"\n{line}',
-                       f'declare -A a; echo "${{a[{{]:-z}}"\n{line}', f'{line} "${{P:-{{}}"'):
+                       f'declare -A a; echo "${{a[{{]:-z}}"\n{line}', f'{line} "${{P:-{{}}"',
+                       # The third pass: `<<` in a bare `(( ))` is a shift, which the lexer reads as a heredoc.
+                       f"(( x = 1 << 2 ))\necho 'a\n2\nb'\n{line}"):
             with self.subTest(script):
                 self.assertIn(HIGH, step_findings(script)[0])
 

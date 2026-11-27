@@ -1700,7 +1700,8 @@ def _unclosed_hits(text: str, programs: list, packages: list, flags: list, varia
     for bash, which then runs what follows (found by the review: `OUT="$(` / `# it's fine` /
     `claude --dangerously-skip-permissions -p hi` / `)"`, and `echo "${x:-{}"`). There the match stays, as before.
     The commands before the quote are read with a budget of their own (at most once more for the step)."""
-    if _UNCLOSED_UNSURE_RE.search(text):
+    if _UNCLOSED_UNSURE_RE.search(text) or ("((" in text and "<<" in text):
+        # `<<` in a bare `(( ))` is a shift, which the lexer reads as a heredoc (found by the review's third pass).
         return
     lexer = _Lexer(text, {})
     lexer.commands()
