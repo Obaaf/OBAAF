@@ -405,17 +405,18 @@ class TheReviewersThirdPassTest(unittest.TestCase):
 class TheReviewersFourthPassTest(unittest.TestCase):
     """What the fourth review of 2d.19e found (2026-11-27)."""
 
-    def test_a_value_from_the_scope_in_an_argument_of_a_handed_command_is_a_known_false_error(self):
-        """An input run as the command line that holds a value from the scope in an argument's place is read as
-        giving that value whole, so it is an error of the file where the input stands where a command's program goes
-        (D-145's known false errors). A version that read where in the value it stands was got past by the fifth
-        review twice (a value that opens an expression with the action's own text, and readings of two expressions
-        paired only by their order), so it was taken back. Where the caller's `env` settles the name, or the input
-        stands elsewhere, there is no error."""
+    def test_a_value_from_the_scope_in_an_argument_of_a_handed_command(self):
+        """An input run as the command line that holds a value from the scope in an argument's place was read as
+        giving that value whole, so it was an error of the file where the input stands where a command's program goes
+        (D-145's known false error). Since slice 2d.22 (#399, D-150) a plain reference to such an input is read as
+        the text its caller wrote, with the scope's part where the caller's expression stands, as a workflow's own
+        step reads it (`test_scope_handed_values`). Where the caller's `env` settles the name, or the input stands
+        elsewhere, there is no error."""
         given = files(step("${{ inputs.run }}"), inputs="  run: {required: true}\n")
-        for command in ("npm test -- --shard=${{ env.SHARD }}", "${{ env.AGENT }} -p x", "npx ${{ env.AGENT }}"):
+        for command, errors in (("npm test -- --shard=${{ env.SHARD }}", 0), ("${{ env.AGENT }} -p x", 1),
+                                ("npx ${{ env.AGENT }}", 1)):
             with self.subTest(command=command):
-                self.assertEqual(len(scope_errors(wf(job=JOB, with_="{run: '" + command + "'}"), given)), 1)
+                self.assertEqual(len(scope_errors(wf(job=JOB, with_="{run: '" + command + "'}"), given)), errors)
         self.assertEqual(scope_errors(wf(job=JOB, step="{SHARD: '1'}",
                                          with_="{run: 'npm test -- --shard=${{ env.SHARD }}'}"), given), [])
         echo = files(step("echo ${{ inputs.run }}"), inputs="  run: {required: true}\n")
@@ -447,8 +448,10 @@ class TheReviewersSixthPassTest(unittest.TestCase):
         for command in ("make; ${{ env.AGENT }} -p review", "make && ${{ env.AGENT }} -p review",
                         "x $(${{ env.AGENT }} -p review)", "make | ${{ env.AGENT }}"):
             with self.subTest(command=command):
+                # Since slice 2d.22 the value is read where it stands, so `-p review` after it is found first.
                 (error,) = scope_errors(wf(job=JOB, with_="{cmd: '" + command + "'}"), echo)
-                self.assertIn("where a command's program goes", error)
+                self.assertTrue("where a command's program goes" in error
+                                or "where an agent's name would be read as its command line" in error, error)
         default = files(step("echo ${{ inputs.cmd }}"), inputs="  cmd: {default: 'make; ${{ env.AGENT }} -p x'}\n")
         self.assertEqual(len(scope_errors(wf(job=JOB), default)), 1)
         # Before the last such value, not only the first (the review of this rule).
@@ -456,13 +459,20 @@ class TheReviewersSixthPassTest(unittest.TestCase):
         self.assertEqual(len(scope_errors(wf(job=JOB, with_=second), echo)), 1)
 
     def test_what_is_not_a_separator(self):
-        """A single `&` (a URL's query), a newline (the reader joins an input's readings with one) and brackets
-        (prose, JSON) give no error in an argument's place."""
+        """A single `&` in a URL's query, the newline the reader joins an input's readings with, and JSON's brackets
+        give no error in an argument's place."""
         echo = files(step("echo ${{ inputs.v }}"), inputs="  v: {default: x}\n")
-        for value in ("make ${{ env.TARGET }}", "https://x.test/?a=1&b=${{ env.B }}", "Release (${{ env.V }})",
+        for value in ("make ${{ env.TARGET }}", "https://x.test/?a=1&b=${{ env.B }}", '{\\"a\\": ${{ env.V }}}',
                       "${{ github.head_ref || env.REF }}", "${{ 'y' || env.X }}"):
             with self.subTest(value=value):
                 self.assertEqual(scope_errors(wf(job=JOB, with_='{v: "' + value + '"}'), echo), [])
+
+    def test_a_bracket_before_it_is_read_as_a_workflows_own_step_reads_it(self):
+        """Since slice 2d.22 (D-150) a handed value is read as the shell reader reads a workflow's own step, which
+        takes `(` for a group, so `Release (${{ env.V }})` put after `echo` is an error, as `echo Release (${{ env.V
+        }})` is in a workflow's own step under the same scope (bash refuses both lines)."""
+        echo = files(step("echo ${{ inputs.v }}"), inputs="  v: {default: x}\n")
+        self.assertEqual(len(scope_errors(wf(job=JOB, with_='{v: "Release (${{ env.V }})"}'), echo)), 1)
 
 
 if __name__ == "__main__":

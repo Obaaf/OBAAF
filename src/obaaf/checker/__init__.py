@@ -12,6 +12,7 @@ import bisect
 import fnmatch
 import hashlib
 import itertools
+import math
 import os
 import posixpath
 import re
@@ -1613,16 +1614,98 @@ def _bodies_or_none(text: str) -> list:
         return []
 
 
-def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -> tuple | None:
+# Flagship slice 2d.22: the most texts `_scope_texts` makes of one input's value, and the most combinations of them
+# `_action_scope_place` reads for one line; past either the line is read as D-145 reads it.
+_SCOPE_READINGS = 16
+
+
+def _scope_texts(value, folder: str, env: "_ActionEnv") -> list | None:
+    """The texts an input's value can make, as the caller writes it, for `_action_scope_place` (flagship slice 2d.22,
+    #399), where something an `env` written as one expression sets may stand in one of them. Each `${{ }}` expression in
+    the value that reads `env` is worked out with `env`, the caller's, where GitHub works the value out, and read as
+    one word from the scope (`workflow._SCOPE_PROBE`) where it may give what the scope sets, as `workflow.
+    _scope_at_program` reads such an expression in a workflow's own step (D-144), and as each other text it may give
+    (a plain word where that holds `${{`); every other expression is a plain word. Every combination is made, so a
+    separator one expression may give before another's part from the scope is read (`${{ env.Q && 'x;' || 'y' }} ${{
+    env.T }}`), and kept, with or without such a part, since each is the text around another input's part in the line.
+    [] where no text holds such a part. None where the value cannot be read so: not text, holding what
+    `_put_in` hands on to a further local action (where the scope's part stands there is not known), an expression
+    nested more deeply than the reader follows or with more texts than it reads, more than `_SCOPE_READINGS`
+    combinations, or more than `LOCAL_ACTION_TEXT` characters made. Then the expression that gives it is read as D-145
+    reads it, as giving the scope's value whole."""
+    if not isinstance(value, str) or _FROM_SCOPE_TEXT in value:
+        return None
+    if expr_mod.OPEN not in value:
+        return []
+    try:
+        found = env_expr.spans(value)
+    except expr_mod.TooComplex:
+        return None
+    between: list = []
+    choices: list = []
+    at = 0
+    count = 1
+    for start, end, body in found:
+        between.append(value[at:start])
+        at = end
+        if not env_expr.may_read_env(value[start:end]):
+            choices.append(("x",))
+            continue
+        cut: list = []
+        values = _token_values(expr_mod.tokens(body), {}, folder, env=env, cut=cut)
+        if values is None or cut:
+            return None
+        pieces = [wf_mod._SCOPE_PROBE] if any(_FROM_SCOPE_TEXT in item for item in values) else []
+        pieces.extend(item if expr_mod.OPEN not in item else "x" for item in values if _FROM_SCOPE_TEXT not in item)
+        choices.append(tuple(dict.fromkeys(pieces)) or ("",))
+        count *= len(choices[-1])
+        if count > _SCOPE_READINGS:
+            return None
+    between.append(value[at:])
+    if not any(wf_mod._SCOPE_PROBE in choice for choice in choices):
+        return []
+    made: list = []
+    size = 0
+    for combination in itertools.product(*choices):
+        text = "".join(piece for pair in zip(between, combination + ("",)) for piece in pair)
+        size += len(text)
+        if size > LOCAL_ACTION_TEXT:
+            return None
+        made.append(text)
+    return list(dict.fromkeys(made))
+
+
+def _plain_input(toks: list) -> str | None:
+    """The name of the input `toks` reads when they are one plain reference to it (`inputs.NAME`,
+    `inputs['NAME']`), as `_token_values` reads one; None for anything else."""
+    if len(toks) not in (3, 4) or toks[0][0] != "id" or toks[0][1].lower() != "inputs":
+        return None
+    if len(toks) == 3 and toks[1] == ("op", ".") and toks[2][0] == "id":
+        return wf_mod.input_name(toks[2][1])
+    if len(toks) == 4 and toks[1] == ("op", "[") and toks[2][0] == "str" and toks[3] == ("op", "]"):
+        return wf_mod.input_name(toks[2][1])
+    return None
+
+
+def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv,
+                        scope_texts: dict | None = None) -> tuple | None:
     """(the expression, where) for the first `${{ }}` expression in `text`, a command line of a local action's step,
     that may give what an `env` written as one expression sets and stands where an agent's name would be read as its
     command line or where a command's program goes, as `workflow._scope_at_program` reads a workflow's own step
     (flagship slice 2d.19e, after D-144); None where none does, or where no scope of the chain is written so. Each
     other expression that reads an input or `env` is read as its first value, any other as a plain word. Only the
-    expressions are worked out again, and only under such a scope. An expression whose value only holds what the scope
-    may give, beside other text (an input handed in as `npm test -- --shard=${{ env.SHARD }}`), is read as giving it
-    whole, as a workflow's own step reads such an expression: a known false error where it stands where a command's
-    program goes (the fifth review got past a reading of where in the value it stands, which a value can steer)."""
+    expressions are worked out again, and only under such a scope.
+
+    An expression that is one plain reference to an input whose value, as the caller wrote it, may hold what the scope
+    sets (`scope_texts`, made by `_scope_texts`) is read as each text that value can make, with the scope's part where
+    the caller's expression stands in it (flagship slice 2d.22, #399): an input handed in as `npm test --
+    --shard=${{ env.SHARD }}` and run as the command line is an argument's place, as in a workflow's own step, and a
+    newline, `&` or `<(` before it is read as the shell reader reads it. Every combination of such texts in the line is
+    read. The line is not read again for `${{ }}` expressions, so no value can join the action's own text into one
+    that hides another (the fifth review of 2d.19e). Past `_SCOPE_READINGS` combinations, or `LOCAL_ACTION_TEXT`
+    characters put in over them, the line is read as D-145 reads it. Any other expression whose value holds what the
+    scope may give, beside other text, is read as giving it whole, as before: a known false error where it stands
+    where a command's program goes."""
     if env.where is None or not isinstance(text, str):
         return None
     text = _ACTION_PATH_EXPR_RE.sub(lambda _m: f"./{folder}", text)
@@ -1634,16 +1717,24 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -
         return (wf_mod.one_line(text, 60), "program")
     scoped: list = []
     known: dict = {}
+    handed: list = []           # (start, end) and the texts of a plain reference to an input `scope_texts` reads
     memo: dict = {}
     for start, end, body in found:
         if not re.search(r"\binputs\b|\benv\b|action_path", body, re.I):
             continue
+        if scope_texts:
+            name = _plain_input(expr_mod.tokens(body))
+            made = scope_texts.get(name) if name is not None else None
+            if made and any(wf_mod._SCOPE_PROBE in item for item in made):
+                handed.append(((start, end), made))
+                scoped.append((start, end))
+                continue
         if body not in memo:
             toks = expr_mod.tokens(body)
             names = _input_names(toks)
-            handed = any(_FROM_SCOPE_TEXT in value for value in
-                         (inputs.values() if "*" in names else (inputs.get(name, "") for name in names)))
-            memo[body] = (_token_values(toks, inputs, folder, env=env, cut=[]), bool(_env_names(toks)) or handed)
+            holds = any(_FROM_SCOPE_TEXT in value for value in
+                        (inputs.values() if "*" in names else (inputs.get(name, "") for name in names)))
+            memo[body] = (_token_values(toks, inputs, folder, env=env, cut=[]), bool(_env_names(toks)) or holds)
         values, reads_env = memo[body]
         if values is None:
             # Nested more deeply than the reader follows: where it reads `env`, or an input that holds what the scope
@@ -1664,13 +1755,25 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -
             known[(start, end)] = values[0]
     if not scoped:
         return None
-    at = wf_mod._scope_at_program(text, tuple(scoped), known)
-    return None if at is None else (text[at[0]:at[1]], at[2])
+    combinations = math.prod(len(made) for _span, made in handed)
+    if combinations > _SCOPE_READINGS or sum(sum(map(len, made)) * combinations // len(made)
+                                             for _span, made in handed) > LOCAL_ACTION_TEXT:
+        # Past what this reading makes for a line, it is read as D-145 reads it (flagship slice 2d.22).
+        return _action_scope_place(text, inputs, folder, env)
+    for combination in itertools.product(*(made for _span, made in handed)):
+        inner = {span: made for (span, _made), made in zip(handed, combination)}
+        at = wf_mod._scope_at_program(text, tuple(scoped), known, inner)
+        if at is not None:
+            return (text[at[0]:at[1]], at[2])
+    return None
 
 
 # What starts a new command in a shell's line, before what a scope written as one expression may give in a value:
 # `;`, `&&`, `|` (and `||`), a backtick and `$(`. Not a single `&` (a URL's query), a newline (the reader joins an
-# input's readings with one) or a bracket (prose, JSON); found by the review of this rule.
+# input's readings with one) or a bracket (prose, JSON); found by the review of this rule. Since flagship slice 2d.22
+# it is read only for an expression read as D-145 reads it: a plain reference to an input the caller hands such a
+# value is read where the value's part from the scope stands (`_scope_texts`), which reads all of these as the shell
+# reader reads a workflow's own step.
 _SEPARATOR_BEFORE = re.compile(r";|&&|\||`|\$\(")
 
 
@@ -1842,6 +1945,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             out.unread.append((shown, "its `runs.steps` is not a list of steps"))
             continue
         inputs = _action_inputs(raw, given)
+        scope_texts: dict = {}
         if env_scope is not None:
             # An input's value (the caller's `with:`, or a `default`) that reads `env` is worked out here with the
             # caller's `env`, where GitHub works it out, keeping what the scope may give, so a step of the action reads
@@ -1855,8 +1959,12 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             for name, value in list(inputs.items()):
                 if "*" in read_names or name in read_names:
                     if id(value) not in worked:
-                        worked[id(value)] = (value, _put_env(value, folder, caller_env))
+                        # The value as the caller wrote it, for where the scope's part stands in it (flagship slice
+                        # 2d.22, #399), worked out once with the `env` it was written under, as `_put_env` is.
+                        worked[id(value)] = (value, _put_env(value, folder, caller_env),
+                                             _scope_texts(value, folder, caller_env))
                     inputs[name] = worked[id(value)][1]
+                    scope_texts[name] = worked[id(value)][2]
         for number, step_raw in enumerate(steps, start=1):
             if not isinstance(step_raw, dict):
                 out.unread.append((shown, f"its step {number} is not a mapping"))
@@ -1954,7 +2062,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 # The lines as the action writes them, read with this step's `env`; an input that holds what the scope
                 # may give (its value worked out where GitHub works it out, `_put_env`) is read as giving it.
                 for text in _action_command_texts(merged, step):
-                    place = _action_scope_place(text, inputs, folder, view)
+                    place = _action_scope_place(text, inputs, folder, view, scope_texts)
                     if place is not None:
                         where_read = ("where a command's program goes" if place[1] == "program" else
                                       "where an agent's name would be read as its command line")
