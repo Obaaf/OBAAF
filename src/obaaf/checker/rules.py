@@ -2441,7 +2441,12 @@ class WorkflowRules:
                         continue
                     if word.lower() not in self._ENV_ONLY_HEADS:
                         return False
-            env = env_expr.Env(step._env_scopes(), env_expr.env_case(step.job))
+            scopes = step._env_scopes()
+            # No `env` written as one expression, read through the matrix or not (flagship slice 2d.19d): that a
+            # scope read through the matrix gives one text is not taken as known here.
+            if any(scope is not None and not isinstance(scope, dict) for scope in scopes):
+                return False
+            env = env_expr.Env(scopes, env_expr.env_case(step.job))
             for name in names:
                 for value in env.lookup(name):
                     if not isinstance(value, str) or expr_mod.OPEN in value:

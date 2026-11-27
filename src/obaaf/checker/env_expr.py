@@ -32,9 +32,16 @@ for the `Env` of the step's scopes and its runner (`env_case`), read the widest 
   one operand of `||`, `&&`, `format()` or `join()`, the other readings are made, with it as an empty text where
   it is a piece of the text; an expression with no value the checker knows is left as written.
 
+- **A scope written as one expression** (flagship slice 2d.19d): `env: ${{ matrix.KEY }}` in a job or a step, where
+  the job's matrix lists every value of KEY as a mapping of names to texts, is each of those mappings (one
+  `Alternatives`), and nothing where a combination may have none. Any other scope that is not a mapping
+  (`env: ${{ fromJSON(vars.E) }}`) may give any name any text: a name that no mapping nearer the step sets, under
+  the runner's comparison, and the whole `env`, give `FROM_SCOPE`, and an expression whose text may hold it makes
+  the step an error of its file. Before, such a scope gave a value the checker does not know, which made no
+  reading, so `run: ${{ env.AGENT }} -p x` was in no agent lane, with no error and no finding.
+
 Nothing here is checked against a run on GitHub beyond what #387 asserts (letter case in the `env` context on
-GitHub-hosted runners). What an earlier step writes to `GITHUB_ENV` is not read; a scope written as one expression
-(`env: ${{ fromJSON(...) }}`) gives values the checker does not know.
+GitHub-hosted runners). What an earlier step writes to `GITHUB_ENV` is not read.
 """
 
 from __future__ import annotations
@@ -101,6 +108,35 @@ class _AllValues:
 ALL_VALUES = _AllValues()
 
 
+class _FromScope:
+    """What an `env` written as one expression the checker does not read may give (flagship slice 2d.19d): any
+    text, or nothing. Made into text it makes the step an error of its file (`_plan`)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "FROM_SCOPE"
+
+
+FROM_SCOPE = _FromScope()
+
+# Matrix combinations a scope written `${{ matrix.KEY }}` is read as, and worlds (one mapping chosen for each such
+# scope) an `Env` reads; past either, the scope is read as one the checker does not read.
+ALTERNATIVES = 256
+
+
+class Alternatives:
+    """A scope written as one expression that the checker reads as each of several mappings (flagship slice 2d.19d):
+    `env: ${{ matrix.KEY }}` where the job's matrix lists every value of KEY as a mapping. `mappings` holds them,
+    with an empty one where a combination may have no value for KEY. Made once for each scope (`Job`), so that its
+    id names its content."""
+
+    __slots__ = ("mappings", "__weakref__")
+
+    def __init__(self, mappings: tuple) -> None:
+        self.mappings = mappings
+
+
 def env_case(job) -> str:
     """How the runner of `job` compares the names of the `env` context (#387, F-405): `exact` on a known
     GitHub-hosted Linux or macOS runner, `folded` on a known GitHub-hosted Windows runner, `both` where the runner
@@ -128,23 +164,33 @@ def env_case(job) -> str:
     return kinds.pop() if len(kinds) == 1 else "both"
 
 
-class Env:
-    """The `env` context a step's expressions see, by letter-case mode: `exact` looks a name up as written,
-    `folded` without regard to case (the nearest scope's value), `both` gives each where they differ. Each table
-    is built once per reading of a step (the review of 2d.18 found it rebuilt for every reference)."""
+class _Unread:
+    """A scope of `env` the checker does not read (written as one expression it does not work out)."""
 
-    def __init__(self, scopes: list, case: str) -> None:
-        # `scopes`: the `env` mappings, outermost first (the workflow's, the job's, the step's). A scope that is
-        # not a mapping (one expression) makes every name possibly something the checker does not know.
-        self.case = case
-        self.unknown_scope = any(scope is not None and not isinstance(scope, dict) for scope in scopes)
+    __slots__ = ()
+
+
+_UNREAD = _Unread()
+
+
+class _World:
+    """The `env` tables for one choice of mapping in each scope (flagship slice 2d.19d): the mappings nearer the step
+    than the nearest scope the checker does not read (all of them where there is none), merged nearest first, by
+    exact name and by name folded as a Windows runner folds it. `unread` says whether such a scope is there: a name
+    these mappings do not settle may then be anything."""
+
+    __slots__ = ("exact", "folded", "odd", "outside_ascii", "unread")
+
+    def __init__(self, scopes: list) -> None:
+        last = max((i for i, scope in enumerate(scopes) if scope is _UNREAD), default=-1)
+        self.unread = last >= 0
         exact: dict = {}
         folded: dict = {}
         # Values under a name the checker may not spell as GitHub does: a key YAML gives as a number, a boolean
         # or null (GitHub names it by its text, not checked here), or a text key that YAML 1.2, which GitHub reads,
         # may read as one (`0o7`, `yes` is text to both). Every lookup may give them (found by the review of 2d.19).
         self.odd: list = []
-        for scope in scopes:
+        for scope in scopes[last + 1:]:
             if not isinstance(scope, dict):
                 continue
             for name, value in scope.items():
@@ -165,6 +211,67 @@ class Env:
         # On Windows a name outside ASCII is compared by .NET's own mapping, which the checker does not copy (the
         # second review: U+1FB3 and U+1FBC are one name there), so such a lookup may give any such name's value.
         self.outside_ascii = [value for name, value in exact.items() if not name.isascii()]
+
+    def lookup(self, name: str, case: str, out: list) -> None:
+        # A name outside ASCII may fold otherwise on Windows than here (.NET's ordinal comparison maps letter by
+        # letter: `ß` is not `SS`), so there both tables are read.
+        mode = "both" if case == "folded" and not name.isascii() else case
+        settled = True
+        if mode in ("exact", "both"):
+            out.append(self.exact.get(name))
+            settled = name in self.exact
+        if mode in ("folded", "both"):
+            out.append(self.folded.get(fold(name)))
+            if not name.isascii():
+                out.extend(self.outside_ascii)
+            settled = settled and name.isascii() and fold(name) in self.folded
+        out.extend(self.odd)
+        if self.unread and not settled:
+            out.append(FROM_SCOPE)
+
+    def every(self, case: str, out: list) -> None:
+        if case in ("exact", "both"):
+            out.extend(self.exact.values())
+        if case in ("folded", "both"):
+            out.extend(self.folded.values())
+        out.extend(self.odd)
+        out.append(None)
+        if self.unread:
+            out.append(FROM_SCOPE)
+
+
+class Env:
+    """The `env` context a step's expressions see, by letter-case mode: `exact` looks a name up as written,
+    `folded` without regard to case (the nearest scope's value), `both` gives each where they differ. Each table
+    is built once per reading of a step (the review of 2d.18 found it rebuilt for every reference). A scope read as
+    several mappings (`Alternatives`, flagship slice 2d.19d) makes one table for each choice of them (a world), and
+    a lookup gives what any world gives."""
+
+    def __init__(self, scopes: list, case: str, labels: list | None = None) -> None:
+        # `scopes`: the `env` mappings, outermost first (the workflow's, the job's, the step's). A scope that is
+        # not a mapping, and not `Alternatives`, is written as one expression the checker does not read: a name no
+        # mapping nearer the step sets may then be any text (`FROM_SCOPE`).
+        self.case = case
+        if labels is None:
+            labels = ["the workflow's", "the job's", "the step's own"] if len(scopes) == 3 else \
+                ["the step's own"] * len(scopes)
+        choices: list = []
+        for scope in scopes:
+            if scope is None or isinstance(scope, dict):
+                choices.append((scope,))
+            elif isinstance(scope, Alternatives) and scope.mappings:
+                choices.append(scope.mappings)
+            else:
+                choices.append((_UNREAD,))
+        worlds = 1
+        for choice in choices:
+            worlds *= len(choice)
+        if worlds > ALTERNATIVES:
+            # More combinations than the checker reads: such a scope is read as one it does not read.
+            choices = [choice if len(choice) == 1 else (_UNREAD,) for choice in choices]
+        unread = [label for label, choice in zip(labels, choices) if choice == (_UNREAD,)]
+        self.where = " and ".join(unread) if unread else None
+        self.worlds = [_World(list(pick)) for pick in itertools.product(*choices)]
         self.parsed: dict = {}
         self.parse_room = PARSE_TEXT
         self.fields: dict = {}
@@ -173,58 +280,50 @@ class Env:
 
     def lookup(self, name: str) -> list:
         """The values `env.NAME` can give (None for a name `env` does not hold)."""
-        out = []
-        # A name outside ASCII may fold otherwise on Windows than here (.NET's ordinal comparison maps letter by
-        # letter: `ß` is not `SS`), so there both tables are read.
-        case = "both" if self.case == "folded" and not name.isascii() else self.case
-        if case in ("exact", "both"):
-            out.append(self.exact.get(name))
-        if case in ("folded", "both"):
-            out.append(self.folded.get(fold(name)))
-            if not name.isascii():
-                out.extend(self.outside_ascii)
-        out.extend(self.odd)
-        if self.unknown_scope:
-            out.append(UNKNOWN)
+        out: list = []
+        for world in self.worlds:
+            world.lookup(name, self.case, out)
         return _unique(out)
 
     def every(self) -> list:
         """Every value `env` can give, and nothing (a name it does not hold)."""
         values: list = []
-        if self.case in ("exact", "both"):
-            values.extend(self.exact.values())
-        if self.case in ("folded", "both"):
-            values.extend(self.folded.values())
-        values.extend(self.odd)
-        values.append(None)
-        if self.unknown_scope:
-            values.append(UNKNOWN)
+        for world in self.worlds:
+            world.every(self.case, values)
         return _unique(values)
 
     def joined(self, sep: str) -> list:
         """`join(env.*, sep)`: the values in the order the workflow writes them, in each table."""
         out = []
-        tables = []
-        if self.case in ("exact", "both"):
-            tables.append(list(self.exact.values()))
-        if self.case in ("folded", "both"):
-            tables.append(list(self.folded.values()))
-        for values in tables:
-            out.append(sep.join(values))
-            if self.odd:
-                # Where a name YAML may read otherwise stands among them is not known: first and last.
-                out.append(sep.join(self.odd + values))
-                out.append(sep.join(values + self.odd))
+        for world in self.worlds:
+            if world.unread:
+                out.append(FROM_SCOPE)
+                continue
+            tables = []
+            if self.case in ("exact", "both"):
+                tables.append(list(world.exact.values()))
+            if self.case in ("folded", "both"):
+                tables.append(list(world.folded.values()))
+            for values in tables:
+                out.append(sep.join(values))
+                if world.odd:
+                    # Where a name YAML may read otherwise stands among them is not known: first and last.
+                    out.append(sep.join(world.odd + values))
+                    out.append(sep.join(values + world.odd))
         return out
 
     def as_dict(self) -> list:
-        """The object(s) `toJSON(env)` serialises."""
+        """The object(s) `toJSON(env)` serialises (a world with a scope the checker does not read gives none:
+        `every` gives `FROM_SCOPE` for it)."""
         out = []
-        if self.case in ("exact", "both"):
-            out.append(dict(self.exact))
-        if self.case in ("folded", "both") and (self.case == "folded" or set(self.folded) != {
-                k.upper() for k in self.exact}):
-            out.append(dict(self.folded))
+        for world in self.worlds:
+            if world.unread:
+                continue
+            if self.case in ("exact", "both"):
+                out.append(dict(world.exact))
+            if self.case in ("folded", "both") and (self.case == "folded" or set(world.folded) != {
+                    k.upper() for k in world.exact}):
+                out.append(dict(world.folded))
         return out
 
 
@@ -274,7 +373,7 @@ def _number_text(value) -> str:
 
 
 def _key(value):
-    if value is UNKNOWN or value is ENV_OBJECT or value is ALL_VALUES:
+    if value is UNKNOWN or value is ENV_OBJECT or value is ALL_VALUES or value is FROM_SCOPE:
         return ("special", id(value))
     if isinstance(value, (dict, list)):
         return ("id", id(value))
@@ -293,7 +392,7 @@ def _unique(values: list) -> list:
 
 def _truthy(value):
     """True, False, or None where the checker cannot tell."""
-    if value is UNKNOWN:
+    if value is UNKNOWN or value is FROM_SCOPE:
         return None
     if value is None:
         return False
@@ -308,9 +407,10 @@ def _truthy(value):
 
 def text_of(value, env: Env) -> list:
     """The texts a value gives where GitHub puts it into a string (`${{ }}` in `run`, an argument of `format`).
-    An object made into text gives every value `env` holds (the checker reads it the widest way)."""
-    if value is UNKNOWN:
-        return [UNKNOWN]
+    An object made into text gives every value `env` holds (the checker reads it the widest way). What a scope the
+    checker does not read may give stays `FROM_SCOPE` (flagship slice 2d.19d)."""
+    if value is UNKNOWN or value is FROM_SCOPE:
+        return [value]
     if value is None:
         return [""]
     if isinstance(value, bool):
@@ -448,8 +548,8 @@ class _Reader:
                 values = _unique([v for value in values for v in self.member(value, [name])])
             elif self.peek() == ("op", ".") and self.peek(1) == ("op", "*"):
                 self.pos += 2
-                values = _unique([ALL_VALUES if value is ENV_OBJECT else UNKNOWN if value is UNKNOWN
-                                  else self._star(value) for value in values])
+                values = _unique([ALL_VALUES if value is ENV_OBJECT else value if value is UNKNOWN
+                                  or value is FROM_SCOPE else self._star(value) for value in values])
             elif self.op("["):
                 keys = self.or_(depth + 1)
                 if not self.op("]"):
@@ -467,8 +567,8 @@ class _Reader:
 
     def member(self, value, keys: list) -> list:
         """What `value.KEY` or `value[KEY]` gives for each key the index can be."""
-        if value is UNKNOWN:
-            return [UNKNOWN]
+        if value is UNKNOWN or value is FROM_SCOPE:
+            return [value]
         if len(keys) > EXPRESSION_VALUES:
             raise Unread(f"has an index that can give more than {EXPRESSION_VALUES:,} values")
         if value is ENV_OBJECT:
@@ -596,8 +696,8 @@ class _Reader:
                 return [UNKNOWN]
             out: list = []
             for value in args[0]:
-                if value is UNKNOWN:
-                    out.append(UNKNOWN)
+                if value is UNKNOWN or value is FROM_SCOPE:
+                    out.append(value)
                 elif value is ENV_OBJECT:
                     for table in env.as_dict():
                         out.append(json.dumps(table, ensure_ascii=False, indent=2))
@@ -637,6 +737,8 @@ class _Reader:
             if not args:
                 return [UNKNOWN]
             seps = [s for v in (args[1] if len(args) > 1 else [","]) for s in text_of(v, env)]
+            if any(sep is FROM_SCOPE for sep in seps):
+                return [FROM_SCOPE]
             out = []
             for value in args[0]:
                 if value is ENV_OBJECT or value is ALL_VALUES:
@@ -645,6 +747,9 @@ class _Reader:
                     for sep in seps:
                         out.extend(env.joined("" if sep is UNKNOWN else sep))
                     out.extend(text_of(ALL_VALUES, env))
+                    continue
+                if value is FROM_SCOPE:
+                    out.append(FROM_SCOPE)
                     continue
                 if isinstance(value, list):
                     pieces = []
@@ -667,6 +772,9 @@ class _Reader:
             if not args:
                 return [UNKNOWN]
             pieces = [[t for v in values for t in text_of(v, env)] for values in args]
+            if any(t is FROM_SCOPE for piece in pieces for t in piece):
+                # Any text, in the template or an argument: the result may be any text (flagship slice 2d.19d).
+                return [FROM_SCOPE]
             count = 1
             for p in pieces:
                 count *= len(p)
@@ -902,6 +1010,12 @@ def _plan(text: str, env: Env, room: int | None, state: list) -> Plan:
         texts: list = []
         for value in values:
             texts.extend(text_of(value, env))
+        if any(t is FROM_SCOPE for t in texts):
+            # GitHub puts in what that scope gives, which the checker does not read, so it cannot tell what the
+            # line runs (flagship slice 2d.19d; before, the expression made no reading and the line was read as
+            # written, so `${{ env.AGENT }} -p x` was in no agent lane, with no error).
+            raise Unread(f"('{_short(text[start:end])}') reads from `env` what {env.where or 'a'} `env`, written as "
+                         "one expression the checker does not read, may set")
         known = _unique([t for t in texts if t is not UNKNOWN])
         # Each value is in at least one reading: what they come to is a floor of what the readings make.
         room -= sum(len(t) for t in known)
