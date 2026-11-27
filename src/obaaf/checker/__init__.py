@@ -1655,7 +1655,7 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -
             # A value holding it after a shell's separator (`make; ${{ env.AGENT }} -p x`, handed in and put after
             # `echo`) runs it as a command wherever the value stands, so that is a program's place: it can only add an
             # error (found by the sixth review).
-            if any(_SEPARATOR_BEFORE.search(value[:value.find(_FROM_SCOPE_TEXT)]) for value in held):
+            if any(_SEPARATOR_BEFORE.search(value[:value.rfind(_FROM_SCOPE_TEXT)]) for value in held):
                 return (text[start:end], "program")
             scoped.append((start, end))
         elif values:
@@ -1666,8 +1666,10 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -
     return None if at is None else (text[at[0]:at[1]], at[2])
 
 
-# What starts a new command in a shell's line, before what a scope written as one expression may give in a value.
-_SEPARATOR_BEFORE = re.compile(r"[;&|\n`({]")
+# What starts a new command in a shell's line, before what a scope written as one expression may give in a value:
+# `;`, `&&`, `|` (and `||`), a backtick and `$(`. Not a single `&` (a URL's query), a newline (the reader joins an
+# input's readings with one) or a bracket (prose, JSON); found by the review of this rule.
+_SEPARATOR_BEFORE = re.compile(r";|&&|\||`|\$\(")
 
 
 def _expand_variables(run: str, env: dict, problems: list) -> str:

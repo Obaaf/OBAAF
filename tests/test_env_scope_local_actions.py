@@ -451,7 +451,18 @@ class TheReviewersSixthPassTest(unittest.TestCase):
                 self.assertIn("where a command's program goes", error)
         default = files(step("echo ${{ inputs.cmd }}"), inputs="  cmd: {default: 'make; ${{ env.AGENT }} -p x'}\n")
         self.assertEqual(len(scope_errors(wf(job=JOB), default)), 1)
-        self.assertEqual(scope_errors(wf(job=JOB, with_="{cmd: 'make ${{ env.TARGET }}'}"), echo), [])
+        # Before the last such value, not only the first (the review of this rule).
+        second = "{cmd: 'echo ${{ env.A }}; ${{ env.B }} -p review'}"
+        self.assertEqual(len(scope_errors(wf(job=JOB, with_=second), echo)), 1)
+
+    def test_what_is_not_a_separator(self):
+        """A single `&` (a URL's query), a newline (the reader joins an input's readings with one) and brackets
+        (prose, JSON) give no error in an argument's place."""
+        echo = files(step("echo ${{ inputs.v }}"), inputs="  v: {default: x}\n")
+        for value in ("make ${{ env.TARGET }}", "https://x.test/?a=1&b=${{ env.B }}", "Release (${{ env.V }})",
+                      "${{ github.head_ref || env.REF }}", "${{ 'y' || env.X }}"):
+            with self.subTest(value=value):
+                self.assertEqual(scope_errors(wf(job=JOB, with_='{v: "' + value + '"}'), echo), [])
 
 
 if __name__ == "__main__":
