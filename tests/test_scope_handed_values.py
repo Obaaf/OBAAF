@@ -110,7 +110,8 @@ class AsAWorkflowsOwnStepTest(unittest.TestCase):
                         "strace -f .${{ env.A }} --message hi", "dbus-run-session .${{ env.A }} -p hi",
                         "watch -n 5 .${{ env.A }}", "ssh host .${{ env.A }}", "docker run img .${{ env.A }}",
                         "uv run .${{ env.A }}", "nix-shell --run .${{ env.A }}", "exec -a x .${{ env.A }}",
-                        "taskset -c 0 .${{ env.A }}", "ssh x@${{ env.H }}:1", "make x${{ env.T }}"):
+                        "taskset -c 0 .${{ env.A }}", "ssh x@${{ env.H }}:1", "make x${{ env.T }}",
+                        "xvfb-run -a -/${{ env.A }} --message hi", "xvfb-run -a --x=y/${{ env.A }} --message hi"):
             with self.subTest(command=command):
                 self.assertEqual(len(handed(command)), 1)
 
