@@ -42,6 +42,7 @@ inside a group of letters (`-yp`). Nothing after a word `--` is an option. `--na
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
@@ -797,6 +798,9 @@ class _Context:
     prose: bool = False             # text that may be prose (another input, an `env` value, an argument)
     # What putting variables in may still add, for the whole step, every nested script included (2d.16).
     budget: PutInBudget = field(default_factory=PutInBudget)
+    # The `${{ }}` expressions the script's text holds in their places (`_hold_expressions`), so that a command word
+    # made of one is tested for the tool's letters as GitHub will write it (2d.23, from its second review).
+    held: list = field(default_factory=list)
 
     def cannot_tell(self, word: str) -> None:
         if self.mentioned:
@@ -995,13 +999,17 @@ def _read_command(command: Command, ctx: _Context) -> None:
         if w.computed and not re.match(r"[A-Za-z_][A-Za-z0-9_]*\+?=", w.text):
             # What is written of the name decides: `"$(npm prefix -g)/bin/claude"` is the program,
             # `"$GITHUB_WORKSPACE/scripts/post.sh"` is not, and `$C` or `"$(command -v claude)"` may be.
+            # The letters anywhere in the word itself decide here, as before flagship slice 2d.23 (#388): a variable
+            # named for the tool (`"$CLAUDEBIN"`) or a name built in it (`$(echo claudeX | tr -d X)`; found by the
+            # slice's review) may be the program.
             literal = _known_part(w.text)
             base = _base(literal) if not literal.endswith("/") else ""
             if base in ctx.programs and not (w.glob or w.brace):
                 _read_program_args(_arguments(words[i + 1:]), ctx)
                 return
             if (not base or w.glob or w.brace or base in ctx.programs) and not ctx.prose and (
-                    ctx.mentioned or appears(w.shown, ctx.programs, ctx.packages)):
+                    ctx.mentioned or appears(w.shown, ctx.programs, ctx.packages) or (
+                        ctx.held and appears(_show(w.shown, ctx.held), ctx.programs, ctx.packages))):
                 for flag in ctx.flags:
                     ctx.reading.cannot_tell(flag, w.shown)
             continue
@@ -1254,7 +1262,11 @@ def _start(words: list, bases: list, i: int, ctx: _Context, command: Command, ru
             if not eq:
                 continue
             if x.computed:
-                ctx.cannot_tell(x.shown)
+                # Also where the word itself holds the tool's letters (`alias c="$HOME/tools/clinecli"`): a plain
+                # package's name counts in `mentions` only as a word since flagship slice 2d.23 (its third review).
+                if ctx.mentioned or appears(x.shown, ctx.programs, ctx.packages):
+                    for flag in ctx.flags:
+                        ctx.reading.cannot_tell(flag, x.shown)
                 continue
             _read_nested(value, ctx)
             if appears(value, ctx.programs, ctx.packages):
@@ -1626,7 +1638,7 @@ def _read_widest(text: str, programs: list, packages: list, flags: list, reading
 def read_script(text: str, programs: list, packages: list, flags: list, variables: dict | None = None,
                 mentioned: bool | None = None, bash: bool = True, unread: dict | None = None,
                 written_files: set | None = None, loose: bool | None = None, prose: bool = False,
-                language: str = "", budget: PutInBudget | None = None) -> Reading:
+                language: str = "", budget: PutInBudget | None = None, named: bool | None = None) -> Reading:
     """Each warned flag a script gives the tool's program, and what the checker cannot read there.
     `mentioned`: whether the step names the tool anywhere (its script, its `env` values or the job's and
     workflow's); "cannot tell" about a command the checker cannot name is given only then. `bash` False:
@@ -1634,7 +1646,12 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
     it names the tool and nothing is found; `language` (a shell's or an interpreter's name, or
     `github-script`) says how `agent_code` reads it by its tokens as well. `unread`: `env` values the checker
     cannot read, shown with a word that uses them. `budget`: the step's `PutInBudget`, shared by every
-    script of the step that is read (flagship slice 2d.16); a new one by default."""
+    script of the step that is read (flagship slice 2d.16); a new one by default. `named`: whether the step
+    names the tool as a name of its own or a part of one (`names`) in one of its texts or in a text with its
+    variables put in; by default, `mentioned` or `names` of this text. In another language or shell, code or
+    a command the checker cannot read is "cannot tell" only then, or where the command's own word holds the
+    tool's letters: before flagship slice 2d.23 (#388) it was wherever the name's letters stood in any word, so
+    a PowerShell step with `'acne'` and a bracket left open at a line's end was "cannot tell" for Continue."""
     reading = Reading()
     if not text or not flags:
         return reading
@@ -1646,12 +1663,14 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
         loose = mentioned or appears(text, programs, packages)
     if not mentioned and not loose:
         return reading          # the tool is not named at all (the common case, kept cheap)
+    if named is None:
+        named = mentioned or names(text, programs, packages)
     held_text, held = _hold_expressions(text)
     if bash:
         written = set(written_files or ()) | {m.group(1) for m in re.finditer(
             r"(?:>>?|\btee(?:\s+-a)?)\s*['\"]?([^\s'\";&|<>]+)", held_text)}
         ctx = _Context(list(programs), packages, flags, dict(variables or {}), mentioned, written, reading,
-                       loose=loose, prose=prose, budget=PutInBudget() if budget is None else budget)
+                       loose=loose, prose=prose, budget=PutInBudget() if budget is None else budget, held=held)
         _read_text(held_text, ctx)
         if held or unread:
             shown: dict = {}
@@ -1673,7 +1692,9 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
     if not bash and loose:
         if language:
             from obaaf.checker import agent_code
-            ctx = _Context(list(programs), packages, flags, {}, True, set(), reading, loose=True)
+            # Only where the script names the tool (2d.23): `True` here made what the readers cannot read "cannot
+            # tell" wherever the name's letters stood in a word (`'acne'`, `$cnt`, `decline`, `kilobyte`).
+            ctx = _Context(list(programs), packages, flags, {}, named, set(), reading, loose=True)
             agent_code.read_language(text, language, ctx)
     return reading
 
@@ -1822,7 +1843,10 @@ def names_when_put_in(text: str, scopes: list, programs: list, packages: list) -
 
 def appears(text: str, programs: list, packages: list) -> bool:
     """Whether the tool's name is anywhere in a text, even inside a word, once quotes, backslashes and
-    `$'...'` are read: the check that decides whether a step is read at all."""
+    `$'...'` are read: the check that decides whether a step is read at all. It decides no "cannot tell":
+    a short program name is inside many words (Continue's `cn` in `acne` and `$cnt`, `cline` in `decline`,
+    `kilo` in `kilobyte`), so where a "cannot tell" turns on the tool being named, `mentions` or `names`
+    decides (flagship slice 2d.23, #388)."""
     names = [n.casefold() for n in programs + packages]
     low = re.sub(r"[\"'\\]", "", text).casefold()
     if any(n in low for n in names):
@@ -1834,21 +1858,109 @@ def appears(text: str, programs: list, packages: list) -> bool:
     return False
 
 
-def mentions(text: str, programs: list, packages: list) -> bool:
-    """Whether a text names the tool: its program as a word (not after `@` or a letter), or its package,
-    once quotes, backslashes and `$'...'` are read."""
+@functools.lru_cache(maxsize=512)
+def _name_pattern(program: str, parts: bool, package: bool = False) -> re.Pattern:
+    """`program` standing as a name of its own in a text whose quotes are taken out and whose case is folded
+    (flagship slice 2d.23, #388). `mentions` (`parts` False): not after a letter, a digit, `_`, `@` (`@claude`
+    in a comment's prose) or `-`, and not before a letter, a digit, `_` or `-`, as before the slice. `names`
+    (`parts` True) also takes a part of a variable's name: an `_` after it (`$CLAUDE_BIN`, `$env:CN_BIN`), a
+    `-` before it that does not follow a letter or digit (`${CMD:-claude}`, but not `zh-cn`), and, for a name of
+    more than two letters, an `_` before it and a digit or a `-` after it (`$OPENAI_CODEX`, `$CODEX2`,
+    `${kilo-bin}`; not for two, where `zh_CN` is a locale and `cn-north-1` a region). `package`: a plain
+    package's name, for which a `-` and a digit after it (a packed tarball's version) are an edge in
+    `mentions` too. A name of two letters is a
+    country's domain as well (Continue's `cn`), so for it, in both, the name is never one label of a dotted name:
+    not after a dot that follows a letter or digit (`example.cn`, `pypi.tuna.tsinghua.edu.cn`), and not before a
+    dot and a letter or digit (`cn.archive.ubuntu.com`) unless the suffix is one Windows runs or node runs a
+    script by (`cn.exe`, `cn.cmd`, `cn.mjs`); and, for `names`, no digit or `-` after it (`cn-north-1`, an AWS
+    region). `names` uses this only for a name of five letters or fewer (see `_named`)."""
+    two = len(program) == 2
+    if parts:
+        before = (r"(?<![\w@])" if two else r"(?<![^\W_])(?<!@)") + r"(?<![^\W_]-)"
+        after = r"(?![^\W\d_])" + (r"(?![\d-])" if two else "")
+    else:
+        before = r"(?<![\w@-])"
+        # A package npm packs is `<name>-<version>.tgz` (`./cline-2.0.0.tgz`; the second review).
+        after = r"(?![\w-])" if not package else r"(?!\w)(?!-(?!\d))"
+    if two:
+        before += r"(?<![^\W_]\.)"
+        after += r"(?!\.(?!(?:exe|cmd|bat|ps1|com|js|mjs|cjs)(?![^\W_]))[^\W_])"
+    return re.compile(before + re.escape(program) + after)
+
+
+# A `.` that GitHub's expressions or a variable's property read as a separator, not as a part of a dotted name
+# (`${{ inputs.cn }}`, `${{ steps.cn.outputs.bin }}`, `$tools.cn`; found by 2d.23's review).
+_EXPRESSION_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
+_PROPERTY_RE = re.compile(r"\$\{?[\w:]+\}?(?:\.\w+)+")
+# Where a name's case changes (`$claudeBin`, `$cnPath`, `$CLAUDEBin`), for `names`.
+_CASE_EDGE_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _named(text: str, programs: list, packages: list, parts: bool) -> bool:
+    """`mentions` (`parts` False) and `names` (`parts` True). Read with quotes and backslashes taken out, again
+    with a backslash read as a folder's separator (no escape in PowerShell or cmd: `C:\\tools\\cn.exe`), with
+    `$'...'` decoded, and, for `names` and a name of three letters or more, with a space where the case of a
+    name changes. A package with a scope
+    or a folder in its name (`@continuedev/cli`) counts anywhere in these; one with a plain name is a name like
+    a program's, since such a name is inside other words too (Cline's `cline` in `decline`; 2d.23). For `names`, a
+    program's or a plain package's name of six letters or more counts anywhere in them, as `appears` has it:
+    such a name is in no ordinary word, and a name built from pieces glued to others (`'xclaude'.Substring(1)`,
+    cmd's `%C:~1%` after `set C=xclaude`) is then still read as the tool's (found by the slice's review). Only
+    a shorter one (Continue's `cn`, `kilo`, `qwen`, `cline`, `goose`, `codex`), which is in many words, must
+    stand as a name."""
     low = re.sub(r"[\"'\\]", "", text).casefold()
-    if any(p in low for p in packages):
-        return True
-    for program in programs:
-        if re.search(r"(?<![\w@-])" + re.escape(program) + r"(?![\w-])", low):
-            return True
+    scoped = [p for p in packages if p.startswith("@") or "/" in p]
+    forms = [low]
+    if "\\" in text:
+        forms.append(re.sub(r"[\"']", "", text).replace("\\", "/").casefold())
     if "$'" in text:
         decoded = re.sub(r"\$'((?:[^'\\]|\\.)*)'", lambda m: _ansi_c(m.group(1)), text).casefold()
-        decoded = re.sub(r"[\"'\\]", "", decoded)
-        return any(p in decoded for p in packages) or any(
-            re.search(r"(?<![\w@-])" + re.escape(p) + r"(?![\w-])", decoded) for p in programs)
+        forms.append(re.sub(r"[\"'\\]", "", decoded))
+    if any(p in form for p in scoped for form in forms):
+        return True
+    cased = None
+    if parts and _CASE_EDGE_RE.search(text):
+        cased = re.sub(r"[\"'\\]", "", _CASE_EDGE_RE.sub(" ", text)).casefold()
+    dotted = None
+    plain = [p for p in packages if p not in scoped]
+    for program in [*programs, *plain]:
+        if parts and len(program) >= 6 and any(program in form for form in forms):
+            return True
+        pattern = None
+        # A change of case is an edge only for a name of three letters or more (`$codexBin`, not `$isCN`; the
+        # second review).
+        for form in forms + ([cased] if cased is not None and len(program) > 2 else []):
+            if program in form:
+                pattern = pattern or _name_pattern(program, parts, program in plain)
+                if pattern.search(form):
+                    return True
+        if len(program) == 2 and "." in text and "$" in text:
+            if dotted is None:
+                spaced = _PROPERTY_RE.sub(lambda m: m.group(0).replace(".", " "),
+                                          _EXPRESSION_RE.sub(lambda m: m.group(0).replace(".", " "), text))
+                dotted = re.sub(r"[\"'\\]", "", spaced).casefold()
+            if program in dotted and (pattern or _name_pattern(
+                    program, parts, program in plain)).search(dotted):
+                return True
     return False
+
+
+def mentions(text: str, programs: list, packages: list) -> bool:
+    """Whether a text names the tool: its program, or a package with a plain name, as a word (see
+    `_name_pattern`), or a package with a scope or a folder anywhere, once quotes, backslashes and `$'...'` are
+    read (see `_named`)."""
+    return _named(text, programs, packages, False)
+
+
+def names(text: str, programs: list, packages: list) -> bool:
+    """Whether a text names the tool as a name of its own or a part of one: as `mentions`, and also as a part
+    of a variable's name (`$CN_BIN`, `$env:CN_BIN`, `${CMD:-cn}`, `$cnPath`; see `_name_pattern`), and a name of
+    six letters or more anywhere (`$CLAUDEBIN`, `'xclaude'`; see `_named`).
+    It decides the "cannot tell" that `appears`, a test for the letters anywhere, decided before flagship slice
+    2d.23 (#388) for a script as a whole: code in another language or shell, a tokenizer's problem, an alias, a
+    command input, `IFS=`. Where the command itself cannot be named, the letters in its own word still decide
+    (`"$CLAUDEBIN"`, `& ('xclaude'.Substring(1))`), as before."""
+    return _named(text, programs, packages, True)
 
 
 def starts_program(text: str, programs: list, packages: list) -> bool:
