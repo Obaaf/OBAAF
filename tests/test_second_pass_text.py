@@ -115,6 +115,28 @@ class AValueNeverStartsAnExpressionTest(unittest.TestCase):
                 self.assertIn(("OBAAF-GHA-025", "high", "agent-cli"),
                               found(composite(script), caller(with_, env="F: x"))[0])
 
+    def test_a_joined_value_handed_on_to_a_further_local_action(self):
+        # The second review: the outer action hands `${{ inputs.a }}{{ x` on to a further local action; the second
+        # pass's `with:` value `... #${{ '$' }}{{ x` was read there as `format()`, which hid what the value holds.
+        outer = ("inputs: {a: {required: false}}\nruns:\n  using: composite\n  steps:\n"
+                 "    - uses: ./.github/actions/y\n      with:\n        b: \"${{ inputs.a }}{{ x\"\n")
+        for name, inner_run, value, expected in (
+                ("an option", "claude ${{ inputs.b }} -p hi", f"{SKIP} #$", HIGH_026),
+                ("an install", "${{ inputs.b }}\n        claude -p hi", "npm install -g @anthropic-ai/claude-code #$",
+                 ("OBAAF-GHA-025", "high", "agent-cli"))):
+            inner = ("inputs: {b: {required: false}}\nruns:\n  using: composite\n  steps:\n    - shell: bash\n"
+                     f"      run: |\n        {inner_run}\n")
+            with self.subTest(name), TempDir() as tmp:
+                result = check(tmp, caller(f"{{a: '{value}'}}", env="F: x"),
+                               files={ACTION: outer, ".github/actions/y/action.yml": inner})
+                self.assertIn(expected, [(f.rule, f.severity, f.kind) for f in result.findings])
+                self.assertEqual(list(result.errors), [])
+
+    def test_a_string_handed_as_an_expression_is_its_text(self):
+        # What the second review's fix also reads: a caller's `${{ '...' }}` is the text it gives, as GitHub hands it.
+        self.assertEqual(found(composite("claude ${{ inputs.a }} -p hi"), caller(f"{{a: \"${{{{ '{SKIP}' }}}}\"}}")),
+                         ([HIGH_026], []))
+
     def test_a_joined_value_holding_a_close_reads_no_quote_wrongly(self):
         # The first review: `}}$` written whole as `${{ '}}$' }}` was ended at its `}}` by the readers that do not
         # know strings, which then read an unclosed quote (an extra medium). Only the `$` is an expression now.
@@ -184,7 +206,7 @@ def _second_pass_reading(text):
     """The same of a text the second pass made: an expression that is one string literal gives its text, and any
     other is the same mark, by its tokens; None where a reader of the text would find an expression end otherwise
     than `env_expr.spans` does, whether it knows strings or not (`rules._EXPRESSION_RE`), or where a literal holds
-    more than the characters of a `${{` (the rest of a value must stay text, for the rules to read)."""
+    anything but `$` and `{`, the characters of a `${{` (the rest of a value must stay text, for the rules to read)."""
     parts = checker_mod._expression_parts(text)
     if parts is None:
         return None
@@ -198,7 +220,7 @@ def _second_pass_reading(text):
             continue
         toks = expr_mod.tokens(body)
         if len(toks) == 1 and toks[0][0] == "str" and body.strip().startswith("'"):
-            if len(toks[0][1]) > 2 or set(toks[0][1]) - set("${"):
+            if set(toks[0][1]) - set("${"):
                 return None
             out.append(toks[0][1])
         else:
@@ -255,7 +277,7 @@ class TheSecondPassTextIsWhatGitHubRunsTest(unittest.TestCase):
         # that most do, with empty values, values on both sides of a `${{` and the action's folder among them.
         rng = random.Random(2020)
         ends, heads = ["", "$", "${", "x$", "$$", "'$"], ["", "{", "{{", "{ x", "{{ x }}", "}"]
-        values = ["$", "${", "{", "{{", "", "a$", "{b", "$$", "}}$", "'$", "--yolo #$"]
+        values = ["$", "${", "{", "{{", "", "a$", "{b", "$$", "}}$", "'$", "--yolo #$", "{{$", "{{${", "{$"]
         joins = 0
         for _ in range(3000):
             text = rng.choice(ends)

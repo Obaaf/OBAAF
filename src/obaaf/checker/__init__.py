@@ -2190,6 +2190,12 @@ def _value_tokens(value: str) -> list:
     would be read as text, always true (the third review of slice 2d.4b3a found `${PREFIX}` in a value,
     which a template writes `${{PREFIX}}`, end an `if:`'s narrowing to `push`)."""
     parts = _expression_parts(value) if expr_mod.OPEN in value else None
+    if parts and all(kind == "text" or _string_literal(body) is not None for kind, body in parts):
+        # Expressions that are each one string give that text (flagship slice 2d.20a): a value the second pass
+        # made with `${{ '$' }}` for a join, handed on to a further local action, is the text GitHub hands it
+        # (the second review found `--dangerously-skip-permissions #${{ '$' }}{{ x` read there as `format()`).
+        value = "".join(body if kind == "text" else _string_literal(body) for kind, body in parts)
+        parts = None
     if not parts or all(kind == "text" for kind, _ in parts):
         return [("str", value.replace(expr_mod.OPEN, "${ {"))]
     exprs = [body for kind, body in parts if kind == "expr"]
@@ -2200,6 +2206,16 @@ def _value_tokens(value: str) -> list:
         toks.append(("op", ","))
         toks += [("str", body)] if kind == "text" else [("op", "("), *_unopened(expr_mod.tokens(body)), ("op", ")")]
     return toks + [("op", ")")]
+
+
+def _string_literal(body: str) -> str | None:
+    """The text an expression's body gives when it is one string literal and nothing else (`'$'`, `'it''s'`), else
+    None."""
+    try:
+        toks = expr_mod.tokens(body)
+    except (RecursionError, ValueError):
+        return None
+    return toks[0][1] if len(toks) == 1 and toks[0][0] == "str" else None
 
 
 def _unopened(toks: list) -> list:
