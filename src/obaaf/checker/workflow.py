@@ -2102,7 +2102,7 @@ def _scope_pattern_matches(line: str) -> bool:
     return False
 
 
-def _scope_at_program(text: str, scoped: tuple, known: dict | None = None) -> tuple | None:
+def _scope_at_program(text: str, scoped: tuple, known: dict | None = None, inner: dict | None = None) -> tuple | None:
     """(start, end, where) for the first of `scoped` ((start, end) of `${{ }}` expressions in `text` whose text may hold
     what a scope written as one expression gives, `env_expr.Plan.scoped`) that may name an agent the lanes would see
     written out (flagship slice 2d.19d), in a line of `text` (with the lines a backslash continues, and a PowerShell
@@ -2119,12 +2119,16 @@ def _scope_at_program(text: str, scoped: tuple, known: dict | None = None) -> tu
       `npx`), past `_RUNS_NEXT` and a redirection, in the first word's last part after `/` or `\\` (`${{ env.DIR
       }}/bin/tool` runs `tool`; `${{ env.P }}claude` may run anything).
 
-    None where none does. Each line is read once, so the work is linear in the text."""
+    None where none does. Each line is read once, so the work is linear in the text. `inner` (flagship slice 2d.22,
+    D-150) gives, for some of `scoped`, the text to read in its place instead of one word: a value a local action is
+    handed, with `_SCOPE_PROBE` where its scope's part stands (`checker._scope_texts`). It is put in as text, and the
+    line made is not read again for `${{ }}` expressions."""
     try:
         every = [(start, end) for start, end, _body in env_expr.spans(text)]
     except expr_mod.TooComplex:
         return (*scoped[0], "program") if scoped else None
     known = known or {}
+    inner = inner or {}
     wanted = set(scoped)
     w = 0
     for u_start, u_end in env_expr._units(text, list(scoped)):
@@ -2146,7 +2150,7 @@ def _scope_at_program(text: str, scoped: tuple, known: dict | None = None) -> tu
                 continue
             pieces.append(text[at:start])
             if (start, end) in wanted:
-                pieces.append(_SCOPE_PROBE)
+                pieces.append(inner.get((start, end), _SCOPE_PROBE))
                 first = first or (start, end)
             else:
                 value = known.get((start, end))
