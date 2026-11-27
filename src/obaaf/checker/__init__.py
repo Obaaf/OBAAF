@@ -1645,8 +1645,8 @@ def _scope_texts(value, folder: str, env: "_ActionEnv") -> "_Handed | None":
 
     `clears` is true only where the value is one text whose every expression is one plain reference to `env`
     (`${{ env.SHARD }}`, `${{ env['SHARD'] }}`) to a name that does not give an expression, whose other characters are
-    `_PLAIN_TEXT`'s, and where each scope's part stands inside a word, after a character other than a space or `/`
-    (`--shard=${{ env.SHARD }}`). Such a value is split by bash only at its spaces, and the shell reader D-144 uses
+    `_PLAIN_TEXT`'s, and where each scope's part stands in an option or an assignment (`_clears`:
+    `--shard=${{ env.SHARD }}`). Such a value is split by bash only at its spaces, and the shell reader D-144 uses
     reads it as bash does; `_action_scope_place` then reads it with each part where it stands, as D-144 reads the same
     line in a workflow's own step. That is not a promise that no program runs such a word: one that runs an option's
     value as a command (`env -S${{ env.A }}`, `git -c core.sshCommand=${{ env.A }}`) is read as D-144 reads it."""
@@ -1700,11 +1700,21 @@ def _scope_texts(value, folder: str, env: "_ActionEnv") -> "_Handed | None":
 
 def _clears(text: str) -> bool:
     """Whether `text`, with `_SCOPE_PART` where the scope's part stands, is `_PLAIN_TEXT` besides those parts, each of
-    which stands after a character other than a space or `/` (flagship slice 2d.22)."""
+    which stands in an option or an assignment (flagship slice 2d.22): the word it stands in begins with `-` or has
+    `=` before it, and the character just before it is not `/` (`--shard=${{ env.S }}`, `-k${{ env.K }}`,
+    `V=${{ env.V }}`). A part that may finish a program's name (`.${{ env.A }}`, `python${{ env.V }}`) is not cleared,
+    so a wrapper D-144 does not know (`xvfb-run`, `flock`, `strace`) cannot run it (found by the third review)."""
     pieces = text.split(_SCOPE_PART)
     if not all(_PLAIN_TEXT.fullmatch(piece) for piece in pieces):
         return False
-    return all(piece and piece[-1] not in " /" for piece in pieces[:-1])
+    word = ""
+    for piece in pieces[:-1]:
+        # The word the part stands in, from its start (after the last space, or the start of the text) to the part.
+        word = word + piece if " " not in piece else piece[piece.rfind(" ") + 1:]
+        if not word or word[-1] == "/" or not (word.startswith("-") or "=" in word):
+            return False
+        word += _SCOPE_PART
+    return True
 
 
 def _plain_input(toks: list) -> str | None:

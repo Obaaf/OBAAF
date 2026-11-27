@@ -12,9 +12,9 @@ D-150: that reading stays, apart from two changes for an expression that is one 
 value, as the caller wrote it, holds what the scope may give:
 
 - **Cleared.** In a bash or sh step's `run`, a value that is one text of plain characters (`_PLAIN_TEXT`) whose
-  every expression is one plain reference to `env`, each scope's part inside a word after a character other than a
-  space or `/` (`--shard=${{ env.SHARD }}`), is read as its text, with each part where it stands, as D-144 reads the
-  same line in a workflow's own step.
+  every expression is one plain reference to `env`, each scope's part in an option or an assignment
+  (`--shard=${{ env.SHARD }}`, `V=${{ env.V }}`), is read as its text, with each part where it stands, as D-144
+  reads the same line in a workflow's own step.
 - **Added.** A newline before a scope's part, in any text the caller's value can make, is a program's place, as a
   shell reads it, also where the value is put after `echo` (one of D-145's stated ways past).
 
@@ -22,9 +22,10 @@ Everything else is read as before. The first review of this slice showed why the
 (every handed value read as D-144 reads a workflow's own step) was quieter than the base: D-144's program reader does
 not know every program that runs its arguments (`xvfb-run`, `find -exec`, `trap`), a line a `^` or a backtick
 continues, separators written inside the caller's expressions, or a comment's backslash. The plain form rules out all
-but the first; a word from the scope does not begin a word there, so `xvfb-run`, `find -exec` and `trap` cannot run
-it. A program that runs an option's value as a command (`env -S`, `git -c core.sshCommand=`) is read as D-144 reads
-it, in a workflow's own step too (the second review).
+but the first; a part in an option or an assignment is never a program's name, so `xvfb-run`, `find -exec`, `flock`
+and `trap` cannot run it as the agent (the third review got past a rule that cleared any part inside a word). A
+program that runs an option's value as a command (`env -S`, `git -c core.sshCommand=`) is read as D-144 reads it, in
+a workflow's own step too (the second review, #409).
 """
 
 import json
@@ -45,12 +46,13 @@ def handed(command, action_run="${{ inputs.run }}", shell="bash", **scopes):
 
 
 class TheKnownFalseErrorIsClearedTest(unittest.TestCase):
-    """D-145's known false error is gone where the scope's part stands inside a word of a plain value."""
+    """D-145's known false error is gone where the scope's part stands in an option or an assignment of a plain value."""
 
     def test_inside_a_word_of_a_plain_value(self):
         for command in ("npm test -- --shard=${{ env.SHARD }}", "./build.sh --out=${{ env.OUT }}/bin",
                         "deploy --region=${{ env.REGION }}-${{ env.STAGE }}", "npm test -- --shard=${{ env['SHARD'] }}",
-                        "pytest --k=a${{ env.K }} tests/", "make V=${{ env.V }}", "ssh x@${{ env.H }}:1"):
+                        "pytest --k=a${{ env.K }} tests/", "make V=${{ env.V }}", "pytest -k${{ env.K }}",
+                        "xvfb-run -a npm test --shard=${{ env.S }}", "flock /tmp/l V=${{ env.V }} make"):
             with self.subTest(command=command):
                 self.assertEqual(handed(command), [])
 
@@ -100,6 +102,25 @@ class AsAWorkflowsOwnStepTest(unittest.TestCase):
                         "eval x${{ env.A }}", "bash -c _${{ env.A }}", "x@${{ env.H }}:1"):
             with self.subTest(command=command):
                 self.assertEqual(len(handed(command)), 1)
+
+    def test_a_part_that_may_finish_a_programs_name_behind_any_wrapper(self):
+        """Only a part in an option or an assignment is cleared, so a wrapper D-144 does not know cannot run one that
+        finishes a program's name (the third review: `flock /tmp/l .${{ env.A }} -p hi` with A `/../usr/bin/claude`)."""
+        for command in ("xvfb-run -a .${{ env.A }} -p hi", "flock /tmp/l .${{ env.A }} -p hi",
+                        "strace -f .${{ env.A }} --message hi", "dbus-run-session .${{ env.A }} -p hi",
+                        "watch -n 5 .${{ env.A }}", "ssh host .${{ env.A }}", "docker run img .${{ env.A }}",
+                        "uv run .${{ env.A }}", "nix-shell --run .${{ env.A }}", "exec -a x .${{ env.A }}",
+                        "taskset -c 0 .${{ env.A }}", "ssh x@${{ env.H }}:1", "make x${{ env.T }}"):
+            with self.subTest(command=command):
+                self.assertEqual(len(handed(command)), 1)
+
+    def test_a_value_of_two_texts_is_never_cleared(self):
+        """A name a nearer mapping sets twice in letter case, on a runner the checker cannot place, gives two texts;
+        such a value is read as before (found by the third review's mutation of the one-text rule)."""
+        text = wf(job=JOB, step="{N: 'x=', n: 'sudo '}",
+                  with_="{run: " + json.dumps("${{ env.N }}${{ env.S }} -p hi") + "}")
+        text = text.replace("runs-on: ubuntu-24.04", "runs-on: ${{ vars.RUNNER }}")
+        self.assertEqual(len(scope_errors(text, files(step("${{ inputs.run }}"), inputs=INPUT))), 1)
 
     def test_a_nearer_name_set_to_an_expression_is_never_cleared(self):
         text = wf(job=JOB, step="{SEP: '${{ matrix.sep }}'}",
