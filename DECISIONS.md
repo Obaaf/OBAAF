@@ -143,6 +143,7 @@ Every design decision in OBAAF, with its reason and the evidence behind it (NFR7
 | D-142 | The lanes work out the `${{ }}` expressions in a step's command lines that read `env`, as GitHub does before the shell starts: letter case by the runner (#387), every value for a reference not pinned to one name, readings made line by line and counted before they are made, and an error of the file for what the checker does not work out | Proposed |
 | D-143 | OBAAF-GHA-026 reads the options that `${{ }}` expressions reading only `env` give in a step's command lines, where the checker knows the one text GitHub puts in; otherwise "cannot tell" as before | Proposed |
 | D-144 | In the lanes, an `env` written as one expression (`${{ fromJSON(vars.E) }}`, `${{ matrix.env }}`) may give any name a mapping nearer the step does not set: such a value makes no reading, and the step is an error of its file where an agent's name in its place would be read as its command line or where a command's program goes | Proposed |
+| D-145 | A local composite action's steps under an `env` written as one expression (the workflow's, the job's, the using step's, or an action step's own) are read as D-144 reads a workflow's own step; an input's value that reads `env` is worked out where the action is given it, with the caller's `env`; without such a scope the reader is unchanged | Proposed |
 
 ---
 
@@ -1444,3 +1445,21 @@ The line is drawn where an agent's name written out would be seen. A value at an
 - **Cost.** The cost of the reviewer's cases is the base's: 74 KB with 4,000 workflow `env` entries, 13.4 s against 14.7 s; a 12 KB line of spaces, 0.48 s against 0.44 s; 960 KB of such expressions side by side, 6.5 s against 6.2 s; 40,000 lines each ending in a PowerShell backtick, about twice the base (10.4 s against 5.5 s); 1.7 MB of 50,000 lines, 7.6 s against 6.5 s. On this repository and on the first adopter nothing changes (text, JSON, SARIF, `--summary` and `--lanes` byte-identical with `flagship` `03b3c9b`).
 
 **Status.** Proposed 2026-11-27 (slice 2d.19d).
+
+
+### D-145 An `env` written as one expression, for a local action's steps
+
+**Decision.** From slice 2d.19e (#382, item (b) of what F-421 left in 2d.19, for the lanes). It extends D-144 to the reader of local composite actions (slice 2d.4a, `_agent_in_local_action`), which read a name it did not have as empty and dropped a scope that is not a mapping.
+
+- **The scopes.** The workflow's, the job's and the using step's `env`, and each action step's own, the nearest winning; through further local actions the chain goes on. Where one is not a mapping, the names that mappings nearer the step set (under the job's runner's comparison of names, `env_expr.env_case`; a YAML 1.2 look-alike key, or a non-text key, settles nothing) are settled; any other name, and a read of `env` not pinned to one name, may be any text. `hashFiles` gives a hash.
+- **Where it is an error of the file.** As D-144: an expression that may give it, in a step's `run`, a github-script script or the egress action's command, standing where an agent's name would be read as its command line or where a command's program goes (`workflow._scope_at_program`). The expression is read as giving that value whole. An expression nested past what the reader follows that reads `env`, or an input holding such a value, is an error too.
+- **Values handed in.** An input's value (the caller's `with:`, or a `default`) that reads `env` is worked out where the action is given it, with the caller's `env`, keeping what the scope may give, so the action's steps read it wherever it stands and however it is handed on (to a further action's `with:` or `env`). Only the inputs the action's expressions read are worked out, each value once. A handed value holding such a value after `;`, `&&`, `|`, a backtick or `$(` is read as standing where a program goes wherever it is put.
+- **Without such a scope** the reader is as before, byte for byte on every probe the review compared.
+
+**Known false errors (fail closed).** An input run as a command line that holds a value from the scope in an argument's place (`with: {run: 'npm test -- --shard=${{ env.SHARD }}'}` into `run: ${{ inputs.run }}`); a separator inside quotes (`echo "${{ inputs.cmd }}"` with `make; ${{ env.A }} -p x`); D-144's own. Where the caller's `env` sets the name as a mapping, there is none.
+
+**Stated limits.** A newline, a single `&`, or a process substitution `<(`/`>(` in a handed value before the scope's value, put in an argument's place; `$T` (D-139); an `env` value that is itself an expression read through `$T`; a `docker://` step's arguments and a remote action's inputs; a text put in past what the reader reads, as before (a note). OBAAF-GHA-026 in a local action's steps (2d.19's item (b) for the rule) and 2d.18's cost cases are left in 2d.19.
+
+**Reason.** F-421: on `flagship` `ccbe0b8`, `run: ${{ env.AGENT }} -p review` in a local action under the job's `env: ${{ fromJSON(vars.E) }}` was in no agent lane, with no error and no finding. Two designs were built and taken back after review: widening the reader's `env` where no scope is written so (every value for an unpinned read multiplied whole texts past what the reader reads, losing an agent script and adding notes and cost), and reading where in a handed value the scope's text stands (a value could open an expression with the action's own text and hide the marker, and passes paired by order missed combinations). On this repository and on the first adopter the reports are byte-identical with `flagship` `ccbe0b8`.
+
+**Status.** Proposed 2026-11-27 (slice 2d.19e).
