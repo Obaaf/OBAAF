@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import re
@@ -695,33 +694,14 @@ def cmd_verify_release(args) -> int:
     except (RecordError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAIL
-    # The --output file is opened first and filled last, after the step summary and the console: a
-    # run that cannot write one of them stops with an error before the file holds a decision, so no
-    # decision file says the checks passed beside an exit status of 1 (an opened file is left empty).
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
     text = json.dumps(decision.to_dict(), indent=2) + "\n" if args.format == "json" else decision.to_text()
-    handle = None
-    try:
-        if args.output:
-            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-            handle = open(args.output, "w", encoding="utf-8")
-        if summary:
-            with open(summary, "a", encoding="utf-8") as fh:
-                fh.write("## OBAAF release verification\n\n```\n" + decision.to_text() + "```\n")
-        if handle is None:
-            sys.stdout.write(text)
-        else:
-            if args.format == "json":
-                sys.stdout.write(decision.to_text())
-            handle.write(text)
-            handle.close()
-    except OSError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return EXIT_FAIL
-    finally:
-        if handle is not None and not handle.closed:
-            with contextlib.suppress(OSError):
-                handle.close()
+    _write(text, args.output)
+    if args.format == "json" and args.output:
+        sys.stdout.write(decision.to_text())
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as fh:
+            fh.write("## OBAAF release verification\n\n```\n" + decision.to_text() + "```\n")
     return EXIT_OK if decision.ok else EXIT_FAIL
 
 

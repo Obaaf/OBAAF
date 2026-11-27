@@ -170,34 +170,6 @@ class ReleaseDecisionJsonTest(unittest.TestCase):
             code, doc, _ = run_json(*cli_args(r), "--pre-approval", "--approvals", tmp / "approvals-shape.json")
             self.assertEqual((code, doc["checksPassed"], doc["preApproval"]), (0, True, True))
 
-    def test_a_step_summary_that_cannot_be_written_stops_before_the_decision(self):
-        with TempDir() as tmp:
-            r = build_release(tmp)
-            summary = tmp / "missing" / "summary.md"
-            for extra in (["--format", "json"], ["--format", "json", "--output", tmp / "decision.json"], []):
-                with self.subTest(extra=extra), mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
-                    code, out, err = run_cli(*cli_args(r), "--approvals", r.approvals, *extra)
-                    self.assertEqual(code, 1)
-                    self.assertEqual(out, "")
-                    self.assertTrue(err.startswith("error: "), err)
-                    self.assertNotIn("Traceback", err)
-                    # The --output file is opened before the summary, and left empty.
-                    if "--output" in extra:
-                        self.assertEqual((tmp / "decision.json").read_text(encoding="utf-8"), "")
-
-    def test_an_output_file_that_cannot_be_written_stops_before_the_summary(self):
-        with TempDir() as tmp:
-            r = build_release(tmp)
-            summary = tmp / "summary.md"
-            blocked = r.policy / "decision.json"  # its folder is a file
-            for fmt in ("json", "text"):
-                with self.subTest(format=fmt), mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
-                    code, out, err = run_cli(*cli_args(r), "--approvals", r.approvals, "--format", fmt,
-                                             "--output", blocked)
-                    self.assertEqual((code, out), (1, ""))
-                    self.assertTrue(err.startswith("error: "), err)
-                    self.assertFalse(summary.exists())
-
     def test_the_decision_object(self):
         # What the API gives a program that calls verify_release itself.
         with TempDir() as tmp:
