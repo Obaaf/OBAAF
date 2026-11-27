@@ -8,6 +8,7 @@ sends nothing over the network (NFR5).
 
 from __future__ import annotations
 
+import bisect
 import fnmatch
 import hashlib
 import itertools
@@ -2180,14 +2181,20 @@ def _written_tokens(toks: list) -> str:
     return "".join(out)
 
 
-def _value_tokens(value: str) -> list:
+def _value_tokens(value: str, literals: bool = False) -> list:
     """The tokens of an expression that gives `value`, the text a step's `with:` hands an input: a string
     for plain text, the expression in parentheses for one `${{ }}`, and `format()` for text with
     expressions in it. Text with an expression that does not end is taken as plain text. Literal text is
     an argument of `format()`, never part of its template, and `${{` in plain text is written `${ {`, so
     the expression made never holds `${{` in a string: a condition written without `${{ }}` that held one
     would be read as text, always true (the third review of slice 2d.4b3a found `${PREFIX}` in a value,
-    which a template writes `${{PREFIX}}`, end an `if:`'s narrowing to `push`)."""
+    which a template writes `${{PREFIX}}`, end an `if:`'s narrowing to `push`). With `literals` (a local
+    action's input, flagship slice 2d.20a), a value whose expressions are each one string is the text they
+    give (`_literals_text`)."""
+    if literals:
+        text = _literals_text(value)
+        if text is not None:
+            value = text
     parts = _expression_parts(value) if expr_mod.OPEN in value else None
     if not parts or all(kind == "text" for kind, _ in parts):
         return [("str", value.replace(expr_mod.OPEN, "${ {"))]
@@ -2199,6 +2206,40 @@ def _value_tokens(value: str) -> list:
         toks.append(("op", ","))
         toks += [("str", body)] if kind == "text" else [("op", "("), *_unopened(expr_mod.tokens(body)), ("op", ")")]
     return toks + [("op", ")")]
+
+
+def _literals_text(value: str) -> str | None:
+    """The text a value gives when each of its `${{ }}` expressions is one string literal and nothing else
+    (`a${{ '$' }}b` gives `a$b`), else None (flagship slice 2d.20a): a value the second pass made with `${{ '$' }}`
+    for a join, handed on to a further local action, is the text GitHub hands it (the second review found
+    `--dangerously-skip-permissions #${{ '$' }}{{ x` read there as `format()`, which hid it), and so is a caller's
+    own `${{ '--yolo' }}`. Only for a local action's inputs: what a reusable workflow is handed is read as before,
+    so the words a baseline entry matches there stay as they were (found by the third review)."""
+    if expr_mod.OPEN not in value:
+        return None
+    parts = _expression_parts(value)
+    if not parts:
+        return None
+    pieces: list = []
+    for kind, body in parts:
+        if kind == "text":
+            pieces.append(body)
+            continue
+        text = _string_literal(body)
+        if text is None:
+            return None
+        pieces.append(text)
+    return "".join(pieces)
+
+
+def _string_literal(body: str) -> str | None:
+    """The text an expression's body gives when it is one string literal and nothing else (`'$'`, `'it''s'`), else
+    None."""
+    try:
+        toks = expr_mod.tokens(body)
+    except (RecursionError, ValueError):
+        return None
+    return toks[0][1] if len(toks) == 1 and toks[0][0] == "str" else None
 
 
 def _unopened(toks: list) -> list:
@@ -2255,12 +2296,12 @@ def _inputs_put_in_body(body: str, inputs: dict, problems: list) -> str:
                 values = list(dict.fromkeys(inputs.values())) or [""]
                 out += [("id", "format"), ("op", "("), ("str", "".join("{" + str(n) + "}" for n in range(len(values))))]
                 for value in values:
-                    out += [("op", ","), *_value_tokens(value)]
+                    out += [("op", ","), *_value_tokens(value, literals=True)]
                 out.append(("op", ")"))
                 i += 1
                 changed = True
                 continue
-            out.extend(_value_tokens(inputs.get(wf_mod.input_name(name), inputs.get(_ANY_INPUT, ""))))
+            out.extend(_value_tokens(inputs.get(wf_mod.input_name(name), inputs.get(_ANY_INPUT, "")), literals=True))
             i += width
             changed = True
             continue
@@ -2272,17 +2313,35 @@ def _inputs_put_in_body(body: str, inputs: dict, problems: list) -> str:
 def _inputs_put_in(text: str, inputs: dict, folder: str, problems: list, state: dict, fold: bool = True) -> str:
     """`text` with the action's inputs put into each expression that reads them, and the action's folder
     for `${{ github.action_path }}`. A text that would be longer than the checker reads is left as written
-    and added to `problems`; every text made counts towards `LOCAL_STEPS_TEXT`."""
-    put = _ACTION_PATH_EXPR_RE.sub(lambda _m: f"./{folder}", text)
-    if expr_mod.OPEN in put and re.search(r"\binputs\b", put, re.I):
-        parts = _expression_parts(put)
+    and added to `problems`; every text made counts towards `LOCAL_STEPS_TEXT`.
+
+    GitHub works the action's template out once, so a value put in never joins the text around it into an
+    expression (flagship slice 2d.20a, #401): the text is built piece by piece (`_pieces_joined`), and one the
+    checker cannot build so, so that its readers find exactly the expressions it keeps, is an error of the check
+    (`_ActionFileError`), never a text that hides what follows."""
+    put = text
+    if expr_mod.OPEN in text and (re.search(r"\binputs\b", text, re.I) or _ACTION_PATH_EXPR_RE.search(text)):
+        parts = _expression_parts(text)
         if parts is None:
-            problems.append(f"an expression in '{wf_mod.one_line(text, 60)}' does not end, so the action's inputs "
-                            "were not put into it")
+            put = _ACTION_PATH_EXPR_RE.sub(lambda _m: f"./{folder}", text)
+            if re.search(r"\binputs\b", put, re.I):
+                problems.append(f"an expression in '{wf_mod.one_line(text, 60)}' does not end, so the action's "
+                                "inputs were not put into it")
         else:
-            put = "".join(body if kind == "text" else _expression_put_in(body, inputs, problems, fold)
-                          if re.search(r"\binputs\b", body, re.I) else expr_mod.OPEN + body + expr_mod.CLOSE
-                          for kind, body in parts)
+            pieces: list = []
+            for kind, body in parts:
+                if kind == "text":
+                    pieces.append(("text", body))
+                elif _ACTION_PATH_EXPR_RE.fullmatch(expr_mod.OPEN + body + expr_mod.CLOSE):
+                    pieces.append(("value", f"./{folder}"))
+                elif re.search(r"\binputs\b", body, re.I):
+                    pieces.append(_expression_put_in_piece(body, inputs, problems, fold))
+                else:
+                    pieces.append(("expr", expr_mod.OPEN + body + expr_mod.CLOSE))
+            put, spans = _pieces_joined(pieces)
+            if not _spans_are(put, spans):
+                raise _ActionFileError(f"putting its inputs into '{wf_mod.one_line(text, 60)}' makes a text whose "
+                                       "expressions the checker cannot keep as GitHub reads them")
     if put != text and len(put) > LOCAL_ACTION_TEXT:
         # Left as written, the text would hide what its inputs hold, so this is the error the bounds give.
         raise _StepsExceeded()
@@ -2293,14 +2352,117 @@ def _expression_put_in(body: str, inputs: dict, problems: list, fold: bool = Tru
     """One `${{ }}` with the inputs put in. One that is then a string and nothing else is that text, as
     GitHub gives it (`push: ${{ inputs.push }}` given `false` is `false`, not an expression a rule must
     take for any value: the second review found a build that does not push read as a publish)."""
+    return _expression_put_in_piece(body, inputs, problems, fold)[1]
+
+
+def _expression_put_in_piece(body: str, inputs: dict, problems: list, fold: bool = True) -> tuple[str, str]:
+    """`_expression_put_in` as a piece for `_pieces_joined`: ("value", the text) where it is a string and
+    nothing else, ("expr", the expression with its `${{ }}`) otherwise."""
     put = _inputs_put_in_body(body, inputs, problems)
     toks = expr_mod.tokens(put)
     # Not in `if:` or `continue-on-error`, where GitHub reads the text an expression gives as a value of
     # its own (`''` is false) and the checker reads text that is not an expression as always true (the
     # third review found `if: ${{ inputs.verify }}` given '' read as no condition).
     if fold and len(toks) == 1 and toks[0][0] == "str":
-        return toks[0][1]
-    return expr_mod.OPEN + " " + put + " " + expr_mod.CLOSE
+        return ("value", toks[0][1])
+    return ("expr", expr_mod.OPEN + " " + put + " " + expr_mod.CLOSE)
+
+
+def _literal_expression(value: str) -> str:
+    """`${{ '<value>' }}`: an expression that gives `value`, its quotes doubled (and `${{` in it written `${ {`, as
+    `_unopened` writes it)."""
+    return expr_mod.OPEN + " " + _written_tokens(_unopened([("str", value)])) + " " + expr_mod.CLOSE
+
+
+def _pieces_joined(pieces: list) -> tuple[str, list]:
+    """The text of `pieces`, each (kind, text): "text" for the action's own text between its expressions, "value"
+    for a text put in where an expression of the action stood (an input's value, the action's folder), "expr" for an
+    expression with its `${{ }}`; and (start, end) of each expression in the text made.
+
+    GitHub works the action's template out once, so a value put in is text and never joins the text around it into
+    an expression (flagship slice 2d.20a, #401; slice 2d.19f found the same for its own lines): in
+    `# ${{ inputs.a }}{{ x` given `$`, the `{{` is text and the line after it runs. Joined as text, the pieces would
+    read `# ${{ x`, an expression up to the next `}}`, which hides from every rule what lies between. So the
+    characters of a value that are part of a `${{` the pieces make (a `$` before `{{`, `${` before `{`, `$` and `{{`
+    from two values) are written as an expression that gives them (`_literal_expression`: `${{ '$' }}`), and an
+    empty value that stands inside one as `${{ '' }}`; the rest of the value stays text, so the rules read it as
+    GitHub runs it (found by the review: a whole value written so hid `--dangerously-skip-permissions #$` from
+    OBAAF-GHA-026). Such an expression holds only `$` and `{`, never a `}}` or a quote that a reader which does not
+    know strings would end it at. The text made holds, for the shell, the characters GitHub's does. The action's own
+    text between two expressions holds no `${{` (it would be one), so every `${{` the joined text holds outside a
+    kept expression takes in a value's character or an empty value, and none is left once those are expressions (a
+    `$` just before such an expression makes no `${{` with it, whose own first character is a `$`). Linear in the
+    text: each `${{` looks only at the pieces it touches (`bisect`)."""
+    kinds = [kind for kind, _ in pieces]
+    texts = [text for _, text in pieces]
+    # For each value in a join: the offsets of its characters inside a `${{`, or -1 for an empty value inside one.
+    joined: dict = {}
+    i = 0
+    while i < len(pieces):
+        if kinds[i] == "expr":
+            i += 1
+            continue
+        j = i
+        while j < len(pieces) and kinds[j] != "expr":
+            j += 1
+        if any(kinds[k] == "value" for k in range(i, j)):
+            run = "".join(texts[i:j])
+            starts, at = [], 0
+            for k in range(i, j):
+                starts.append(at)
+                at += len(texts[k])
+            hit = run.find(expr_mod.OPEN)
+            while hit != -1:
+                end_hit = hit + len(expr_mod.OPEN)
+                # The pieces that can touch the `${{`: from the last that starts at or before it, while they start
+                # inside it (found by bisection, so a line of many values is read in linear time).
+                k = max(bisect.bisect_right(starts, hit) - 1, 0)
+                while k < len(starts) and starts[k] < end_hit:
+                    start, end = starts[k], starts[k] + len(texts[i + k])
+                    if kinds[i + k] == "value":
+                        if end > start and hit < end and start < end_hit:
+                            joined.setdefault(i + k, set()).update(range(max(hit, start) - start,
+                                                                         min(end_hit, end) - start))
+                        elif end == start and hit < start < end_hit:
+                            joined.setdefault(i + k, set()).add(-1)
+                    k += 1
+                hit = run.find(expr_mod.OPEN, hit + 1)
+        i = j
+    out: list = []
+    spans: list = []
+    at = 0
+
+    def add(kind: str, text: str) -> None:
+        nonlocal at
+        if kind == "expr":
+            spans.append((at, at + len(text)))
+        out.append(text)
+        at += len(text)
+
+    for k, (kind, text) in enumerate(zip(kinds, texts)):
+        inside = joined.get(k)
+        if inside is None:
+            add("expr" if kind == "expr" else "text", text)
+            continue
+        if not text:
+            add("expr", _literal_expression(""))
+            continue
+        n = 0
+        while n < len(text):
+            m = n
+            while m < len(text) and (m in inside) == (n in inside):
+                m += 1
+            add("expr", _literal_expression(text[n:m])) if n in inside else add("text", text[n:m])
+            n = m
+    return "".join(out), spans
+
+
+def _spans_are(text: str, spans: list) -> bool:
+    """Whether the expressions GitHub's runner reads in `text` (`env_expr.spans`) are exactly `spans`."""
+    try:
+        return [(start, end) for start, end, _body in env_expr.spans(text)] == spans
+    except expr_mod.TooComplex:
+        return False
 
 
 def _charge_steps(state: dict, steps: int = 0, chars: int = 0) -> None:
@@ -2486,7 +2648,9 @@ def _caller_inputs(outer: dict, given: dict, inputs: dict, top: "wf_mod.Step", n
     out: dict = {}
     pending = []
     for name, value in inputs.items():
-        if expr_mod.OPEN not in value:
+        # A value whose expressions are each one string is text, as the second pass reads it (`_literals_text`,
+        # flagship slice 2d.20a, from its third review).
+        if expr_mod.OPEN not in value or _literals_text(value) is not None:
             out[name] = value
             continue
         out[name] = _unworked_input(name)
@@ -2559,42 +2723,35 @@ def _given_text(written: str, inputs: dict, folder: str, state: dict) -> str | N
     GitHub works out the action's template once, so a value put in never starts or ends an expression: in
     `# ${{ inputs.d }}{{ env.F || '` given `$`, the `{{` the action writes is text (found by the review: the second
     pass's text holds an expression there, which D-143 would have worked out, hiding the next line). The text made
-    is therefore built piece by piece, each expression of `written` as one piece, and is None unless the expressions
-    the runner's reading finds in it (`env_expr.spans`) are exactly the pieces it keeps as expressions. It is None too
-    where it could be longer than the checker reads (`LOCAL_ACTION_TEXT`), decided before it is made (each reference
-    to `inputs` puts in at most every value, `toJSON(inputs)`, each with its quotes doubled), and past
-    `GIVEN_TEXTS_JOB` or `GIVEN_TEXTS_CHECK` characters of such lines."""
+    is therefore built piece by piece, each expression of `written` as one piece (`_pieces_joined`, which since
+    flagship slice 2d.20a writes a value that would join the text around it into `${{` as an expression that gives
+    it, as the second pass's text does), and is None unless the expressions the runner's reading finds in it
+    (`env_expr.spans`) are exactly the pieces it keeps as expressions. It is None too where it could be longer than
+    the checker reads (`LOCAL_ACTION_TEXT`), decided before it is made (each reference to `inputs` puts in at most
+    every value, `toJSON(inputs)`, each with its quotes doubled, and the folder at most once for each `${{`, either
+    of them perhaps as an expression), and past `GIVEN_TEXTS_JOB` or `GIVEN_TEXTS_CHECK` characters of such lines."""
     references = len(re.findall(r"\binputs\b", written, re.I))
-    if len(written) + references * sum(2 * len(value) + 8 for value in inputs.values()) \
-            + written.count(expr_mod.OPEN) * (len(folder) + 2) > LOCAL_ACTION_TEXT:
+    if len(written) + references * sum(2 * len(value) + 9 for value in inputs.values()) \
+            + written.count(expr_mod.OPEN) * (2 * len(folder) + 13) > LOCAL_ACTION_TEXT:
         return None
     parts = _expression_parts(written)
     if parts is None:
         return None
     pieces: list = []
-    kept: list = []
-    at = 0
     try:
         for kind, body in parts:
             if kind == "text":
-                piece = body
+                pieces.append(("text", body))
             elif _ACTION_PATH_EXPR_RE.fullmatch(expr_mod.OPEN + body + expr_mod.CLOSE):
-                piece = f"./{folder}"
+                pieces.append(("value", f"./{folder}"))
             elif re.search(r"\binputs\b", body, re.I):
-                put = _inputs_put_in_body(body, inputs, [])
-                toks = expr_mod.tokens(put)
-                if len(toks) == 1 and toks[0][0] == "str":
-                    piece = toks[0][1]
-                else:
-                    piece = expr_mod.OPEN + " " + put + " " + expr_mod.CLOSE
-                    kept.append((at, at + len(piece)))
+                pieces.append(_expression_put_in_piece(body, inputs, []))
             else:
-                piece = expr_mod.OPEN + body + expr_mod.CLOSE
-                kept.append((at, at + len(piece)))
-            pieces.append(piece)
-            at += len(piece)
-        text = "".join(pieces)
-        if [(start, end) for start, end, _body in env_expr.spans(text)] != kept:
+                pieces.append(("expr", expr_mod.OPEN + body + expr_mod.CLOSE))
+        # A value that would join the text around it into `${{` is an expression that gives it, as in the second
+        # pass's text (flagship slice 2d.20a, #401), so the line is worked out where 2d.19f refused it.
+        text, kept = _pieces_joined(pieces)
+        if not _spans_are(text, kept):
             return None
     except (RecursionError, ValueError):
         return None
