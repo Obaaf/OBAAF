@@ -217,6 +217,25 @@ def _provenance_commit(predicate: dict) -> str | None:
     return None
 
 
+def _approvals_shape_problem(approvals) -> str | None:
+    """What keeps `approvals` from being read as GitHub's run approvals list, or None. Each entry
+    must be an object; its `environments` a list of objects whose `name` is text, and its `user`
+    an object whose `login` is text (either may be missing, and then counts for nothing)."""
+    if not isinstance(approvals, list):
+        return "is not a list"
+    for number, entry in enumerate(approvals, 1):
+        if not isinstance(entry, dict):
+            return f"entry {number} is not an object"
+        envs = entry.get("environments", [])
+        if not isinstance(envs, list) or not all(
+                isinstance(e, dict) and isinstance(e.get("name"), (str, type(None))) for e in envs):
+            return f"entry {number}'s environments are not a list of objects with a text name"
+        user = entry.get("user")
+        if user is not None and not (isinstance(user, dict) and isinstance(user.get("login"), (str, type(None)))):
+            return f"entry {number}'s user is not an object with a text login"
+    return None
+
+
 def _check_approvals(decision: Decision, policy: Policy, approvals: list[dict] | None, actors: list[str]) -> None:
     if policy.min_approvals <= 0:
         return
@@ -224,6 +243,12 @@ def _check_approvals(decision: Decision, policy: Policy, approvals: list[dict] |
     if approvals is None:
         decision.blocks.append(f"no release approvals were supplied; the policy requires {policy.min_approvals} "
                                f"in environment(s) {names} (pass --approvals)")
+        return
+    problem = _approvals_shape_problem(approvals)
+    if problem:
+        decision.blocks.append(f"--approvals {problem}: expected the JSON of GitHub's workflow run approvals API "
+                               "(a list of approvals), or for Jenkins the publishing build's JSON; no approval "
+                               "was counted")
         return
     excluded = {a.lower() for a in actors if a} if policy.approver_not_actor else set()
     reviewers = set()
