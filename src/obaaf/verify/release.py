@@ -110,6 +110,9 @@ def from_dsse_files(paths: list[Path], keys: list[dsse.PublicKey]) -> tuple[list
 
 
 # ------------------------------------------------------------------ decision
+DECISION_FORMAT = "obaaf-release-decision/v0.2"
+
+
 @dataclass
 class Decision:
     blocks: list[str] = field(default_factory=list)
@@ -117,23 +120,33 @@ class Decision:
     artifacts: list[dict] = field(default_factory=list)
     agent_commits: list[dict] = field(default_factory=list)
     approvals: list[str] = field(default_factory=list)
-    pre_approval_minimum: int | None = None
+    # A pre-approval run (--pre-approval) skips the approvals, and for Jenkins the tie of the publishing
+    # build to the tag build, so it never decides that the upload may proceed (#394).
+    pre_approval: bool = False
+    approvals_required: int = 0
 
     @property
     def ok(self) -> bool:
+        """Nothing this run checked blocks (the exit status is 0)."""
         return not self.blocks
 
+    @property
+    def allowed(self) -> bool:
+        """The upload may proceed: a full verification found nothing that blocks."""
+        return self.ok and not self.pre_approval
+
     def to_dict(self) -> dict:
-        return {"format": "obaaf-release-decision/v0.1", "allowed": self.ok, "blocks": self.blocks,
-                "warnings": self.warnings, "artifacts": self.artifacts, "agentCommits": self.agent_commits,
-                "approvals": self.approvals}
+        return {"format": DECISION_FORMAT, "allowed": self.allowed, "checksPassed": self.ok,
+                "preApproval": self.pre_approval, "approvalsRequired": self.approvals_required,
+                "blocks": self.blocks, "warnings": self.warnings, "artifacts": self.artifacts,
+                "agentCommits": self.agent_commits, "approvals": self.approvals}
 
     def to_text(self) -> str:
         if not self.ok:
             heading = "Release verification: BLOCKED, do not upload"
-        elif self.pre_approval_minimum is None:
+        elif not self.pre_approval:
             heading = "Release verification: PASSED, upload may proceed"
-        elif self.pre_approval_minimum > 0:
+        elif self.approvals_required > 0:
             heading = "Pre-approval checks: PASSED, release approval is still required"
         else:
             heading = "Pre-approval checks: PASSED, full verification is still required"
@@ -693,7 +706,7 @@ def verify_release(policy: Policy, artifacts: list[Path], *, gh: GhRunner | None
 
     `approvals` is GitHub's run approvals list, or a Jenkins build's JSON; `release_run` is the
     JSON of the Jenkins build that produced the artifacts."""
-    decision = Decision(pre_approval_minimum=policy.min_approvals if pre_approval else None)
+    decision = Decision(pre_approval=bool(pre_approval), approvals_required=policy.min_approvals)
     if release_run is not None and not is_jenkins_run(release_run):
         decision.blocks.append("--release-run is not a Jenkins build's JSON (expected an 'actions' list)")
         release_run = None
