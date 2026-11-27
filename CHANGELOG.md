@@ -4,6 +4,15 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### An `env` written as one expression, for a local action's steps
+
+Slice 2d.19e, from #382; decision D-145. D-144 made `${{ env.AGENT }} -p review` under `env: ${{ fromJSON(vars.E) }}` an error of the file in a workflow's own step. In a local composite action's step it was not: the reader dropped such a scope and read the name as empty, so the job was in no agent lane, with no error.
+
+- **Now a local action's steps are read as a workflow's own step is**, under the workflow's, the job's, the using step's or an action step's own `env` written as one expression, through further local actions. Names are compared as the job's runner compares them.
+- **A value handed in through `with:` or an input's `default` that reads `env`** is worked out where the action is given it, with the caller's `env`, and read wherever it stands in the action. One that holds such a value after `;`, `&&`, `|`, a backtick or `$(` is read as a command.
+- **Can fail a check that passed.** A known false error: an input run as the command line that holds a value from such a scope in an argument's place (`npm test -- --shard=${{ env.SHARD }}`). Write the `env` out as a mapping.
+- **Not changed:** without such a scope the reader is as before; OBAAF-GHA-026 in a local action's steps; `$T`. On this repository and on the first adopter the reports are byte-identical with `flagship` `ccbe0b8`.
+
 ### An `env` written as one expression, in the lanes
 
 Slice 2d.19d, from #382; decision D-144. A workflow's, a job's or a step's `env` may be written as one expression (`env: ${{ fromJSON(vars.E) }}`, `env: ${{ matrix.env }}`), whose names the file does not show. Under such a scope, `run: ${{ env.AGENT }} -p review` put the job in no agent lane, with no error and no finding.

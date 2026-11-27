@@ -3299,3 +3299,26 @@ Slice 2d.19d (#382, part (a) of what F-418 left in 2d.19; D-144). One Opus 5.5 s
 - A PowerShell or cmd command continued over more than 32 lines, with the keyword past the 32nd.
 - **Known false errors:** quoted brackets and separators, a heredoc line, `command -v ${{ env.TOOL }}`, and any word from such a scope followed by an agent's keyword.
 
+
+## 2d.19e: an `env` written as one expression, for a local action's steps
+
+Slice 2d.19e (#382, item (b) of what F-421 left in 2d.19, for the lanes; D-145). One Opus 5.5 sub-agent that wrote none of it reviewed it in five passes and two short checks. Each probe is a git repository read by the head and by the base (`flagship` `ccbe0b8`), and where it fits by the same lines written as a workflow's own step (a sweep of 184 run lines) and on 11 `runs-on` forms × 3 places. About 230 repositories in all, and 15 to 30 cost runs.
+
+**First pass (aa88331): 7 ways past under a scope, 2 with a note only, 1 regression and new notes without a scope, cost.**
+- **Ways past.** A `with:` value reading `env` handed from an action step to a further action (handed on as empty); a workflow's `with:` and an input's `default` that read `env` (the value reached the command as an expression read as known); `format()` whose first argument held the scope's value behind sixteen combinations.
+- **Without a scope.** The first version widened the reader (every value for `toJSON(env)` and `env[inputs.k]`; a name's own value beside the last that folds to it). That multiplied whole texts past what the reader reads (an agent script lost with OBAAF-GHA-005 and 020), added notes, gave a false agent lane through `hashFiles(env.AGENT)`, and cost 23 times the base on one file.
+- **False errors.** On Windows a name in another letter case did not settle; `hashFiles(env.F)`.
+
+**Fixed (5dd2044):** no widening without a scope; names compared by the runner; `hashFiles` gives a hash; `format()` combines the scope's value first; a deep expression that reads `env` is an error; handed inputs keep the scope's value; the lines with inputs put in read with the caller's `env`.
+
+**Second pass (5dd2044): 3 ways past, 1 false error, 1 cost change without a scope.** A residual on the second level read with an `env` that settled it; a handed value read through the next step's `env`; a text left as written past the reader's bound read with the caller's `env` (an error where the base gives a note); the runner's kind in every cache key (twelve readings for six, past the check's units). **Fixed (47aa041).**
+
+**Third pass (47aa041): 4 ways past**, all by telling a handed value apart by its text (the action writing the same expression hid it) or the `env` handed on losing the scope's value. **Fixed by class (52c4738):** an input is worked out where the action is given it, with the caller's `env`; the second check and its skip set are gone; the `env` handed on keeps the scope's value.
+
+**Fourth pass (52c4738): no way past; 1 false error, 1 cost.** An input run as a command line holding a scope's value in an argument's place was an error; 40 aliases of one big unread input took 89.7 s against 19.5 s. A reading of where in the value the scope's text stands was built (7829c6d), and only read inputs are worked out, each once.
+
+**Fifth pass (7829c6d): 2 ways past, cost.** A value (`$`) beside the action's own `{{ '` opened an expression that swallowed the marker; passes paired by order never built `echo X; Y --yes`; the built text was unbounded (16.9 s against 2.5 s). **Taken back (7e4ace4):** the expression is read as giving the scope's value whole, as in a workflow's own step; the fourth pass's case is a stated false error.
+
+**Sixth check (7e4ace4): 1 way past**, a handed command line with the scope's value after `;` put after `echo`. **Fixed (a0ffe97)**, then narrowed by the last check (979d413): the text before the last such value, `;`, `&&`, `|`, a backtick, `$(` (a newline, `&` and brackets gave false errors on `${{ github.head_ref || env.REF }}`, URLs and JSON). Stated: a newline, a single `&`, `<(`/`>(`.
+
+**What held.** The F-421 case in every scope; letter case (`ENV.`, `Env[...]`); `join`, `bash -c`; the action step's own `env` as `null`, `{}`, a list, a number, a string; anchors and aliases; the reading cache with and without a scope, by runner kind, through cycles and depth cuts; no crash; the sentinel never in any output (text, JSON, SARIF, `--lanes`); without a scope byte-identical with the base on 32 probes in five modes. Costs under a scope at parity or within 1.4× (13.3 s against 9.4 s for 50 steps of 300 handed lines).
