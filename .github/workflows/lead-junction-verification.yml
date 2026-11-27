@@ -1,0 +1,44 @@
+name: Verify patch export on the combined adoption drafts
+on:
+  push:
+    branches: [lead/validate-junction-408-57f0cfd]
+permissions:
+  contents: read
+jobs:
+  native-windows:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 2d06925edeeea512ca249f7b832c7c385860a019
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Install the checker and run the Windows regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse 'HEAD^{tree}') -ne 'fe6f357dbb995df1ff7b6309c26151bf761146a8') { throw 'Unexpected source tree' }
+          $scratch = Join-Path $env:RUNNER_TEMP 'obaaf-junction'
+          New-Item -Type Directory -Path $scratch | Out-Null
+          $env:TMPDIR = $scratch
+          $env:TEMP = $scratch
+          $env:TMP = $scratch
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+          if ($LASTEXITCODE -ne 0) { throw 'Installation failed' }
+          @'
+          import os, sys, tempfile, unittest
+          from pathlib import Path
+
+          root = Path(tempfile.gettempdir()).resolve()
+          assert root == Path(os.environ['TMPDIR']).resolve()
+          assert not any((p / '.git').exists() for p in (root, *root.parents))
+          assert os.name == 'nt'
+          sys.path.insert(0, 'tests')
+          case = 'test_fix_patch.FixPatchTest.test_windows_refuses_reparse_before_creating_patch'
+          result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromName(case))
+          sys.exit(0 if result.testsRun == 1 and result.wasSuccessful() and not result.skipped else 1)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Native junction verification failed or skipped' }
