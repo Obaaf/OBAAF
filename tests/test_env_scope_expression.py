@@ -101,6 +101,27 @@ class WhereACommandsProgramGoesTest(unittest.TestCase):
             with self.subTest(run=run):
                 self.assertEqual(len(scope_errors(wf(run, job=JOB))), 1, problems(wf(run, job=JOB)))
 
+    def test_where_the_agents_pattern_would_see_its_name(self):
+        # From the second review: places the lanes see a name written out in, through the catalog's own pattern for
+        # the agent's command line (`claude ... -p`), wherever the line holds it.
+        for run in ("if true; then ${{ env.AGENT }} -p x; fi", "for i in 1; do ${{ env.AGENT }} -p x; done",
+                    "if ${{ env.AGENT }} -p x; then :; fi", "while ${{ env.AGENT }} -p x; do break; done",
+                    "! ${{ env.AGENT }} -p x", "${{ env.PRE }} ${{ env.AGENT }} -p x", "${{ '' }} ${{ env.AGENT }} -p x",
+                    "${{ github.event.inputs.sudo }} ${{ env.AGENT }} -p x", "xvfb-run ${{ env.AGENT }} -p x",
+                    "strace -f ${{ env.AGENT }} -p x", "flock /tmp/l ${{ env.AGENT }} -p x",
+                    "find . -exec ${{ env.AGENT }} -p x {} \\;", "su runner -c \"${{ env.AGENT }} -p x\"",
+                    "uv run ${{ env.AGENT }} -p x", "poetry run ${{ env.AGENT }} -p x", "watch -n1 ${{ env.AGENT }} -p x",
+                    "systemd-run --user --wait ${{ env.AGENT }} -p x", "exec -a name ${{ env.AGENT }} -p x",
+                    "docker exec c ${{ env.AGENT }} -p x", "bash --noprofile --norc -eo pipefail -c \"${{ env.AGENT }} -p x\"",
+                    "pwsh -c \"${{ env.AGENT }} -p x\"", "cmd /c ${{ env.AGENT }} -p x", ">log ${{ env.AGENT }} -p x",
+                    "2>/dev/null ${{ env.AGENT }} -p x", "${{ env.AGENT }} exec 'fix it'", "${{ env.AGENT }} run 'fix it'",
+                    "echo ${{ env.AGENT }} -p x"):
+            with self.subTest(run=run):
+                self.assertEqual(len(scope_errors(wf(run, job=JOB))), 1, problems(wf(run, job=JOB)))
+                # The control: the name written out puts the job in the agent lane.
+                self.assertEqual(lane(wf(run.replace("${{ env.AGENT }}", "claude").replace(" exec ", " -p ")
+                                         .replace(" run ", " -p "))), "agent")
+
     def test_powershell_and_cmd(self):
         for run, shell in (("& ${{ env.AGENT }} -p x", "pwsh"), ("iex \"${{ env.AGENT }} -p x\"", "pwsh"),
                            ("Start-Process ${{ env.AGENT }}", "pwsh"), ("call ${{ env.AGENT }} -p x", "cmd")):
@@ -113,7 +134,10 @@ class WhereACommandsProgramGoesTest(unittest.TestCase):
                     "cp a ${{ env.CCACHE_DIR }}/ccache.conf", "${{ env.DIR }}/bin/tool --x",
                     "call ${{ env.MX_PATH }}\\mx.cmd -p substratevm", "echo '${{ toJSON(env) }}'",
                     "make ${{ env.DEBUG && 'V=1' || '' }}", "du -sh ${{ env.BASEDIR }}/target_ws",
-                    "./build.sh ${{ env.NAME }} ${{ env.VERSION }}"):
+                    "./build.sh ${{ env.NAME }} ${{ env.VERSION }}",
+                    # From the second review: an argument on a line a backslash continues.
+                    "docker build \\\n  ${{ env.ARGS }} \\\n  -t img .",
+                    "cmake -S . \\\n  -DCMAKE_C_COMPILER=${{ env.CC }} \\\n  -B build"):
             with self.subTest(run=run):
                 self.assertEqual(problems(wf(run, job=JOB)), [])
                 self.assertEqual(problems(wf(run, job="${{ matrix.env }}",

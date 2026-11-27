@@ -2034,20 +2034,74 @@ ENV_EXPRESSIONS_WORKFLOW_UNREAD = ("its command lines hold `${{ }}` expressions 
 
 # Flagship slice 2d.19d: what stands for an expression whose text may hold what a scope written as one expression
 # gives, when `_scope_at_program` reads its line, and the words read past before a command's program beside
-# `command_segments`'s wrappers (`eval`, cmd's `call` and `start`, PowerShell's `iex` and `Start-Process`).
+# `command_segments`'s wrappers: `eval`, cmd's `call` and `start`, PowerShell's `iex` and `Start-Process`, and the
+# shell's own words before a command (`then`, `do`, `!`; found by the second review of 2d.19d).
 _SCOPE_PROBE = "\ue000scope\ue001"
-_RUNS_NEXT = frozenset({"eval", "call", "start", "iex", "invoke-expression", "start-process"})
+_RUNS_NEXT = frozenset({"eval", "call", "start", "iex", "invoke-expression", "start-process", "then", "do", "else",
+                        "elif", "if", "while", "until", "!", "time"})
+_REDIRECTION = re.compile(r"\d*(?:[<>]{1,2}|&>{1,2}|>&|<&)(.*)")
+_SCOPE_PATTERNS: list = []
+
+
+def _scope_patterns():
+    """The catalog's patterns for an agent's command line with the program's name in them made the probe, for the
+    tools whose pattern needs more than the name and a word after it (`claude ... -p`, `codex ... exec`), compiled as
+    one (flagship slice 2d.19d, from its second review): such a pattern is searched for anywhere in a line, as the
+    lanes search for it, so a value of a scope written as one expression is seen wherever the name written out
+    would be. Cline's and Aider's patterns need only the name and a space, so for them `_scope_at_program` reads
+    only where a command's program goes."""
+    if not _SCOPE_PATTERNS:
+        parts = []
+        for tool in load_catalog().detection.get("agent_tools", []) or []:
+            for program in tool.get("programs") or []:
+                for pattern in tool.get("commands") or []:
+                    if not isinstance(pattern, str) or pattern.startswith("@") or pattern.count(program) != 1:
+                        continue
+                    if re.search(pattern, f"{program} zzz", re.M) is not None:
+                        continue
+                    parts.append("(?:" + pattern.replace(program, re.escape(_SCOPE_PROBE)) + ")")
+        _SCOPE_PATTERNS.append(re.compile("|".join(parts), re.M) if parts else None)
+    return _SCOPE_PATTERNS[0]
+
+
+def _scope_pattern_matches(line: str) -> bool:
+    """Whether a reading of `line` matches `_scope_patterns` (flagship slice 2d.19d). Each pattern ends its match
+    at a line break, `;`, `&` or `|`, so each piece between them is tried once, at the first probe that stands as a
+    word of its own (what is before it a space, a bracket, a slash or a quote, a space after it): a later one's
+    match would lie inside that one's. Linear in the line, however many probes it holds."""
+    patterns = _scope_patterns()
+    if patterns is None:
+        return False
+    for reading in _readings(line):
+        for piece in re.split(r"[\n;&|]", reading):
+            at = piece.find(_SCOPE_PROBE)
+            while at != -1:
+                before = piece[at - 1] if at else ""
+                after = piece[at + len(_SCOPE_PROBE):at + len(_SCOPE_PROBE) + 2]
+                if (not before or before.isspace() or before in "(/\"'`") and re.match(r"[\"'`]?\s", after):
+                    if patterns.match(piece, max(0, at - 1)) is not None:
+                        return True
+                    break
+                at = piece.find(_SCOPE_PROBE, at + 1)
+    return False
 
 
 def _scope_at_program(text: str, scoped: tuple) -> tuple | None:
     """The first of `scoped` ((start, end) of `${{ }}` expressions in `text` whose text may hold what a scope written
-    as one expression gives, `env_expr.Plan.scoped`) that stands where a command's program goes, as the lanes read
-    commands (flagship slice 2d.19d): in a line of `text` (with the lines a backslash continues), with each such
-    expression read as one word and every other expression as a plain word, after quotes are taken out, split where
-    a shell starts a command (`command_segments`: `;`, `&&`, `|`, a substitution, a group, a shell's `-c`, after
-    assignments and wrappers such as `sudo`, `env` or `npx`) and past `_RUNS_NEXT`, in the first word's last part
-    after `/` or `\\` (`${{ env.DIR }}/bin/tool` runs `tool`; `${{ env.P }}claude` may run anything). None where
-    none does. Each line is read once, so the work is linear in the text."""
+    as one expression gives, `env_expr.Plan.scoped`) that may name an agent the lanes would see written out (flagship
+    slice 2d.19d), in a line of `text` (with the lines a backslash continues), with each such expression read as one
+    word and every other expression as a plain word:
+
+    - where an agent's name in its place would match the catalog's pattern for its command line, searched for in the
+      line's readings as the lanes search (`_scope_patterns`: `if x; then ${{ env.A }} -p y; fi`, `xvfb-run
+      ${{ env.A }} -p y`); or
+    - where a command's program goes, as the lanes read commands: after quotes are taken out, with the lines a
+      backslash continues joined, split where a shell starts a command (`command_segments`: `;`, `&&`, `|`, a
+      substitution, a group, a shell's `-c`, after assignments and wrappers such as `sudo`, `env` or `npx`), past
+      `_RUNS_NEXT` and a redirection, in the first word's last part after `/` or `\\` (`${{ env.DIR }}/bin/tool`
+      runs `tool`; `${{ env.P }}claude` may run anything).
+
+    None where none does. Each line is read once, so the work is linear in the text."""
     try:
         every = [(start, end) for start, end, _body in env_expr.spans(text)]
     except expr_mod.TooComplex:
@@ -2074,13 +2128,23 @@ def _scope_at_program(text: str, scoped: tuple) -> tuple | None:
         if first is None:
             continue
         line = "".join(pieces)
-        for reading in upload_readings(line):
+        if _scope_pattern_matches(line):
+            return first
+        # The lines a backslash continues are read joined only, so a continued line's first word, an argument, is
+        # not taken for a program (found by the second review).
+        for reading in upload_readings(line)[1:]:
             for segment in command_segments(reading):
                 words = segment.split()
                 i = 0
-                while i < len(words) - 1 and words[i].lower() in _RUNS_NEXT:
-                    i += 1
-                if words and _SCOPE_PROBE in re.split(r"[/\\]", words[i])[-1]:
+                while i < len(words) - 1:
+                    redirect = _REDIRECTION.fullmatch(words[i])
+                    if words[i].lower() in _RUNS_NEXT:
+                        i += 1
+                    elif redirect is not None:
+                        i += 1 if redirect.group(1) else 2
+                    else:
+                        break
+                if i < len(words) and _SCOPE_PROBE in re.split(r"[/\\]", words[i])[-1]:
                     return first
     return None
 
