@@ -1092,8 +1092,10 @@ def read_code(text: str, family: str, ctx: af._Context) -> None:
         read_cmd(text, ctx)
         return
     code = _Code(text, fam, ctx)
-    if code.problem:
-        # Code the tokenizer cannot split (a string that does not end) is "cannot tell", as in bash.
+    if code.problem and (ctx.mentioned or af.names(text, ctx.programs, ctx.packages)):
+        # Code the tokenizer cannot split (a string that does not end) is "cannot tell", as in bash, where it
+        # names the tool: not where the name's letters are only inside another word (`print('acne')`; flagship
+        # slice 2d.23, #388).
         code.cannot_tell(f"{code.problem}: {text[:80]}")
     # Only code that names the tool in one of its strings or names is read further.
     if not any(t.kind in ("str", "name") and af.mentions(t.text, ctx.programs, ctx.packages) for t in code.toks):
@@ -2261,29 +2263,54 @@ def read_shell_lines(text: str, ctx: af._Context, family: str) -> None:
     `-FilePath` or first word, and as a name given it (`$exe = 'claude'`, `set C=claude`); a command the
     checker cannot name (`& $exe`, `%C%`) in a script that names the tool is "cannot tell"."""
     aliases: set = set()
+    # A name given a value that holds the tool's letters anywhere (`$t = 'xcodex'.Substring(1)`,
+    # `set X=!CODEXBIN!`): a command the checker cannot name that uses it may be the program (flagship slice
+    # 2d.23, from its second review).
+    maybe: set = set()
     lines = _logical_lines(text, family)
     for line in lines:
         m = re.match(r"\s*\$([\w:]+)\s*=\s*['\"‘’“”]?([^'\"\s‘’“”]+)", line) \
             if family == "pwsh" else re.match(r'\s*set\s+"?(\w+)=([^"\s&]+)', line, re.I)
         if m and af._base(m.group(2)) in ctx.programs:
             aliases.add(m.group(1).lower())
-    mentioned = ctx.mentioned or af.mentions(text, ctx.programs, ctx.packages)
+        elif m and af.appears(m.group(2), ctx.programs, ctx.packages):
+            maybe.add(m.group(1).lower())
+        # A loop's variable over values that hold the letters (`for /f %%i in ('where codexcli') do %%i ...`,
+        # `foreach ($p in (Get-Command codexcli)) { & $p ... }`).
+        # Each is anchored at `for` and reads no bracket inside the list, so it stays linear (the third review: a
+        # lazy `.*?` before the variable took cubic time on a line of many `for ... in ( )`).
+        loop = re.search(r"\bforeach\s*\(\s*\$(\w+)\s+in\s+(.*)", line, re.I) if family == "pwsh" else re.search(
+            r"\bfor(?:\s+/\w+(?:\s+\"[^\"\n]*\")?)*\s+%%?(\w)\s+in\s*\(([^()]*)\)\s*do\b", line, re.I)
+        if loop and af.appears(loop.group(2), ctx.programs, ctx.packages):
+            maybe.add(loop.group(1).lower())
+    # Only a script that names the tool (`names`) makes a command the checker cannot name "cannot tell" (flagship
+    # slice 2d.23, #388): the caller's `ctx.mentioned` was `True` wherever the name's letters stood in any word,
+    # so `'acne'` and a bracket left open at a line's end (`$x = (`) were "cannot tell" for Continue's `cn`.
+    mentioned = ctx.mentioned or af.names(text, ctx.programs, ctx.packages)
     for line in lines:
         words = _ps_words(line, family)
         segment: list = []
         for w in words + [(";", "op")]:
             if w[1] == "op":
-                _shell_command(segment, ctx, family, aliases, mentioned)
+                _shell_command(segment, ctx, family, aliases, mentioned, maybe)
                 segment = []
             elif family == "cmd" and w[1] == "plain" and w[0].lower() in ("do", "else"):
                 if segment:
-                    _shell_command(segment, ctx, family, aliases, mentioned)    # `for ... do claude %%a`
+                    _shell_command(segment, ctx, family, aliases, mentioned, maybe)    # `for ... do claude %%a`
                 segment = []
             else:
                 segment.append(w)
 
 
-def _shell_command(words: list, ctx: af._Context, family: str, aliases: set, mentioned: bool) -> None:
+def _used_names(raw: str, ps: bool) -> set:
+    """The variables a PowerShell or cmd word puts in (`$t`, `${env:X}`, `%C:~1%`, `!X!`), in lower case."""
+    found = re.findall(r"\$\{?([\w:]+)", raw) if ps else (
+        re.findall(r"[%!](\w+)(?::[^%!]*)?[%!]", raw) + re.findall(r"%%?~?\w*?(\w)(?![\w%])", raw))
+    return {name.lower() for name in found}
+
+
+def _shell_command(words: list, ctx: af._Context, family: str, aliases: set, mentioned: bool,
+                   maybe: set = frozenset()) -> None:
     ps = family == "pwsh"
     i = 0
     if ps and len(words) >= 2 and words[0][0].startswith("$") and words[1][0] in ("=", "+=") and words[0][1] == "plain":
@@ -2323,12 +2350,14 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: set, men
                 if len(rest) == 1 and rest[0][1] in ("double", "single"):
                     read_shell_lines(rest[0][0], ctx, "cmd")
                 else:
-                    _shell_command(rest, ctx, "cmd", aliases, mentioned)
+                    _shell_command(rest, ctx, "cmd", aliases, mentioned, maybe)
             finally:
                 ctx.depth -= 1
             return
         elif low in ("bash", "sh") and i + 2 < len(words) and words[i + 1][0] == "-c":
-            probe = af._Context(list(ctx.programs), ctx.packages, ctx.flags, {}, True, set(), ctx.reading,
+            # The script's own `mentioned`, not `True` (2d.23): `bash -c '$X --y'` is "cannot tell" only in a
+            # script that names the tool; bash's own readers still test a command word and `IFS=` for the letters.
+            probe = af._Context(list(ctx.programs), ctx.packages, ctx.flags, {}, mentioned, set(), ctx.reading,
                                 depth=ctx.depth + 1, loose=True)
             af._read_text(words[i + 2][0], probe)
             return
@@ -2350,10 +2379,17 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: set, men
         program = program or (var.group(1) or var.group(2)).lower() in aliases
     rest = words[i + 1:]
     if not program:
+        # A command the checker cannot name is "cannot tell" in a script that names the tool, where its own word
+        # holds the tool's letters, as the bash reader has it (`& $claudeExe`, `%CLAUDEEXE%`,
+        # `& ('xclaude'.Substring(1))`), or where it uses a name given such a value (`maybe`; flagship slice 2d.23,
+        # from its reviews).
+        held = mentioned or af.appears(raw, ctx.programs, ctx.packages) or bool(_used_names(raw, ps) & maybe)
         if name in ("start-process", "saps", "start") and ps:
-            _start_process(rest, ctx, mentioned)
-        elif mentioned and (kind == "group" or (ps and raw.startswith("$") and i > 0 and words[i - 1][0] in ("&", "."))
-                            or (not ps and _CMD_VARIABLE_RE.search(raw) and kind == "plain")):
+            _start_process(rest, ctx, held or af.appears(" ".join(w[0] for w in rest), ctx.programs, ctx.packages)
+                           or any(_used_names(w[0], ps) & maybe for w in rest))
+        elif held and (
+                kind == "group" or (ps and raw.startswith("$") and i > 0 and words[i - 1][0] in ("&", "."))
+                or (not ps and _CMD_VARIABLE_RE.search(raw) and kind == "plain")):
             for flag in ctx.flags:
                 if flag["id"] not in ctx.reading.hits:
                     ctx.reading.cannot_tell(flag, af._fact_text(" ".join(w[0] for w in words)))
