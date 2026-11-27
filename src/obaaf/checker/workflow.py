@@ -2032,6 +2032,58 @@ ENV_EXPRESSIONS_WORKFLOW_UNREAD = ("its command lines hold `${{ }}` expressions 
                                    "take the text the checker makes of its workflow's command lines past what it "
                                    f"reads (more than {ENV_PUT_IN_WORKFLOW:,} characters)")
 
+# Flagship slice 2d.19d: what stands for an expression whose text may hold what a scope written as one expression
+# gives, when `_scope_at_program` reads its line, and the words read past before a command's program beside
+# `command_segments`'s wrappers (`eval`, cmd's `call` and `start`, PowerShell's `iex` and `Start-Process`).
+_SCOPE_PROBE = "\ue000scope\ue001"
+_RUNS_NEXT = frozenset({"eval", "call", "start", "iex", "invoke-expression", "start-process"})
+
+
+def _scope_at_program(text: str, scoped: tuple) -> tuple | None:
+    """The first of `scoped` ((start, end) of `${{ }}` expressions in `text` whose text may hold what a scope written
+    as one expression gives, `env_expr.Plan.scoped`) that stands where a command's program goes, as the lanes read
+    commands (flagship slice 2d.19d): in a line of `text` (with the lines a backslash continues), with each such
+    expression read as one word and every other expression as a plain word, after quotes are taken out, split where
+    a shell starts a command (`command_segments`: `;`, `&&`, `|`, a substitution, a group, a shell's `-c`, after
+    assignments and wrappers such as `sudo`, `env` or `npx`) and past `_RUNS_NEXT`, in the first word's last part
+    after `/` or `\\` (`${{ env.DIR }}/bin/tool` runs `tool`; `${{ env.P }}claude` may run anything). None where
+    none does. Each line is read once, so the work is linear in the text."""
+    try:
+        every = [(start, end) for start, end, _body in env_expr.spans(text)]
+    except expr_mod.TooComplex:
+        return scoped[0] if scoped else None
+    wanted = set(scoped)
+    w = 0
+    for u_start, u_end in env_expr._units(text, list(scoped)):
+        pieces: list = []
+        at = u_start
+        first = None
+        while w < len(every) and every[w][0] < u_end:
+            start, end = every[w]
+            w += 1
+            if end <= u_start:
+                continue
+            pieces.append(text[at:start])
+            if (start, end) in wanted:
+                pieces.append(_SCOPE_PROBE)
+                first = first or (start, end)
+            else:
+                pieces.append("x")
+            at = end
+        pieces.append(text[at:u_end])
+        if first is None:
+            continue
+        line = "".join(pieces)
+        for reading in upload_readings(line):
+            for segment in command_segments(reading):
+                words = segment.split()
+                i = 0
+                while i < len(words) - 1 and words[i].lower() in _RUNS_NEXT:
+                    i += 1
+                if words and _SCOPE_PROBE in re.split(r"[/\\]", words[i])[-1]:
+                    return first
+    return None
+
 
 class PutInLedger:
     """What one reader's put-ins may still make for a whole workflow (flagship slice 2d.17). `settle(key,
@@ -2324,15 +2376,9 @@ class Step:
 
     def _env_scopes(self) -> list:
         """The `env` mappings the step's expressions see, outermost first: its workflow's, its job's, its own
-        (flagship slice 2d.19). A scope written as one expression is kept as written, except that a job's or a
-        step's `env: ${{ matrix.KEY }}` is read through the job's matrix where it lists every value
-        (`Job.env_scope`, flagship slice 2d.19d); `env_expr.Env` reads any other as a scope it does not read."""
-        scopes = [holder.get("env") if isinstance(holder, dict) else None for holder in reversed(self.inherited)] + [
+        (flagship slice 2d.19). A scope written as one expression is kept as written."""
+        return [holder.get("env") if isinstance(holder, dict) else None for holder in reversed(self.inherited)] + [
             self.raw.get("env")]
-        if self.job is not None and len(scopes) == 3:
-            scopes[1] = self.job.env_scope(scopes[1])
-            scopes[2] = self.job.env_scope(scopes[2])
-        return scopes
 
     def _env_expressions(self, own: str) -> tuple:
         """(text, size, readings, why) for the `${{ }}` expressions in `own` that read `env` (flagship slice
@@ -2347,11 +2393,10 @@ class Step:
         names = env_expr.names_read(own)
         entries = tuple(tuple((name, value) for name, value in scope.items() if env_expr.relevant(name, names, case))
                         if isinstance(scope, dict) else scope for scope in scopes)
-        # A scope read through the matrix (2d.19d) is named by its id, which `Job.env_scope` keeps for its content.
         digest = hashlib.blake2b(repr(tuple(
             (id(scope), tuple((repr(name), id(value)) for name, value in entry) if isinstance(scope, dict) else
-             ("alternatives", id(scope)) if isinstance(scope, env_expr.Alternatives) else repr(scope))
-            for scope, entry in zip(scopes, entries))).encode("utf-8", "surrogatepass"), digest_size=20).digest()
+             repr(scope)) for scope, entry in zip(scopes, entries))).encode("utf-8", "surrogatepass"),
+            digest_size=20).digest()
         key = ("env-expressions", own, case, digest)
         put_ins = self.put_ins
         made = put_ins.lanes.made.get(key) if put_ins is not None else None
@@ -2359,9 +2404,21 @@ class Step:
             try:
                 # The room left on the workflow's ledger is checked as the plan is made, so a step past it costs
                 # little and keeps only its refusal (found by the second review).
-                plan = env_expr.plan(own, env_expr.Env(scopes, case),
-                                     room=put_ins.copies.room if put_ins is not None else None)
+                env = env_expr.Env(scopes, case)
+                plan = env_expr.plan(own, env, room=put_ins.copies.room if put_ins is not None else None)
                 why = None
+                # What a scope written as one expression gives, where a command's program goes, may name an agent
+                # the checker cannot see (flagship slice 2d.19d): the step is an error of its file. Elsewhere in a
+                # line it is read as a value of another context is, as written.
+                at = _scope_at_program(own, plan.scoped) if plan.scoped else None
+                if at is not None:
+                    why = (f"its command lines hold an expression that reads `env` which the checker does not work "
+                           f"out (one ('{env_expr._short(own[at[0]:at[1]])}'), where a command's program goes, reads "
+                           f"from `env` what {env.where} `env`, written as one expression the checker does not "
+                           "read, may set)")
+                    if put_ins is not None:
+                        put_ins.copies.room = max(0, put_ins.copies.room - plan.copies)
+                    plan = None
             except env_expr.Unread as error:
                 plan = None
                 why = (f"its command lines hold an expression that reads `env` which the checker does not work out "
@@ -2378,7 +2435,6 @@ class Step:
             # nothing (read again with other values, it is refused or read, never read wrongly).
             kept = tuple(value for entry in entries if isinstance(entry, tuple) for _name, value in entry) \
                 if plan is not None else ()
-            kept += tuple(scope for scope in scopes if isinstance(scope, env_expr.Alternatives))
             made = [plan, None, why, kept]
             if put_ins is not None:
                 put_ins.lanes.made[key] = made
@@ -2510,9 +2566,6 @@ class Job:
     # lane a call gives it later carries the same note as a lane its own steps give it.
     trusted_declared: str | None = field(default=None, repr=False, compare=False)
     _secret_names: frozenset | None = field(default=None, repr=False, compare=False)
-    # Flagship slice 2d.19d: each `env` of the job or its steps written as `${{ matrix.KEY }}` as the matrix reads
-    # it (`env_scope`), by the text, made once so that its id names its content.
-    _env_scopes_read: dict = field(default_factory=dict, repr=False, compare=False)
 
     def in_lane(self, lane: str) -> bool:
         return lane in self.lanes if self.lanes else self.lane == lane
@@ -2636,69 +2689,6 @@ class Job:
                 else:
                     names += values
         return list(dict.fromkeys(names)), complete
-
-    def env_scope(self, value):
-        """An `env` of the job or one of its steps as its `${{ }}` expressions read it (flagship slice 2d.19d): a
-        mapping or nothing as written; `env: ${{ matrix.KEY }}` as `env_expr.Alternatives`, each mapping the job's
-        matrix gives KEY (`_matrix_mappings`), where it lists them all; anything else as written, which
-        `env_expr.Env` reads as a scope it does not read."""
-        if not isinstance(value, str):
-            return value
-        read = self._env_scopes_read.get(value)
-        if read is None:
-            read = value
-            match = _WHOLE_MATRIX.fullmatch(value)
-            mappings = self._matrix_mappings(match.group(1)) if match else None
-            if mappings is not None:
-                read = env_expr.Alternatives(tuple(mappings))
-            if len(self._env_scopes_read) < 64:
-                self._env_scopes_read[value] = read
-        return read
-
-    def _matrix_mappings(self, name: str) -> list | None:
-        """The mappings a matrix written out in the file gives `name` (flagship slice 2d.19d), from its list and its
-        `include` entries, with an empty one where a combination may have none (`name` not listed, or an `include`
-        entry without it, which may make a combination of its own); None when they cannot all be read as mappings
-        of text names to text, numbers, booleans or null with no expression in them, or there are more than
-        `env_expr.ALTERNATIVES` (the same limits as `_matrix_values` otherwise)."""
-        if self.workflow.has_merge_key:
-            return None
-        strategy = self.raw.get("strategy")
-        matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
-        if not isinstance(matrix, dict):
-            return None
-        include = matrix.get("include", [])
-        if not isinstance(include, list) or not all(isinstance(entry, dict) for entry in include):
-            return None
-        keys = list(matrix) + [key for entry in include for key in entry]
-        if not name.isascii() or any(not isinstance(key, str) or not key.isascii() or expr_mod.OPEN in key
-                                     for key in keys):
-            return None
-        if any(key != name and key.lower() == name.lower() for key in keys):
-            return None
-        listed = matrix.get(name, [])
-        if not isinstance(listed, list):
-            return None
-        out: list = []
-        seen: set = set()
-        for value in list(listed) + [entry[name] for entry in include if name in entry]:
-            if not isinstance(value, dict):
-                return None
-            for key, item in value.items():
-                if not isinstance(key, str) or expr_mod.OPEN in key:
-                    return None
-                if not (item is None or isinstance(item, (str, int, float, bool))):
-                    return None
-                if isinstance(item, str) and expr_mod.OPEN in item:
-                    return None
-            if id(value) not in seen:
-                seen.add(id(value))
-                out.append(value)
-        if not listed or any(name not in entry for entry in include):
-            out.append({})
-        if len(out) > env_expr.ALTERNATIVES:
-            return None
-        return out
 
     def _matrix_values(self, name: str) -> list[str] | None:
         """The text values a matrix written out in the file gives `name`, from its list and its

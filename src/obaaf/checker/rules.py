@@ -2442,8 +2442,8 @@ class WorkflowRules:
                     if word.lower() not in self._ENV_ONLY_HEADS:
                         return False
             scopes = step._env_scopes()
-            # No `env` written as one expression, read through the matrix or not (flagship slice 2d.19d): that a
-            # scope read through the matrix gives one text is not taken as known here.
+            # No `env` written as one expression (flagship slice 2d.19d): since that slice a name a nearer mapping sets
+            # is known to the lanes beside such a scope, but here the rule stays as D-143 wrote it.
             if any(scope is not None and not isinstance(scope, dict) for scope in scopes):
                 return False
             env = env_expr.Env(scopes, env_expr.env_case(step.job))
