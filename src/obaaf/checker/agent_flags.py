@@ -996,15 +996,16 @@ def _read_command(command: Command, ctx: _Context) -> None:
         if w.computed and not re.match(r"[A-Za-z_][A-Za-z0-9_]*\+?=", w.text):
             # What is written of the name decides: `"$(npm prefix -g)/bin/claude"` is the program,
             # `"$GITHUB_WORKSPACE/scripts/post.sh"` is not, and `$C` or `"$(command -v claude)"` may be.
-            # A word that names the tool as a part of its name (`"$CLAUDE_BIN"`) may be too, but not one that holds
-            # its letters in another word (`"$CNT"`, `"$DECLINED"`; flagship slice 2d.23, #388).
+            # The letters anywhere in the word itself decide here, as before flagship slice 2d.23 (#388): a variable
+            # named for the tool (`"$CLAUDEBIN"`) or a name built in it (`$(echo claudeX | tr -d X)`; found by the
+            # slice's review) may be the program.
             literal = _known_part(w.text)
             base = _base(literal) if not literal.endswith("/") else ""
             if base in ctx.programs and not (w.glob or w.brace):
                 _read_program_args(_arguments(words[i + 1:]), ctx)
                 return
             if (not base or w.glob or w.brace or base in ctx.programs) and not ctx.prose and (
-                    ctx.mentioned or names(w.shown, ctx.programs, ctx.packages)):
+                    ctx.mentioned or appears(w.shown, ctx.programs, ctx.packages)):
                 for flag in ctx.flags:
                     ctx.reading.cannot_tell(flag, w.shown)
             continue
@@ -1853,61 +1854,96 @@ def appears(text: str, programs: list, packages: list) -> bool:
 
 @functools.lru_cache(maxsize=512)
 def _name_pattern(program: str, parts: bool) -> re.Pattern:
-    """`program` standing as a name of its own in a text whose quotes are taken out and whose case is folded.
-    Never inside a longer word: not after or before a letter or digit (and, for `mentions`, an `_`), nor after
-    `@` (`@claude` in a comment's prose) or, for `mentions`, a `-`, nor before a `-`. Never one label of a
-    dotted name (flagship slice 2d.23, #388): not after a dot that follows a letter or digit (`example.cn`,
-    `pypi.tuna.tsinghua.edu.cn`) and not before a dot and a letter or digit (`cn.archive.ubuntu.com`,
-    `~/.claude.json`), unless what follows the dot is a suffix Windows runs (`cn.exe`, `claude.cmd`).
-    `parts`: an `_` and a `-` before it count as the name's edge, so a part of a variable's name counts
-    (`$CLAUDE_BIN`, `$env:CN_BIN`, `${CMD:-claude}`); this is `names`."""
-    letter = r"[^\W_]" if parts else r"\w"
-    before = "@" if parts else "@-"
-    return re.compile(rf"(?<!{letter})(?<![{before}])(?<![^\W_]\.)" + re.escape(program)
-                      + rf"(?!{letter}|-)(?!\.(?!(?:exe|cmd|bat|ps1|com)(?![^\W_]))[^\W_])")
+    """`program` standing as a name of its own in a text whose quotes are taken out and whose case is folded
+    (flagship slice 2d.23, #388). `mentions` (`parts` False): not after a letter, a digit, `_`, `@` (`@claude`
+    in a comment's prose) or `-`, and not before a letter, a digit, `_` or `-`, as before the slice. `names`
+    (`parts` True) also takes a part of a variable's name: an `_` after it (`$CLAUDE_BIN`, `$env:CN_BIN`), a
+    `-` before it that does not follow a letter or digit (`${CMD:-claude}`, but not `zh-cn`), and, for a name of
+    more than two letters, a digit or a `-` after it (`$CLAUDE2`, `${claude-bin}`). A name of two letters is a
+    country's domain as well (Continue's `cn`), so for it, in both, the name is never one label of a dotted name:
+    not after a dot that follows a letter or digit (`example.cn`, `pypi.tuna.tsinghua.edu.cn`), and not before a
+    dot and a letter or digit (`cn.archive.ubuntu.com`) unless the suffix is one Windows runs or node runs a
+    script by (`cn.exe`, `cn.cmd`, `cn.mjs`); and, for `names`, no digit or `-` after it (`cn-north-1`, an AWS
+    region). `names` uses this only for a name of five letters or fewer (see `_named`)."""
+    two = len(program) == 2
+    if parts:
+        before = r"(?<![\w@])(?<![^\W_]-)"
+        after = r"(?![^\W\d_])" + (r"(?![\d-])" if two else "")
+    else:
+        before = r"(?<![\w@-])"
+        after = r"(?![\w-])"
+    if two:
+        before += r"(?<![^\W_]\.)"
+        after += r"(?!\.(?!(?:exe|cmd|bat|ps1|com|js|mjs|cjs)(?![^\W_]))[^\W_])"
+    return re.compile(before + re.escape(program) + after)
+
+
+# A `.` that GitHub's expressions or a variable's property read as a separator, not as a part of a dotted name
+# (`${{ inputs.cn }}`, `${{ steps.cn.outputs.bin }}`, `$tools.cn`; found by 2d.23's review).
+_EXPRESSION_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
+_PROPERTY_RE = re.compile(r"\$\{?[\w:]+\}?(?:\.\w+)+")
+# Where a name's case changes (`$claudeBin`, `$cnPath`, `$CLAUDEBin`), for `names`.
+_CASE_EDGE_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
 def _named(text: str, programs: list, packages: list, parts: bool) -> bool:
-    """`mentions` (`parts` False) and `names` (`parts` True). A package with a scope or a folder in its name
-    (`@continuedev/cli`) counts anywhere in the text; one with a plain name is a name like a program's, since
-    such a name is inside other words too (Cline's `cline` in `decline`; flagship slice 2d.23, #388)."""
+    """`mentions` (`parts` False) and `names` (`parts` True). Read with quotes and backslashes taken out, again
+    with a backslash read as a folder's separator (no escape in PowerShell or cmd: `C:\\tools\\cn.exe`), with
+    `$'...'` decoded, and, for `names`, with a space where the case of a name changes. A package with a scope
+    or a folder in its name (`@continuedev/cli`) counts anywhere in these; one with a plain name is a name like
+    a program's, since such a name is inside other words too (Cline's `cline` in `decline`; 2d.23). For `names`, a
+    program's or a plain package's name of six letters or more counts anywhere in them, as `appears` has it:
+    such a name is in no ordinary word, and a name built from pieces glued to others (`'xclaude'.Substring(1)`,
+    cmd's `%C:~1%` after `set C=xclaude`) is then still read as the tool's (found by the slice's review). Only
+    a shorter one (Continue's `cn`, `kilo`, `qwen`, `cline`, `goose`, `codex`), which is in many words, must
+    stand as a name."""
     low = re.sub(r"[\"'\\]", "", text).casefold()
     scoped = [p for p in packages if p.startswith("@") or "/" in p]
-    if any(p in low for p in scoped):
-        return True
     forms = [low]
     if "\\" in text:
-        # A backslash is no escape in PowerShell or cmd, but a folder's separator (`C:\tools\cn.exe`); taking it
-        # out glued the folder's name to the program's (2d.23).
         forms.append(re.sub(r"[\"']", "", text).replace("\\", "/").casefold())
     if "$'" in text:
         decoded = re.sub(r"\$'((?:[^'\\]|\\.)*)'", lambda m: _ansi_c(m.group(1)), text).casefold()
-        decoded = re.sub(r"[\"'\\]", "", decoded)
-        if any(p in decoded for p in scoped):
-            return True
-        forms.append(decoded)
+        forms.append(re.sub(r"[\"'\\]", "", decoded))
+    if any(p in form for p in scoped for form in forms):
+        return True
+    if parts and _CASE_EDGE_RE.search(text):
+        forms.append(re.sub(r"[\"'\\]", "", _CASE_EDGE_RE.sub(" ", text)).casefold())
+    dotted = None
     for program in [*programs, *(p for p in packages if p not in scoped)]:
+        if parts and len(program) >= 6 and any(program in form for form in forms):
+            return True
         pattern = None
         for form in forms:
             if program in form:
                 pattern = pattern or _name_pattern(program, parts)
                 if pattern.search(form):
                     return True
+        if len(program) == 2 and "." in text and "$" in text:
+            if dotted is None:
+                spaced = _PROPERTY_RE.sub(lambda m: m.group(0).replace(".", " "),
+                                          _EXPRESSION_RE.sub(lambda m: m.group(0).replace(".", " "), text))
+                dotted = re.sub(r"[\"'\\]", "", spaced).casefold()
+            if program in dotted and (pattern or _name_pattern(program, parts)).search(dotted):
+                return True
     return False
 
 
 def mentions(text: str, programs: list, packages: list) -> bool:
     """Whether a text names the tool: its program, or a package with a plain name, as a word (see
     `_name_pattern`), or a package with a scope or a folder anywhere, once quotes, backslashes and `$'...'` are
-    read, and once more with a backslash read as a folder's separator."""
+    read (see `_named`)."""
     return _named(text, programs, packages, False)
 
 
 def names(text: str, programs: list, packages: list) -> bool:
-    """Whether a text names the tool as a name of its own or a part of one: as `mentions`, and also where an
-    `_` or, before it, a `-` is its edge (`$CLAUDE_BIN`, `$env:CN_BIN`, `${CMD:-claude}`). It decides the
-    "cannot tell" that `appears`, a test for the letters anywhere, decided before flagship slice 2d.23
-    (#388): code in another language or shell, a command bash cannot name, an alias, a command input."""
+    """Whether a text names the tool as a name of its own or a part of one: as `mentions`, and also as a part
+    of a variable's name (`$CN_BIN`, `$env:CN_BIN`, `${CMD:-cn}`, `$cnPath`; see `_name_pattern`), and a name of
+    six letters or more anywhere (`$CLAUDEBIN`, `'xclaude'`; see `_named`).
+    It decides the "cannot tell" that `appears`, a test for the letters anywhere, decided before flagship slice
+    2d.23 (#388) for a script as a whole: code in another language or shell, a tokenizer's problem, an alias, a
+    command input, `IFS=`. Where the command itself cannot be named, the letters in its own word still decide
+    (`"$CLAUDEBIN"`, `& ('xclaude'.Substring(1))`), as before."""
     return _named(text, programs, packages, True)
 
 

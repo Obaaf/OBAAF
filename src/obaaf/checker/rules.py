@@ -2617,9 +2617,10 @@ class WorkflowRules:
         known = {id(text): agent_flags.known_variables(scopes, text, trust_env) for text, _b in parts}
         mentioned = named_unread or any(agent_flags.mentions(t, programs, packages) for t in named)
         # Whether the step names the tool as a name of its own or a part of one, in a text or with its variables
-        # put in: what makes a bash script's `IFS=` on its own "cannot tell" (flagship slice 2d.23, #388). It was
-        # every step the cheap test above let through, so `echo acne` beside `IFS=,` was "cannot tell" for
-        # Continue (`cn`).
+        # put in (flagship slice 2d.23, #388): what makes a bash script's `IFS=` on its own "cannot tell", and in
+        # another language or shell, what its readers cannot read (`& $env:AGENT ...` with `AGENT: claude` in the
+        # step's `env`). It was every step the cheap test above let through, so `echo acne` beside `IFS=,` was
+        # "cannot tell" for Continue (`cn`), and in PowerShell any text with the letters `cn`.
         named_as_name = mentioned or any(agent_flags.names(t, programs, packages) for t in named) or any(
             put is not None and agent_flags.names(put, programs, packages) for _text, put in cheap)
         reading = agent_flags.Reading()
@@ -2649,7 +2650,8 @@ class WorkflowRules:
                     reading.merge(agent_flags.read_script(text, programs, packages, flags, variables,
                                                           mentioned=agent_flags.mentions(text, programs, packages),
                                                           bash=False, loose=True,
-                                                          language=languages.get(id(text), "")))
+                                                          language=languages.get(id(text), ""),
+                                                          named=named_as_name))
         for other, command_like in others:
             # Another input, an `env` value or a `docker://` command line that runs the program: one whose text
             # starts a command with it, or that names the tool in an input whose name says it is a command (as a

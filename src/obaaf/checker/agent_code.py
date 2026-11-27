@@ -2357,10 +2357,14 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: set, men
         program = program or (var.group(1) or var.group(2)).lower() in aliases
     rest = words[i + 1:]
     if not program:
+        # A command the checker cannot name is "cannot tell" in a script that names the tool, or where its own word
+        # holds the tool's letters, as the bash reader has it (`& $claudeExe`, `%CLAUDEEXE%`,
+        # `& ('xclaude'.Substring(1))`; flagship slice 2d.23, from its review).
         if name in ("start-process", "saps", "start") and ps:
             _start_process(rest, ctx, mentioned)
-        elif mentioned and (kind == "group" or (ps and raw.startswith("$") and i > 0 and words[i - 1][0] in ("&", "."))
-                            or (not ps and _CMD_VARIABLE_RE.search(raw) and kind == "plain")):
+        elif (mentioned or af.appears(raw, ctx.programs, ctx.packages)) and (
+                kind == "group" or (ps and raw.startswith("$") and i > 0 and words[i - 1][0] in ("&", "."))
+                or (not ps and _CMD_VARIABLE_RE.search(raw) and kind == "plain")):
             for flag in ctx.flags:
                 if flag["id"] not in ctx.reading.hits:
                     ctx.reading.cannot_tell(flag, af._fact_text(" ".join(w[0] for w in words)))
