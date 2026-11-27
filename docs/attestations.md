@@ -138,3 +138,36 @@ The error names the field and its line where it can; an error from the YAML load
 With `signing: keys`, the policy's `repository` is not checked against the records: the verifier checks that each record is signed with a policy key, not which repository the record says it was built from ([#406](https://github.com/Obaaf/OBAAF/issues/406)). Whoever holds a key can sign a record for any build.
 
 Missing certificate fields fail verification. An attestation that fails the policy is ignored, with a warning, when a valid one exists for the same file.
+
+## The release decision
+
+`obaaf verify release` writes its decision as text by default, or as JSON with `--format json`, and in a GitHub run also to the step summary, as text. The exit status is 0 when nothing it checked blocks and 1 when something does. Where a full verification counts GitHub approvals (`release.min_approvals` above 0, and no Jenkins build's JSON given), an `--approvals` file that is not in the shape GitHub's API gives blocks, and no approval in it is counted: it must be a list of objects, and in each, `environments`, where given, a list of objects whose `name` is text, and `user`, where given, an object whose `login` is text (a missing or null `name`, `user` or `login` counts for nothing). A pre-approval run, and a run whose policy needs no approval, do not read that file.
+
+A run that stops on an error before it has decided writes no decision. It ends with 2, and an `error:` line, for wrong arguments; for a policy it cannot read or whose fields are not valid (see the release policy, above); for an `--approvals` or `--release-run` file it cannot read or that is not JSON; and for a `--revision-file` that does not hold one commit ID. It ends with 1 for an error while it verifies: an `error:` line (a key file it cannot read), or a Python traceback for an input of a shape it does not read, such as a Jenkins build's JSON with `"causes": 5` or a DSSE envelope whose `payload` is a number (#414; not every input has been tried). Once it has decided, it writes the decision to the console or the `--output` file, then the text to the console after a JSON `--output`, then the step summary. If one of these cannot be written, the run ends in a traceback with status 1, and what was written before stays, so a decision that says the checks passed can stand beside status 1 (#414). A run that stops early leaves an `--output` file from an earlier run as it was. Read a decision only from a run whose status you have checked.
+
+`--pre-approval` skips the approvals, so that the approver can read the rest before approving. On Jenkins it also skips the checks that tie the publishing build to the tag build: that both builds' JSON is given, that the publishing build was started by exactly one build and not by hand, that this build is the one given as `--release-run`, and that it is a tag build of `release.jenkins_project`, which the policy must set. So a Jenkins pre-approval run can pass under a policy without `release.jenkins_project`, which a full verification given a Jenkins build's JSON blocks. Such a run never decides that the upload may proceed: its text report begins `Pre-approval checks: PASSED, release approval is still required` (or `full verification is still required` where `release.min_approvals` is 0) when nothing it checked blocks, and the run that decides the upload is a full verification without `--pre-approval`, after the approval.
+
+The JSON decision, `obaaf-release-decision/v0.2`:
+
+```json
+{
+  "format": "obaaf-release-decision/v0.2",
+  "allowed": false,
+  "checksPassed": true,
+  "preApproval": true,
+  "approvalsRequired": 1,
+  "blocks": [],
+  "warnings": ["approvals were not checked (pre-approval run); the upload job checks them"],
+  "artifacts": [{"name": "game.zip", "sha256": "…", "provenance": "verified", "buildRecord": "verified", "tier": "A"}],
+  "agentCommits": [],
+  "approvals": []
+}
+```
+
+- `allowed`: the upload may proceed. True only for a full verification in which nothing blocks; false for every pre-approval run. A program that decides whether to upload reads this field.
+- `checksPassed`: nothing this run checked blocks, so `blocks` is empty and the exit status is 0. A program that shows a pre-approval result to the approver reads this field.
+- `preApproval`: the run was made with `--pre-approval`.
+- `approvalsRequired`: the policy's `release.min_approvals`, the number of distinct approvers the full verification needs.
+- `blocks` and `warnings`: what blocks, and what does not. `approvals`: the approvers who were counted, empty in a pre-approval run.
+
+In `obaaf-release-decision/v0.1`, written before slice 2d.24 (#394), `allowed` meant what `checksPassed` means now, so a pre-approval run that passed had `"allowed": true`, the same as a full verification that may be uploaded; v0.1 has none of the three new fields.
