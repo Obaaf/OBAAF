@@ -4,6 +4,13 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### A warned option after an unclosed quote is "cannot tell"
+
+Slice 2d.20b, from #401; decision D-148. OBAAF-GHA-026 read `claude '--dangerously-skip-permissions -p hi` as a run of claude with the warned option (high), where bash refuses the command whose quote never closes and runs neither it nor anything after it. A value a local action puts in can leave such a quote, and so can a typing slip.
+
+- **Now a warned option found only from the command that holds the unclosed quote on is "cannot tell"** (medium), in a bash script that holds no `${{ }}` expression, no `$(`, `${` or process substitution and no backticks (whose reader may take a closed quote for an unclosed one). The commands before it keep their matches.
+- **Can let a gate at `--fail-on high` pass** where it failed, and a baseline entry that accepted the high no longer matches. `docs/upgrading.md` has the row. On this repository and on the first adopter the reports are byte-identical with `flagship` `b54ffc7`.
+
 ### A value put into a local action's text no longer hides the lines after it
 
 Slice 2d.20a, from #401; decision D-147. The second pass reads a local composite action's steps with the caller's `with:` put into the action's text. A value put in as text could join the text around it into an expression GitHub never reads: in `# ${{ inputs.a }}{{ x` given `$`, the text read `# ${{ x`, an expression up to the next `}}`, so a `claude ${{ env.F }} -p hi` or an `npm install -g @anthropic-ai/claude-code` on the next line was inside it and OBAAF-GHA-026 and OBAAF-GHA-025 said nothing, where GitHub runs both.

@@ -375,6 +375,10 @@ class _Lexer:
         self.text = text
         self.variables = variables
         self.problem = ""
+        # Where the command that holds an unclosed quote starts (after the last separator before the quote), or None
+        # (flagship slice 2d.20b): bash never runs that command or anything after it.
+        self.unclosed_at: int | None = None
+        self._command_at = 0
 
     def commands(self) -> list:
         tokens = self._tokens()
@@ -438,6 +442,7 @@ class _Lexer:
                 if pending:
                     i = self._heredoc_bodies(i, pending, tokens)
                     pending = []
+                self._command_at = i
                 continue
             if ch in " \t":
                 finish(i)
@@ -460,7 +465,7 @@ class _Lexer:
                 w = begin(i)
                 end = text.find("'", i + 1)
                 if end < 0:
-                    self.problem = "an unclosed quote"
+                    self._unclosed()
                     end = n
                 w.text += text[i + 1:end]
                 i = end + 1
@@ -473,7 +478,7 @@ class _Lexer:
                 w = begin(i)
                 m = re.compile(r"((?:[^'\\]|\\.)*)'", re.S).match(text, i + 2)
                 if not m:
-                    self.problem = "an unclosed quote"
+                    self._unclosed()
                     w.text += text[i + 2:]
                     i = n
                 else:
@@ -523,6 +528,8 @@ class _Lexer:
                     redirect_op = op
                     continue
                 tokens.append(op)
+                if op in _SEPARATORS:
+                    self._command_at = i
                 continue
             m = _PLAIN_RUN_RE.match(text, i)
             if m and m.end() > i + 1:
@@ -541,6 +548,12 @@ class _Lexer:
         if pending:
             self.problem = "a heredoc with no end"
         return tokens
+
+    def _unclosed(self) -> None:
+        """A quote that runs to the end of the text: bash refuses the command that holds it, and stops there."""
+        self.problem = "an unclosed quote"
+        if self.unclosed_at is None:
+            self.unclosed_at = self._command_at
 
     def _operator(self, i: int) -> str:
         for op in ("<<<", "<<-", ";;&", "&>>", "&&", "||", ";;", ";&", "|&", ">>", "<<", ">&", "<&", "&>", "<>",
@@ -592,7 +605,7 @@ class _Lexer:
                 continue
             w.text += ch
             i += 1
-        self.problem = "an unclosed quote"
+        self._unclosed()
         return n
 
     def _expansion(self, i: int, w: Word, quoted: bool) -> int:
@@ -1653,6 +1666,8 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
                 shown[fid] = out
             reading.unknown = shown
     _read_widest(text, programs, packages, flags, reading, anywhere=not bash)
+    if bash and not prose and not held and reading.hits:
+        _unclosed_hits(text, programs, packages, flags, variables, mentioned, unread, written_files, loose, reading)
     if not bash and mentioned:
         _fragments(text, flags, reading, "a script the checker does not read as bash")
     if not bash and loose:
@@ -1661,6 +1676,43 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
             ctx = _Context(list(programs), packages, flags, {}, True, set(), reading, loose=True)
             agent_code.read_language(text, language, ctx)
     return reading
+
+
+# What `_unclosed_hits` does not cut: an expansion read by `_balanced` (`$(`, `$((`, `${`), a process substitution, or
+# backticks (flagship slice 2d.20b, from its review): `_balanced` skips no comment, reads no `$'...\'...'` and counts
+# every brace, where bash ends `${` at its first unquoted `}`.
+_UNCLOSED_UNSURE_RE = re.compile(r"\$[({]|`|[<>]\(")
+
+
+def _unclosed_hits(text: str, programs: list, packages: list, flags: list, variables, mentioned: bool, unread,
+                   written_files, loose: bool, reading: Reading) -> None:
+    """A warned option found only from the command that holds an unclosed quote on, in a bash script, is "cannot
+    tell", not a match (flagship slice 2d.20b, #401 item 2): bash reads a script a command at a time and refuses the
+    one whose quote never closes, so it runs neither that command nor any after it. `claude '--yolo -p hi` (a value
+    that left a `'`, or a typing slip) is no run of claude, and the second reading, which takes the quotes out, read
+    it as one. What the commands before it give is read again on their own and kept. Only where the text holds no
+    `${{ }}` (the caller checks): GitHub puts an expression's text in before bash reads the script, and it may hold
+    the quote that closes this one. The commands kept are cut at the last separator before the quote (`;`, `&&`,
+    `|`, a newline), which keeps a command bash would refuse too where the quote is in a later part of one list or
+    compound command: such a match stays one, as before. Not where the text holds `$(`, `${`, a process
+    substitution or backticks (`_UNCLOSED_UNSURE_RE`): their reader (`_balanced`) does not skip a comment, read
+    `$'...\\'...'` or end `${` at its first unquoted `}` as bash does, so a quote it takes for unclosed may be closed
+    for bash, which then runs what follows (found by the review: `OUT="$(` / `# it's fine` /
+    `claude --dangerously-skip-permissions -p hi` / `)"`, and `echo "${x:-{}"`). There the match stays, as before.
+    The commands before the quote are read with a budget of their own (at most once more for the step)."""
+    if _UNCLOSED_UNSURE_RE.search(text) or ("((" in text and "<<" in text):
+        # `<<` in a bare `(( ))` is a shift, which the lexer reads as a heredoc (found by the review's third pass).
+        return
+    lexer = _Lexer(text, {})
+    lexer.commands()
+    start = lexer.unclosed_at
+    if start is None or lexer.problem != "an unclosed quote":
+        return
+    before = read_script(text[:start], programs, packages, flags, variables, mentioned=mentioned, bash=True,
+                         unread=unread, written_files=written_files, loose=loose)
+    for fid in [fid for fid in reading.hits if fid not in before.hits]:
+        flag = reading.hits.pop(fid)[0]
+        reading.cannot_tell(flag, "an unclosed quote: " + _fact_text(text))
 
 
 _FRAGMENT_RE = re.compile(r"(?<![\w-])(--?[A-Za-z][A-Za-z0-9-]*)")
