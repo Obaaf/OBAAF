@@ -1434,12 +1434,13 @@ The line is drawn where an agent's name written out would be seen. A value at an
   - Cline's and Aider's names are tried only where a command's program goes, so not behind a wrapper the lanes do not know (`xvfb-run`, `find -exec`).
   - A line break between the name's place and its keyword without a continuation.
   - A repository's own `agents.commands` are not tried.
+  - A PowerShell or cmd command continued over more than 32 lines, with the agent's keyword past the 32nd, is not seen.
   - Another expression on the line is read as its first known value only, so `xvfb-run ${{ env.AGENT }} ${{ env.X == 'a' && '-q' || '-p' }} x`, and one whose value such a scope may set (`${{ env.F || '-p' }}`), are not seen.
   - `$AGENT` under such a scope is not put in (D-139).
   - A local composite action's steps under such a scope (its own step's `env`, the using step's, the job's or the workflow's) are not changed by this decision. In the lanes they are read as on the base, with no error. That is left in 2d.19 with its item (b) (F-421).
 - **Known false errors:**
   - The program-place reading takes quotes out before splitting, so `echo "Version (${{ env.V }})"` is an error.
   - A heredoc line that holds only such a value is an error, and so is `command -v ${{ env.TOOL }}`.
-- **Cost.** The cost of the reviewer's cases is the base's: 74 KB with 4,000 workflow `env` entries, 13.4 s against 14.7 s; a 12 KB line of spaces, 0.48 s against 0.44 s; 960 KB of such expressions side by side, 6.5 s against 6.2 s; 1.7 MB of 50,000 lines, 7.6 s against 6.5 s. On this repository and on the first adopter nothing changes (text, JSON, SARIF, `--summary` and `--lanes` byte-identical with `flagship` `03b3c9b`).
+- **Cost.** The cost of the reviewer's cases is the base's: 74 KB with 4,000 workflow `env` entries, 13.4 s against 14.7 s; a 12 KB line of spaces, 0.48 s against 0.44 s; 960 KB of such expressions side by side, 6.5 s against 6.2 s; 40,000 lines each ending in a PowerShell backtick, about twice the base (10.4 s against 5.5 s); 1.7 MB of 50,000 lines, 7.6 s against 6.5 s. On this repository and on the first adopter nothing changes (text, JSON, SARIF, `--summary` and `--lanes` byte-identical with `flagship` `03b3c9b`).
 
 **Status.** Proposed 2026-11-27 (slice 2d.19d).
