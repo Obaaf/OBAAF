@@ -138,3 +138,36 @@ The error names the field and its line where it can; an error from the YAML load
 With `signing: keys`, the policy's `repository` is not checked against the records: the verifier checks that each record is signed with a policy key, not which repository the record says it was built from ([#406](https://github.com/Obaaf/OBAAF/issues/406)). Whoever holds a key can sign a record for any build.
 
 Missing certificate fields fail verification. An attestation that fails the policy is ignored, with a warning, when a valid one exists for the same file.
+
+## The release decision
+
+`obaaf verify release` writes its decision as text by default, or as JSON with `--format json`, and in a GitHub run also to the step summary, as text. The exit status is 0 when nothing it checked blocks and 1 when something does. An approvals list that is not in the shape GitHub's API gives (a list of objects, each with a list of `environments` and a `user`) blocks, and no approval in it is counted.
+
+A run that stops on an error writes no decision. It ends with 2, and an `error:` line, for wrong arguments and for a policy, `--approvals`, `--release-run` or `--revision-file` file it cannot read or that is not JSON (or, for the revision, not one commit ID). It ends with 1 for an error while it verifies: an `error:` line (a key file it cannot read, a step summary or `--output` file it cannot write), or a Python traceback for a Jenkins build's JSON of a shape it does not read. The step summary is written before the decision, so a summary that cannot be written stops the run before any decision is written; an `--output` file that cannot be finished may be left part-written.
+
+`--pre-approval` skips the approvals, so that the approver can read the rest before approving. On Jenkins it also skips the checks that tie the publishing build to the tag build: that both builds' JSON is given, that the publishing build was started by exactly one build and not by hand, that this build is the one given as `--release-run`, and that it is a tag build of `release.jenkins_project`, which the policy must set. So a Jenkins pre-approval run can pass under a policy without `release.jenkins_project`, which a full verification given a Jenkins build's JSON blocks. Such a run never decides that the upload may proceed: its text report begins `Pre-approval checks: PASSED, release approval is still required` (or `full verification is still required` where `release.min_approvals` is 0) when nothing it checked blocks, and the run that decides the upload is a full verification without `--pre-approval`, after the approval.
+
+The JSON decision, `obaaf-release-decision/v0.2`:
+
+```json
+{
+  "format": "obaaf-release-decision/v0.2",
+  "allowed": false,
+  "checksPassed": true,
+  "preApproval": true,
+  "approvalsRequired": 1,
+  "blocks": [],
+  "warnings": ["approvals were not checked (pre-approval run); the upload job checks them"],
+  "artifacts": [{"name": "game.zip", "sha256": "…", "provenance": "verified", "buildRecord": "verified", "tier": "A"}],
+  "agentCommits": [],
+  "approvals": []
+}
+```
+
+- `allowed`: the upload may proceed. True only for a full verification in which nothing blocks; false for every pre-approval run. A program that decides whether to upload reads this field.
+- `checksPassed`: nothing this run checked blocks, so `blocks` is empty and the exit status is 0. A program that shows a pre-approval result to the approver reads this field.
+- `preApproval`: the run was made with `--pre-approval`.
+- `approvalsRequired`: the policy's `release.min_approvals`, the number of distinct approvers the full verification needs.
+- `blocks` and `warnings`: what blocks, and what does not. `approvals`: the approvers who were counted, empty in a pre-approval run.
+
+In `obaaf-release-decision/v0.1`, written before slice 2d.24 (#394), `allowed` meant what `checksPassed` means now, so a pre-approval run that passed had `"allowed": true`, the same as a full verification that may be uploaded; v0.1 has none of the three new fields.

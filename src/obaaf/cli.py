@@ -694,14 +694,20 @@ def cmd_verify_release(args) -> int:
     except (RecordError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_FAIL
+    # The step summary first: a run that cannot write it stops with an error before any decision is
+    # written, so no decision says the checks passed beside an exit status of 1.
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
     text = json.dumps(decision.to_dict(), indent=2) + "\n" if args.format == "json" else decision.to_text()
-    _write(text, args.output)
+    try:
+        if summary:
+            with open(summary, "a", encoding="utf-8") as fh:
+                fh.write("## OBAAF release verification\n\n```\n" + decision.to_text() + "```\n")
+        _write(text, args.output)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_FAIL
     if args.format == "json" and args.output:
         sys.stdout.write(decision.to_text())
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        with open(summary, "a", encoding="utf-8") as fh:
-            fh.write("## OBAAF release verification\n\n```\n" + decision.to_text() + "```\n")
     return EXIT_OK if decision.ok else EXIT_FAIL
 
 
