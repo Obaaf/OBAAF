@@ -29,6 +29,7 @@ from obaaf.checker import agent_flags
 CN = (["cn"], ["@continuedev/cli"])
 CLINE = (["cline"], ["cline"])
 CLAUDE = (["claude"], ["@anthropic-ai/claude-code"])
+CODEX = (["codex"], ["@openai/codex"])
 CANNOT_TELL = ("medium", "command-computed")
 SKIP = "--dangerously-skip-permissions"
 
@@ -84,12 +85,14 @@ class TheIssuesCaseTest(unittest.TestCase):
 
     def test_bash_too(self):
         # The same class in bash: a label of a dotted name (two letters are a country's domain), an alias whose
-        # value holds the letters, `IFS=` beside them, a locale or an AWS region.
+        # value holds the letters, a locale or an AWS region. (`IFS=` on its own is "cannot tell" wherever the step
+        # let the letters through, as before: the second review found the step's variables named for the tool,
+        # `$OPENAI_CODEX_CMD`, set there and run as `"$@"`.)
         for script in ("pip install -i https://pypi.tuna.tsinghua.edu.cn/simple x\n$CMD y",
                        "sed -i 's/archive.ubuntu.com/cn.archive.ubuntu.com/' /etc/apt/sources.list\n$CMD y",
-                       "echo example.cn\n$X --foo", "alias x='echo acne'\nx $f", "echo acne\nIFS=,",
-                       'echo "decline the change"\n$X --foo', "export LANG=zh_CN.UTF-8\nIFS=,",
-                       "aws s3 ls --region cn-north-1\n$X y", "echo zh-CN\n$X y"):
+                       "echo example.cn\n$X --foo",
+                       'echo "decline the change"\n$X --foo', "aws s3 ls --region cn-north-1\n$X y",
+                       "echo zh-CN\n$X y", "export LANG=zh_CN.UTF-8\n$X y"):
             with self.subTest(script):
                 self.assertEqual(findings(script), ([], []))
 
@@ -99,6 +102,37 @@ class TheIssuesCaseTest(unittest.TestCase):
         for script in ('"$CNT" x', '"$ACNE" x'):
             with self.subTest(script):
                 self.assertEqual(findings(script), ([CANNOT_TELL + ("continue",)], []))
+        # In PowerShell and cmd too, and a name given such a value (the second review).
+        for shell, script, program in (
+                ("pwsh", "& $env:CODEXBIN exec --yolo x", "codex"), ("pwsh", "& $env:RUN_CN --auto", "continue"),
+                ("pwsh", "$t = 'xcodex'.Substring(1)\n& $t exec --yolo x", "codex"),
+                ("pwsh", "$t = 'cnx'.TrimEnd('x')\n& $t --auto", "continue"),
+                ("pwsh", "$p = @{ ArgumentList = 'exec','--yolo' }\nStart-Process $env:CODEXBIN @p", "codex"),
+                ("cmd", "setlocal enabledelayedexpansion\nset X=!CODEXBIN!\n!X! exec --yolo fix", "codex"),
+                ("cmd", "set C=xcodex\n%C:~1% exec --yolo fix", "codex"),
+                ("pwsh", "'acne'\nbash -c '\"$CNBIN\" --auto'", "continue"),
+                ("cmd", "for /f %%i in ('where codexcli') do %%i exec --yolo fix", "codex"),
+                ("pwsh", "foreach ($p in (Get-Command codexcli)) { & $p exec --yolo fix }", "codex"),
+                ("bash", "shopt -s expand_aliases\nalias c=\"$HOME/tools/clinecli\"\nc --yolo fix", "cline")):
+            with self.subTest(shell=shell, script=script):
+                got, errors = findings(script, shell)
+                self.assertEqual(errors, [])
+                self.assertIn(CANNOT_TELL + (program,), got)
+        # But not a command whose word and variables hold no such letters, in a script that only has them in a word.
+        for shell, script in (("pwsh", "'acne'\n& $exe --x"), ("pwsh", "$x = 'acne'\n& $exe @p"),
+                              ("cmd", "echo acne\n!X! --foo"), ("pwsh", "'acne'\nbash -c '$X --y'")):
+            with self.subTest(shell=shell, script=script):
+                self.assertEqual(findings(script, shell), ([], []))
+
+
+def retry(command):
+    """OBAAF-GHA-026 findings of a step that gives `command` to an action's `command` input."""
+    text = ("on: workflow_dispatch\npermissions: {}\njobs:\n  j:\n    runs-on: ubuntu-24.04\n    steps:\n"
+            "      - uses: nick-fields/retry@" + "b" * 40 + "\n        with:\n          max_attempts: 2\n"
+            f"          command: '{command}'\n")
+    with TempDir() as tmp:
+        result = check(tmp, text)
+    return sorted((f.severity, f.kind, f.facts.get("program")) for f in result.findings if f.rule == "OBAAF-GHA-026")
 
 
 class WhereTheToolIsNamedTest(unittest.TestCase):
@@ -162,6 +196,14 @@ class WhereTheToolIsNamedTest(unittest.TestCase):
         self.assert_cannot_tell("IFS=,\nset -- $AGENT_CMD\n\"$@\"", program="claude-code",
                                 env={"CLAUDE_CODE_OAUTH_TOKEN": "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"})
 
+    def test_a_command_input(self):
+        # An input whose name says it is a command (the second review): its command word is tested for the letters.
+        for command in ("$OPENAI_CODEX exec --yolo fix", "$CODEXBIN exec --yolo fix",
+                        "${{ steps.setup.outputs.codexbin }} exec --yolo fix"):
+            with self.subTest(command):
+                self.assertIn(CANNOT_TELL + ("codex",), retry(command))
+        self.assertEqual(retry("make picnic && $X --y"), [])
+
     def test_a_name_in_the_steps_env(self):
         self.assert_cannot_tell("IFS=,\n$T -p x", env={"T": "claude"}, program="claude-code")
         # The review's second way past: another shell reads the step's `env` too, once its script is read.
@@ -190,7 +232,7 @@ class TheTestsThemselvesTest(unittest.TestCase):
             with self.subTest(text):
                 self.assertFalse(agent_flags.mentions(text, *CLINE))
                 self.assertFalse(agent_flags.names(text, *CLINE))
-        for text in ("zh-CN", "zh_CN", "my-cn", "arn:aws-cn:s3:::b", "cn-north-1", "cn2"):
+        for text in ("zh-CN", "zh_CN", "my-cn", "arn:aws-cn:s3:::b", "cn-north-1", "cn2", "$isCN", "zhCN"):
             with self.subTest(text):
                 self.assertFalse(agent_flags.names(text, *CN))
 
@@ -219,7 +261,7 @@ class TheTestsThemselvesTest(unittest.TestCase):
             with self.subTest(text):
                 self.assertTrue(agent_flags.mentions(text, *CN))
                 self.assertTrue(agent_flags.names(text, *CN))
-        for text in ("npm i -g cline@1.2", "npx cline", "node_modules/cline/bin"):
+        for text in ("npm i -g cline@1.2", "npx cline", "node_modules/cline/bin", "npm i -g ./cline-2.0.0.tgz"):
             with self.subTest(text):
                 self.assertTrue(agent_flags.mentions(text, *CLINE))
         self.assertTrue(agent_flags.mentions("%APPDATA%\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js",
@@ -227,8 +269,9 @@ class TheTestsThemselvesTest(unittest.TestCase):
 
     def test_a_part_of_a_name(self):
         for text, tool in (("$CLAUDE_BIN", CLAUDE), ("$env:CN_BIN", CN), ("${CMD:-claude}", CLAUDE),
-                           ("cn_path", CN), ("$claudeBin", CLAUDE), ("$cnPath", CN), ("$CLAUDEBin", CLAUDE),
-                           ("$CLAUDE2", CLAUDE), ("${claude-bin}", CLAUDE),
+                           ("cn_path", CN), ("$claudeBin", CLAUDE), ("$CLAUDEBin", CLAUDE),
+                           ("$CLAUDE2", CLAUDE), ("${claude-bin}", CLAUDE), ("${CMD:-cn}", CN),
+                           ("$OPENAI_CODEX", CODEX), ("$codexBin", CODEX), ("$CODEX2", CODEX), ("${codex-bin}", CODEX),
                            ("${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", CLAUDE)):
             with self.subTest(text):
                 self.assertFalse(agent_flags.mentions(text, *tool))

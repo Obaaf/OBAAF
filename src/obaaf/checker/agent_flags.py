@@ -798,6 +798,9 @@ class _Context:
     prose: bool = False             # text that may be prose (another input, an `env` value, an argument)
     # What putting variables in may still add, for the whole step, every nested script included (2d.16).
     budget: PutInBudget = field(default_factory=PutInBudget)
+    # The `${{ }}` expressions the script's text holds in their places (`_hold_expressions`), so that a command word
+    # made of one is tested for the tool's letters as GitHub will write it (2d.23, from its second review).
+    held: list = field(default_factory=list)
 
     def cannot_tell(self, word: str) -> None:
         if self.mentioned:
@@ -1005,7 +1008,8 @@ def _read_command(command: Command, ctx: _Context) -> None:
                 _read_program_args(_arguments(words[i + 1:]), ctx)
                 return
             if (not base or w.glob or w.brace or base in ctx.programs) and not ctx.prose and (
-                    ctx.mentioned or appears(w.shown, ctx.programs, ctx.packages)):
+                    ctx.mentioned or appears(w.shown, ctx.programs, ctx.packages) or (
+                        ctx.held and appears(_show(w.shown, ctx.held), ctx.programs, ctx.packages))):
                 for flag in ctx.flags:
                     ctx.reading.cannot_tell(flag, w.shown)
             continue
@@ -1258,12 +1262,14 @@ def _start(words: list, bases: list, i: int, ctx: _Context, command: Command, ru
             if not eq:
                 continue
             if x.computed:
-                ctx.cannot_tell(x.shown)
+                # Also where the word itself holds the tool's letters (`alias c="$HOME/tools/clinecli"`): a plain
+                # package's name counts in `mentions` only as a word since flagship slice 2d.23 (its third review).
+                if ctx.mentioned or appears(x.shown, ctx.programs, ctx.packages):
+                    for flag in ctx.flags:
+                        ctx.reading.cannot_tell(flag, x.shown)
                 continue
             _read_nested(value, ctx)
-            # An alias names the program where its value names it as a name (2d.23): `alias x='echo acne'` does
-            # not make `x` Continue's `cn`.
-            if names(value, ctx.programs, ctx.packages):
+            if appears(value, ctx.programs, ctx.packages):
                 ctx.programs.append(head.casefold())
         return True
     return False
@@ -1642,10 +1648,10 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
     cannot read, shown with a word that uses them. `budget`: the step's `PutInBudget`, shared by every
     script of the step that is read (flagship slice 2d.16); a new one by default. `named`: whether the step
     names the tool as a name of its own or a part of one (`names`) in one of its texts or in a text with its
-    variables put in; by default, `mentioned` or `names` of this text. A bash script's `IFS=` on its own, and
-    in another language or shell a command or code the checker cannot read, is "cannot tell" only then:
-    before flagship slice 2d.23 (#388) it was wherever the name's letters stood in any word (`loose`), so a
-    PowerShell step with `'acne'` and a bracket left open at a line's end was "cannot tell" for Continue."""
+    variables put in; by default, `mentioned` or `names` of this text. In another language or shell, code or
+    a command the checker cannot read is "cannot tell" only then, or where the command's own word holds the
+    tool's letters: before flagship slice 2d.23 (#388) it was wherever the name's letters stood in any word, so
+    a PowerShell step with `'acne'` and a bracket left open at a line's end was "cannot tell" for Continue."""
     reading = Reading()
     if not text or not flags:
         return reading
@@ -1664,7 +1670,7 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
         written = set(written_files or ()) | {m.group(1) for m in re.finditer(
             r"(?:>>?|\btee(?:\s+-a)?)\s*['\"]?([^\s'\";&|<>]+)", held_text)}
         ctx = _Context(list(programs), packages, flags, dict(variables or {}), mentioned, written, reading,
-                       loose=loose and named, prose=prose, budget=PutInBudget() if budget is None else budget)
+                       loose=loose, prose=prose, budget=PutInBudget() if budget is None else budget, held=held)
         _read_text(held_text, ctx)
         if held or unread:
             shown: dict = {}
@@ -1688,7 +1694,7 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
             from obaaf.checker import agent_code
             # Only where the script names the tool (2d.23): `True` here made what the readers cannot read "cannot
             # tell" wherever the name's letters stood in a word (`'acne'`, `$cnt`, `decline`, `kilobyte`).
-            ctx = _Context(list(programs), packages, flags, {}, named, set(), reading, loose=named)
+            ctx = _Context(list(programs), packages, flags, {}, named, set(), reading, loose=True)
             agent_code.read_language(text, language, ctx)
     return reading
 
@@ -1853,13 +1859,16 @@ def appears(text: str, programs: list, packages: list) -> bool:
 
 
 @functools.lru_cache(maxsize=512)
-def _name_pattern(program: str, parts: bool) -> re.Pattern:
+def _name_pattern(program: str, parts: bool, package: bool = False) -> re.Pattern:
     """`program` standing as a name of its own in a text whose quotes are taken out and whose case is folded
     (flagship slice 2d.23, #388). `mentions` (`parts` False): not after a letter, a digit, `_`, `@` (`@claude`
     in a comment's prose) or `-`, and not before a letter, a digit, `_` or `-`, as before the slice. `names`
     (`parts` True) also takes a part of a variable's name: an `_` after it (`$CLAUDE_BIN`, `$env:CN_BIN`), a
     `-` before it that does not follow a letter or digit (`${CMD:-claude}`, but not `zh-cn`), and, for a name of
-    more than two letters, a digit or a `-` after it (`$CLAUDE2`, `${claude-bin}`). A name of two letters is a
+    more than two letters, an `_` before it and a digit or a `-` after it (`$OPENAI_CODEX`, `$CODEX2`,
+    `${kilo-bin}`; not for two, where `zh_CN` is a locale and `cn-north-1` a region). `package`: a plain
+    package's name, for which a `-` and a digit after it (a packed tarball's version) are an edge in
+    `mentions` too. A name of two letters is a
     country's domain as well (Continue's `cn`), so for it, in both, the name is never one label of a dotted name:
     not after a dot that follows a letter or digit (`example.cn`, `pypi.tuna.tsinghua.edu.cn`), and not before a
     dot and a letter or digit (`cn.archive.ubuntu.com`) unless the suffix is one Windows runs or node runs a
@@ -1867,11 +1876,12 @@ def _name_pattern(program: str, parts: bool) -> re.Pattern:
     region). `names` uses this only for a name of five letters or fewer (see `_named`)."""
     two = len(program) == 2
     if parts:
-        before = r"(?<![\w@])(?<![^\W_]-)"
+        before = (r"(?<![\w@])" if two else r"(?<![^\W_])(?<!@)") + r"(?<![^\W_]-)"
         after = r"(?![^\W\d_])" + (r"(?![\d-])" if two else "")
     else:
         before = r"(?<![\w@-])"
-        after = r"(?![\w-])"
+        # A package npm packs is `<name>-<version>.tgz` (`./cline-2.0.0.tgz`; the second review).
+        after = r"(?![\w-])" if not package else r"(?!\w)(?!-(?!\d))"
     if two:
         before += r"(?<![^\W_]\.)"
         after += r"(?!\.(?!(?:exe|cmd|bat|ps1|com|js|mjs|cjs)(?![^\W_]))[^\W_])"
@@ -1889,7 +1899,8 @@ _CASE_EDGE_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 def _named(text: str, programs: list, packages: list, parts: bool) -> bool:
     """`mentions` (`parts` False) and `names` (`parts` True). Read with quotes and backslashes taken out, again
     with a backslash read as a folder's separator (no escape in PowerShell or cmd: `C:\\tools\\cn.exe`), with
-    `$'...'` decoded, and, for `names`, with a space where the case of a name changes. A package with a scope
+    `$'...'` decoded, and, for `names` and a name of three letters or more, with a space where the case of a
+    name changes. A package with a scope
     or a folder in its name (`@continuedev/cli`) counts anywhere in these; one with a plain name is a name like
     a program's, since such a name is inside other words too (Cline's `cline` in `decline`; 2d.23). For `names`, a
     program's or a plain package's name of six letters or more counts anywhere in them, as `appears` has it:
@@ -1907,16 +1918,20 @@ def _named(text: str, programs: list, packages: list, parts: bool) -> bool:
         forms.append(re.sub(r"[\"'\\]", "", decoded))
     if any(p in form for p in scoped for form in forms):
         return True
+    cased = None
     if parts and _CASE_EDGE_RE.search(text):
-        forms.append(re.sub(r"[\"'\\]", "", _CASE_EDGE_RE.sub(" ", text)).casefold())
+        cased = re.sub(r"[\"'\\]", "", _CASE_EDGE_RE.sub(" ", text)).casefold()
     dotted = None
-    for program in [*programs, *(p for p in packages if p not in scoped)]:
+    plain = [p for p in packages if p not in scoped]
+    for program in [*programs, *plain]:
         if parts and len(program) >= 6 and any(program in form for form in forms):
             return True
         pattern = None
-        for form in forms:
+        # A change of case is an edge only for a name of three letters or more (`$codexBin`, not `$isCN`; the
+        # second review).
+        for form in forms + ([cased] if cased is not None and len(program) > 2 else []):
             if program in form:
-                pattern = pattern or _name_pattern(program, parts)
+                pattern = pattern or _name_pattern(program, parts, program in plain)
                 if pattern.search(form):
                     return True
         if len(program) == 2 and "." in text and "$" in text:
@@ -1924,7 +1939,8 @@ def _named(text: str, programs: list, packages: list, parts: bool) -> bool:
                 spaced = _PROPERTY_RE.sub(lambda m: m.group(0).replace(".", " "),
                                           _EXPRESSION_RE.sub(lambda m: m.group(0).replace(".", " "), text))
                 dotted = re.sub(r"[\"'\\]", "", spaced).casefold()
-            if program in dotted and (pattern or _name_pattern(program, parts)).search(dotted):
+            if program in dotted and (pattern or _name_pattern(
+                    program, parts, program in plain)).search(dotted):
                 return True
     return False
 

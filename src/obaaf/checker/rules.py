@@ -2617,12 +2617,18 @@ class WorkflowRules:
         known = {id(text): agent_flags.known_variables(scopes, text, trust_env) for text, _b in parts}
         mentioned = named_unread or any(agent_flags.mentions(t, programs, packages) for t in named)
         # Whether the step names the tool as a name of its own or a part of one, in a text or with its variables
-        # put in (flagship slice 2d.23, #388): what makes a bash script's `IFS=` on its own "cannot tell", and in
-        # another language or shell, what its readers cannot read (`& $env:AGENT ...` with `AGENT: claude` in the
-        # step's `env`). It was every step the cheap test above let through, so `echo acne` beside `IFS=,` was
-        # "cannot tell" for Continue (`cn`), and in PowerShell any text with the letters `cn`.
-        named_as_name = mentioned or any(agent_flags.names(t, programs, packages) for t in named) or any(
-            put is not None and agent_flags.names(put, programs, packages) for _text, put in cheap)
+        # put in (flagship slice 2d.23, #388): what makes what the readers of another language or shell cannot
+        # read "cannot tell" (`& $env:AGENT ...` with `AGENT: claude` in the step's `env`), and the same in an
+        # input whose name says it is a command. It was `True` wherever the letters stood in any word, so in
+        # PowerShell any text with the letters `cn` (`'acne'`). Worked out only when one is read (the review: an
+        # eager one cost a tenth more on a workflow of 500 steps).
+        step_named: list = []
+
+        def named_as_name() -> bool:
+            if not step_named:
+                step_named.append(mentioned or any(agent_flags.names(t, programs, packages) for t in named) or any(
+                    put is not None and agent_flags.names(put, programs, packages) for _text, put in cheap))
+            return step_named[0]
         reading = agent_flags.Reading()
         # One budget for every script of the step that is read (flagship slice 2d.16, from the review): a value
         # may be put in eight times in the step, not eight times in each of its `env` values and inputs. What it
@@ -2635,8 +2641,7 @@ class WorkflowRules:
             variables, unread = known[id(text)]
             if bash:
                 reading.merge(agent_flags.read_script(text, programs, packages, flags, variables,
-                                                      mentioned=mentioned, unread=unread, loose=True, budget=budget,
-                                                      named=named_as_name))
+                                                      mentioned=mentioned, unread=unread, loose=True, budget=budget))
             else:
                 # JavaScript (github-script) or another shell: "cannot tell" only where a line names the tool
                 # and runs a command (an exec call, or in a shell, a character its quoting or variables use).
@@ -2651,16 +2656,19 @@ class WorkflowRules:
                                                           mentioned=agent_flags.mentions(text, programs, packages),
                                                           bash=False, loose=True,
                                                           language=languages.get(id(text), ""),
-                                                          named=named_as_name))
+                                                          named=named_as_name()))
         for other, command_like in others:
             # Another input, an `env` value or a `docker://` command line that runs the program: one whose text
-            # starts a command with it, or that names the tool in an input whose name says it is a command (as a
-            # name, not its letters in another word: `command: make picnic` is no run of `cn`; 2d.23).
-            if agent_flags.starts_program(other, programs, packages) or (
-                    command_like and agent_flags.names(other, programs, packages)):
+            # starts a command with it, or that holds the tool's letters in an input whose name says it is a
+            # command. The second is read as naming the tool only where the step names it as a name (2d.23):
+            # `command: make picnic && $X` is no run of `cn`, but its command word is still tested for the letters
+            # (`command: $CODEXBIN exec ...`; the second review).
+            starts = agent_flags.starts_program(other, programs, packages)
+            if starts or (command_like and agent_flags.appears(other, programs, packages)):
                 variables, unread = agent_flags.known_variables(scopes, other, trust_env)
-                reading.merge(agent_flags.read_script(other, programs, packages, flags, variables, mentioned=True,
-                                                      unread=unread, prose=not command_like, budget=budget))
+                reading.merge(agent_flags.read_script(other, programs, packages, flags, variables,
+                                                      mentioned=starts or named_as_name(), unread=unread,
+                                                      prose=not command_like, budget=budget))
         for flag, option, value in reading.hits.values():
             written_as = option if value is None else f"{option} {value}"
             self.add("OBAAF-GHA-026", step.line,
