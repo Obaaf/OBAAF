@@ -3225,3 +3225,77 @@ Also a cost: 20 steps of ten two-valued expressions took 51 s against 3.6 s. **F
 **Held:** `toJSON(env.X)` before it was refused, values breaking out of quotes, a multi-line value carrying a second command, letter case on hosted Linux, macOS and Windows and on unknown runners, the composite precedence of a step's `env`, YAML aliases of `script` and `with.run`, 28 odd or invalid expressions (no new error), 6,000 steps at parity.
 
 **Stated limits (D-143):** a writer the checker cannot see (a script file the step runs, an action's own code or `pre:`) can set a name it takes as known, as for `$NAME` (D-139); a composite action's step that GitHub would run with the option stays medium; a 100 KB value read by eleven tools in one step costs what the same file written with `$V` costs (66 s against the base's 3.9 s for the expression, 51.6 s for `$V`).
+
+## 2d.19d: an `env` written as one expression, in the lanes
+
+Slice 2d.19d (#382, part (a) of what F-418 left in 2d.19; D-144). One Opus 5.5 sub-agent that wrote none of it reviewed it in five passes. It tried about 225 workflow forms, each against the base (`flagship` `03b3c9b`) and the change, with controls that have the agent's name written out. It also fuzzed 500,000 random lines against the one-try-per-piece search, 600,000 more against the later checks and 20,000 multi-line texts against the joined lines, and timed 33 cost cases. What GitHub does was read from its pages and #387, not run. The cases and scripts were in the review's scratch directory and are not kept; each fixed finding below is a test in `tests/test_env_scope_expression.py`, and the stated limits and known false errors are not all tests.
+
+**First pass (8f336cd: an error for every such expression anywhere in a line, and `env: ${{ matrix.KEY }}` read through a written matrix, one table for each choice of mapping): 2 blocking, 103 forms, 11 cost cases.**
+
+- **Cost.** Each table rebuilt the outer scopes on every reading. 4,000 workflow `env` entries under 256 matrix mappings over 300 steps took 121.9 s against 13.7 s; 60,000 entries over 5 steps took 1.73 GB against 127 MB. Past a cache capped at 64 scopes, an 88 KB file took 336 s against 17 s, and a 42 KB one gave 300 false ledger errors where the base gave none.
+- **Ways past.** A local composite action under such a scope (stated, F-421); `$AGENT` (D-139's limit); a key YAML 1.2 reads otherwise (`0o7`) taken as settling a name.
+- **False errors.** Readings multiplied across mappings (two references over 33 mappings past 1,024 readings); an agent lane no combination runs; one expression in one matrix value making the whole scope unread; every `echo`/`mkdir` line under such a scope (an existing OBAAF-GHA-010 test failed).
+
+**Fixed by class (bf72ad0):**
+- The matrix reading is gone. Every such scope is unread.
+- Its value makes no reading, as a value of another context.
+- The step is an error only where the value stands where a command's program goes.
+- `0o7` settles nothing; a falsy value under `&&` is empty.
+- The error names the nearest scope.
+
+**Second pass (bf72ad0): 1 blocking, 83 forms, 30 controls, 9 cost cases.**
+
+- **Ways past.** Program places the first check did not read, which the lanes read when the name is written out:
+  - the shell's words (`if ...; then`, `do`, `!`);
+  - another expression before it;
+  - wrappers outside its list (`xvfb-run`, `strace -f`, `flock`, `find -exec`, `su -c`, `uv run`, `poetry run`, `watch`, `systemd-run`, `exec -a`, `docker exec`);
+  - `bash --noprofile --norc -eo pipefail -c`, `pwsh -c`, `cmd /c`;
+  - a redirection first.
+- **False errors.** The first word of a line a backslash continues; quoted brackets and separators; a heredoc line; the idiom's program places.
+- **Cost.** At parity.
+
+**Fixed by class (4b7b66b):**
+- The line is also tried with the probe as the name in the catalog's own patterns for an agent's command line, wherever they need a keyword after the name.
+- The program place skips the shell's words and a redirection.
+- A continued line is read joined only.
+
+**Third pass (4b7b66b): 1 blocking, 27 new forms, 69 rerun, 3 cost cases.**
+
+- **Cost.** The patterns with the probe backtracked quadratically over a run of spaces: a 12 KB line took 52.2 s against 0.4 s.
+- **Ways past.**
+  - Another expression's known value read as `x` (`xvfb-run ${{ env.AGENT }} ${{ env.F }} x` with `F: -p`).
+  - A package's name (stated).
+  - A PowerShell backtick or a cmd caret continuation.
+  - A line break between the name and its keyword (stated).
+- **The one-try-per-piece argument.** It held on 300,000 random lines; it rests on the patterns' shape.
+- **False errors.** The class is any word followed by an agent's keyword (`psql -h ${{ env.H }} -p 5432`), not only an option before a subcommand (stated).
+
+**Fixed by class (a067faf):**
+- The keyword is searched for once in the rest of each piece, and the name's place is checked by hand: the 12 KB line takes 0.48 s against 0.44 s.
+- A test holds every strict catalog pattern to the shape.
+- Another expression that reads `env` is read as its first known value.
+- Backtick and caret continuations are joined.
+- The error says which place it found.
+
+**Fourth pass (a067faf and the documents): 0 blocking, 9 forms, 300,000 random lines against the third pass's regex (no disagreement), 4 cost cases.** A copy of the rest of the piece for each probe grew with the square of probes side by side (40,000 in 1.15 s; a 960 KB line 15.5 s against 6.4 s); a bash line ending in a backtick hid the next line's Cline or Aider name; only the first known value of another expression is put in (stated); document corrections. **Fixed (the commit after 34de9c9):** what is before a probe is checked first and the rest is searched where it stands (960 KB, 6.5 s against 6.2 s); a joined line's next lines are read again on their own, at most 32 lines joined; the documents corrected.
+
+**Fifth pass (09a2d30): 0 blocking, 3 forms, 300,000 random lines (no disagreement with the third pass's check), 20,000 multi-line texts (none missed the error), 6 cost cases.** Probes side by side, long runs of spaces and a long piece are linear; 40,000 lines each ending in a backtick take 10.4 s against 5.5 s, the cost of reading up to 32 joined lines again for each; a continuation of more than 32 lines is a new stated limit.
+
+**Held:**
+- The fast path: JSON and `--lanes` byte-identical with the base on the 42 fixture workflows and on this repository.
+- OBAAF-GHA-026: findings identical in all 236 case folders.
+- Scope precedence, the cut at the nearest unread scope, and the ledger accounting of the new refusal (charged once for each cached key, as for `Unread`).
+- Comparisons, `contains`, `!` and `&&` on such a value are not errors.
+
+**Stated limits (D-144):**
+- A value from such a scope that holds a whole command at another place in a line.
+- A package's name.
+- Cline's and Aider's names behind a wrapper the lanes do not know.
+- A line break between the name's place and its keyword.
+- A repository's own `agents.commands`.
+- `$AGENT` (D-139).
+- A local composite action's steps (left in 2d.19 with its item (b)).
+- Another expression on the line read as its first known value only.
+- A PowerShell or cmd command continued over more than 32 lines, with the keyword past the 32nd.
+- **Known false errors:** quoted brackets and separators, a heredoc line, `command -v ${{ env.TOOL }}`, and any word from such a scope followed by an agent's keyword.
+

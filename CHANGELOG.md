@@ -4,6 +4,21 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### An `env` written as one expression, in the lanes
+
+Slice 2d.19d, from #382; decision D-144. A workflow's, a job's or a step's `env` may be written as one expression (`env: ${{ fromJSON(vars.E) }}`, `env: ${{ matrix.env }}`), whose names the file does not show. Under such a scope, `run: ${{ env.AGENT }} -p review` put the job in no agent lane, with no error and no finding.
+
+- **Now a name no mapping nearer the step sets may be any text**, and so may the whole `env`. It makes no reading, as a value of another context does.
+- **Where it stands where an agent's name would be read as its command line, or where a command's program goes**, the step is an error of its file, which fails the check. Examples: `${{ env.AGENT }} -p x`, `if x; then ${{ env.AGENT }} -p y; fi`, `xvfb-run ${{ env.AGENT }} -p y`, `bash -c "${{ env.AGENT }} -p y"`, `${{ env.CC }} --version`.
+- **Elsewhere in a line it is read as before:** `echo ${{ env.VERSION }}`, `mkdir -p ${{ env.CCACHE_DIR }}`, `${{ env.DIR }}/bin/tool`.
+- **Can fail a check that passed.** This includes a word from such a scope followed by one of the agents' keywords (`-p`, `run`, `exec`, `--print` and the others), as in `psql -h ${{ env.PGHOST }} -p 5432` or `npm --prefix ${{ env.APP_DIR }} run build`. Write the `env` out as a mapping, or use `$NAME` in the script. `docs/upgrading.md` has the row.
+- **Not changed:**
+  - `env: ${{ matrix.env }}` is not read through the matrix.
+  - OBAAF-GHA-026 stays "cannot tell" beside such a scope.
+  - A local action's steps under such a scope are read as before.
+  - `$AGENT` is not put in (D-139).
+  - On this repository and on the first adopter the reports are byte-identical with `flagship` `03b3c9b`.
+
 ### OBAAF-GHA-026 reads the options that `${{ env }}` expressions give
 
 Slice 2d.19c, the rest of 2d.19 (#382); decision D-143. GitHub puts a `${{ }}` expression's value into a step's script before the shell starts. Since D-142 the lanes work out the ones that read `env`, but OBAAF-GHA-026 still read them as written: `claude ${{ env.FLAGS }} -p review` with `FLAGS: --dangerously-skip-permissions` in the job's `env` was its medium "cannot tell", not the high finding the option gets written out, and a harmless value was "cannot tell" too.
