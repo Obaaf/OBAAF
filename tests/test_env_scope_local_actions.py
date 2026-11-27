@@ -405,17 +405,18 @@ class TheReviewersThirdPassTest(unittest.TestCase):
 class TheReviewersFourthPassTest(unittest.TestCase):
     """What the fourth review of 2d.19e found (2026-11-27)."""
 
-    def test_a_value_from_the_scope_in_an_argument_of_a_handed_command_is_a_known_false_error(self):
-        """An input run as the command line that holds a value from the scope in an argument's place is read as
-        giving that value whole, so it is an error of the file where the input stands where a command's program goes
-        (D-145's known false errors). A version that read where in the value it stands was got past by the fifth
-        review twice (a value that opens an expression with the action's own text, and readings of two expressions
-        paired only by their order), so it was taken back. Where the caller's `env` settles the name, or the input
-        stands elsewhere, there is no error."""
+    def test_a_value_from_the_scope_in_an_argument_of_a_handed_command(self):
+        """An input run as the command line that holds a value from the scope in an argument's place was read as
+        giving that value whole, so it was an error of the file where the input stands where a command's program goes
+        (D-145's known false error). Since slice 2d.22 (#399, D-150) a plain reference to such an input in a bash or
+        sh step is read as the text its caller wrote where that is plain and the scope's part stands inside a word
+        (`--shard=${{ env.SHARD }}`), and as before otherwise (`test_scope_handed_values`). Where the caller's `env`
+        settles the name, or the input stands elsewhere, there is no error."""
         given = files(step("${{ inputs.run }}"), inputs="  run: {required: true}\n")
-        for command in ("npm test -- --shard=${{ env.SHARD }}", "${{ env.AGENT }} -p x", "npx ${{ env.AGENT }}"):
+        for command, errors in (("npm test -- --shard=${{ env.SHARD }}", 0), ("${{ env.AGENT }} -p x", 1),
+                                ("npx ${{ env.AGENT }}", 1)):
             with self.subTest(command=command):
-                self.assertEqual(len(scope_errors(wf(job=JOB, with_="{run: '" + command + "'}"), given)), 1)
+                self.assertEqual(len(scope_errors(wf(job=JOB, with_="{run: '" + command + "'}"), given)), errors)
         self.assertEqual(scope_errors(wf(job=JOB, step="{SHARD: '1'}",
                                          with_="{run: 'npm test -- --shard=${{ env.SHARD }}'}"), given), [])
         echo = files(step("echo ${{ inputs.run }}"), inputs="  run: {required: true}\n")
