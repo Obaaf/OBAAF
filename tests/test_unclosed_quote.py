@@ -9,8 +9,8 @@ quote (`claude ${{ inputs.a }}${{ env.F }} -p hi` given `'`), and so can a typin
 Now a warned option found only from the command that holds the unclosed quote on is "cannot tell". The commands
 before it are read again on their own and keep their matches. A text that holds a `${{ }}` expression is read as
 before: GitHub puts the expression's text in before bash reads the script, and it may hold the quote that closes
-this one. So is a text with a command or process substitution or backticks (or `${` beside `$'`), whose reader may
-take a closed quote for an unclosed one.
+this one. So is a text with `$(`, `${`, a process substitution or backticks, whose reader may take a closed quote
+for an unclosed one.
 """
 
 import unittest
@@ -85,7 +85,11 @@ class AnUnclosedQuoteTest(unittest.TestCase):
                        f"X=$(\n  # step 1) don't cache\n  echo hi\n)\n{line}",
                        f'V="$(echo $\'it\\\'s\')"\n{line}',
                        f"V=`echo x`\necho 'oops\n{line}",
-                       f"A=${{B:-$'it\\'s'}}\necho 'oops\n{line}"):
+                       f"A=${{B:-$'it\\'s'}}\necho 'oops\n{line}",
+                       # The second pass: `_balanced` counts every brace, where bash ends `${` at its first `}`.
+                       f'echo "${{x:-{{}}"\n{line}', f'NAME=a{{b; CLEAN="${{NAME//{{/}}"\n{line}',
+                       f'ARGS="${{ARGS:-{{"x":1}}"\n{line}', f'x=a{{b; echo "${{x//[{{]/}}"\n{line}',
+                       f'declare -A a; echo "${{a[{{]:-z}}"\n{line}', f'{line} "${{P:-{{}}"'):
             with self.subTest(script):
                 self.assertIn(HIGH, step_findings(script)[0])
 

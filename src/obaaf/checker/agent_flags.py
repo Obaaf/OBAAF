@@ -1678,9 +1678,10 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
     return reading
 
 
-# What `_unclosed_hits` does not cut: a command or process substitution, or backticks, which `_balanced` reads without
-# skipping a comment (flagship slice 2d.20b, from its review).
-_UNCLOSED_UNSURE_RE = re.compile(r"\$\(|`|[<>]\(")
+# What `_unclosed_hits` does not cut: an expansion read by `_balanced` (`$(`, `$((`, `${`), a process substitution, or
+# backticks (flagship slice 2d.20b, from its review): `_balanced` skips no comment, reads no `$'...\'...'` and counts
+# every brace, where bash ends `${` at its first unquoted `}`.
+_UNCLOSED_UNSURE_RE = re.compile(r"\$[({]|`|[<>]\(")
 
 
 def _unclosed_hits(text: str, programs: list, packages: list, flags: list, variables, mentioned: bool, unread,
@@ -1693,13 +1694,13 @@ def _unclosed_hits(text: str, programs: list, packages: list, flags: list, varia
     `${{ }}` (the caller checks): GitHub puts an expression's text in before bash reads the script, and it may hold
     the quote that closes this one. The commands kept are cut at the last separator before the quote (`;`, `&&`,
     `|`, a newline), which keeps a command bash would refuse too where the quote is in a later part of one list or
-    compound command: such a match stays one, as before. Not where the text holds a command or process
-    substitution or backticks, or `${` beside `$'`: the reader of those (`_balanced`) does not skip a comment or read
-    `$'...\\'...'` as bash does, so a quote it takes for unclosed may be closed for bash, which then runs what follows
-    (found by the review: `OUT="$(` / `# it's fine` / `claude --dangerously-skip-permissions -p hi` / `)"`). There
-    the match stays, as before. The commands before the quote are read with a budget of their own (at most once
-    more for the step)."""
-    if _UNCLOSED_UNSURE_RE.search(text) or ("${" in text and "$'" in text):
+    compound command: such a match stays one, as before. Not where the text holds `$(`, `${`, a process
+    substitution or backticks (`_UNCLOSED_UNSURE_RE`): their reader (`_balanced`) does not skip a comment, read
+    `$'...\\'...'` or end `${` at its first unquoted `}` as bash does, so a quote it takes for unclosed may be closed
+    for bash, which then runs what follows (found by the review: `OUT="$(` / `# it's fine` /
+    `claude --dangerously-skip-permissions -p hi` / `)"`, and `echo "${x:-{}"`). There the match stays, as before.
+    The commands before the quote are read with a budget of their own (at most once more for the step)."""
+    if _UNCLOSED_UNSURE_RE.search(text):
         return
     lexer = _Lexer(text, {})
     lexer.commands()
