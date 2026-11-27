@@ -13,15 +13,18 @@ value, as the caller wrote it, holds what the scope may give:
 
 - **Cleared.** In a bash or sh step's `run`, a value that is one text of plain characters (`_PLAIN_TEXT`) whose
   every expression is one plain reference to `env`, each scope's part inside a word after a character other than a
-  space or `/` (`--shard=${{ env.SHARD }}`), is read as its text, with the scope's part as a plain word. Whatever
-  one word the scope gives there, no program and no command a program runs from its arguments is named by it.
+  space or `/` (`--shard=${{ env.SHARD }}`), is read as its text, with each part where it stands, as D-144 reads the
+  same line in a workflow's own step.
 - **Added.** A newline before a scope's part, in any text the caller's value can make, is a program's place, as a
   shell reads it, also where the value is put after `echo` (one of D-145's stated ways past).
 
 Everything else is read as before. The first review of this slice showed why the wider reading first built here
-(the line made read as D-144 reads a workflow's own step) was quieter than the base: D-144's program reader does not
-know every program that runs its arguments (`xvfb-run`, `find -exec`, `trap`), a line a `^` or a backtick continues,
-separators written inside the caller's expressions, or a comment's backslash.
+(every handed value read as D-144 reads a workflow's own step) was quieter than the base: D-144's program reader does
+not know every program that runs its arguments (`xvfb-run`, `find -exec`, `trap`), a line a `^` or a backtick
+continues, separators written inside the caller's expressions, or a comment's backslash. The plain form rules out all
+but the first; a word from the scope does not begin a word there, so `xvfb-run`, `find -exec` and `trap` cannot run
+it. A program that runs an option's value as a command (`env -S`, `git -c core.sshCommand=`) is read as D-144 reads
+it, in a workflow's own step too (the second review).
 """
 
 import json
@@ -47,7 +50,7 @@ class TheKnownFalseErrorIsClearedTest(unittest.TestCase):
     def test_inside_a_word_of_a_plain_value(self):
         for command in ("npm test -- --shard=${{ env.SHARD }}", "./build.sh --out=${{ env.OUT }}/bin",
                         "deploy --region=${{ env.REGION }}-${{ env.STAGE }}", "npm test -- --shard=${{ env['SHARD'] }}",
-                        "pytest --k=a${{ env.K }} tests/", "make V=${{ env.V }}", "x@${{ env.H }}:1"):
+                        "pytest --k=a${{ env.K }} tests/", "make V=${{ env.V }}", "ssh x@${{ env.H }}:1"):
             with self.subTest(command=command):
                 self.assertEqual(handed(command), [])
 
@@ -72,6 +75,38 @@ class TheKnownFalseErrorIsClearedTest(unittest.TestCase):
         self.assertEqual(handed("${{ env.AGENT }} -p x", step="{AGENT: echo}"), [])
         self.assertEqual(lane(wf(job=JOB, step="{AGENT: claude}", with_="{run: '${{ env.AGENT }} -p x'}"),
                               files(step("${{ inputs.run }}"), inputs=INPUT)), "agent")
+
+
+OWN = ("on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    permissions: {contents: read}\n"
+       f"    env: {JOB}\n    steps:\n      - shell: bash\n        run: COMMAND\n")
+
+
+class AsAWorkflowsOwnStepTest(unittest.TestCase):
+    """A cleared value is read as the same line written in a workflow's own step is read (D-144): where its scope's
+    part may finish a program's name it is an error there and here (the second review of this slice), and where D-144
+    reads an option's value as no program, so is it here."""
+
+    def test_the_same_as_a_workflows_own_step(self):
+        for command in ("npm test -- --shard=${{ env.SHARD }}", ".${{ env.A }} -p hi", "python${{ env.PYV }} -m pytest",
+                        "sudo .${{ env.A }} --message hi", "eval x${{ env.A }}", "bash -c _${{ env.A }}",
+                        "x@${{ env.H }}:1", "env -S${{ env.A }} -p hi", "make CC=${{ env.CC }}",
+                        "git -c core.sshCommand=${{ env.A }} fetch", "X=${{ env.S }} make"):
+            with self.subTest(command=command):
+                own = bool([e for e in result(OWN.replace("COMMAND", json.dumps(command)), {}).errors if "may set" in e])
+                self.assertEqual(bool(handed(command)), own)
+
+    def test_where_the_part_may_finish_a_programs_name(self):
+        for command in (".${{ env.A }} -p hi", "python${{ env.PYV }} -m pytest", "sudo .${{ env.A }} --message hi",
+                        "eval x${{ env.A }}", "bash -c _${{ env.A }}", "x@${{ env.H }}:1"):
+            with self.subTest(command=command):
+                self.assertEqual(len(handed(command)), 1)
+
+    def test_a_nearer_name_set_to_an_expression_is_never_cleared(self):
+        text = wf(job=JOB, step="{SEP: '${{ matrix.sep }}'}",
+                  with_="{run: " + json.dumps("make --x=${{ env.SEP }}${{ env.A }} --message hi") + "}")
+        text = text.replace("    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    strategy: {matrix: {sep: [';']}}\n")
+        self.assertEqual(len(scope_errors(text, files(step("${{ inputs.run }}"), inputs=INPUT))), 1)
+        self.assertEqual(handed("make --x=${{ env.SEP }}${{ env.A }} --message hi", step="{SEP: '-x'}"), [])
 
 
 class WhatStaysAnErrorTest(unittest.TestCase):
@@ -162,6 +197,10 @@ class ANewlineBeforeTheScopesPartTest(unittest.TestCase):
             with self.subTest(command=command):
                 (error,) = handed(command, action_run="echo ${{ inputs.run }}")
                 self.assertIn("where a command's program goes", error)
+
+    def test_a_newline_between_two_parts(self):
+        (error,) = handed("--a=${{ env.S }}\n${{ env.A }} --message hi", action_run="echo ${{ inputs.run }}")
+        self.assertIn("where a command's program goes", error)
 
     def test_a_newline_after_it_is_no_error_in_an_arguments_place(self):
         for command in ("echo ${{ env.T }}\nmake", "${{ github.head_ref || env.REF }}", "${{ 'y' || env.X }}"):

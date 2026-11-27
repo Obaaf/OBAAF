@@ -1614,9 +1614,10 @@ def _bodies_or_none(text: str) -> list:
 
 
 # Flagship slice 2d.22 (#399, D-150). What stands, in a text `_scope_texts` makes, for the part an `env` written as one
-# expression may give; the most texts it makes of one value; and the characters a value it clears may hold besides
-# that part: words, spaces and `_.,:=@%+-/`, so the shell splits the value only at its spaces.
-_SCOPE_PART = "\ue002scope\ue003"
+# expression may give (the word `_scope_at_program` reads as one); the most texts it makes of one value; and the
+# characters a value it clears may hold besides that part: words, spaces and `_.,:=@%+-/`, which bash splits only at
+# its spaces.
+_SCOPE_PART = wf_mod._SCOPE_PROBE
 _SCOPE_READINGS = 16
 _PLAIN_TEXT = re.compile(r"[A-Za-z0-9_.,:=@%+/ -]*")
 
@@ -1643,9 +1644,12 @@ def _scope_texts(value, folder: str, env: "_ActionEnv") -> "_Handed | None":
     follows or with more texts than it reads, too many combinations, or more than `LOCAL_ACTION_TEXT` characters made.
 
     `clears` is true only where the value is one text whose every expression is one plain reference to `env`
-    (`${{ env.SHARD }}`, `${{ env['SHARD'] }}`), whose other characters are `_PLAIN_TEXT`'s, and where each scope's part
-    stands inside a word, after a character other than a space or `/` (`--shard=${{ env.SHARD }}`): then whatever one
-    word the scope gives there, no program and no command a program runs from its arguments is named by it."""
+    (`${{ env.SHARD }}`, `${{ env['SHARD'] }}`) to a name that does not give an expression, whose other characters are
+    `_PLAIN_TEXT`'s, and where each scope's part stands inside a word, after a character other than a space or `/`
+    (`--shard=${{ env.SHARD }}`). Such a value is split by bash only at its spaces, and the shell reader D-144 uses
+    reads it as bash does; `_action_scope_place` then reads it with each part where it stands, as D-144 reads the same
+    line in a workflow's own step. That is not a promise that no program runs such a word: one that runs an option's
+    value as a command (`env -S${{ env.A }}`, `git -c core.sshCommand=${{ env.A }}`) is read as D-144 reads it."""
     if not isinstance(value, str) or _FROM_SCOPE_TEXT in value or expr_mod.OPEN not in value:
         return None
     try:
@@ -1671,6 +1675,9 @@ def _scope_texts(value, folder: str, env: "_ActionEnv") -> "_Handed | None":
         values = _token_values(toks, {}, folder, env=env, cut=cut)
         if values is None or cut or any(expr_mod.OPEN in item and _FROM_SCOPE_TEXT in item for item in values):
             return None
+        # A name a nearer mapping sets to an expression (`SEP: ${{ matrix.sep }}`) may give any text, so a value
+        # that reads one is never cleared (found by the second review).
+        plain_refs = plain_refs and not any(expr_mod.OPEN in item for item in values)
         choices.append(tuple(dict.fromkeys(item.replace(_FROM_SCOPE_TEXT, _SCOPE_PART) if expr_mod.OPEN not in item
                                            else "x" for item in values)) or ("",))
         count *= len(choices[-1])
@@ -1728,8 +1735,9 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv, s
     caller wrote it, holds what the scope may give (`scope_texts`, made by `_scope_texts`):
 
     - where that value `clears` and the line is a `run` of a bash or sh step (`plain_shell`), it is read as its text
-      with each scope's part as a plain word, not as giving the scope's value whole: `npm test -- --shard=${{
-      env.SHARD }}` run as the command line is no error, as in a workflow's own step;
+      with each scope's part where it stands, as `_scope_at_program` reads the same line in a workflow's own step, not
+      as giving the scope's value whole: `npm test -- --shard=${{ env.SHARD }}` run as the command line is no error,
+      and `.${{ env.A }} -p x`, whose part may finish the program's name, is one;
     - a newline before a scope's part in any text the value can make is read as a program's place (`make`, a new
       line, `${{ env.AGENT }} -p x`, put after `echo`), as a shell reads it; and
     - otherwise it is read as before, the separator rule included."""
@@ -1744,6 +1752,7 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv, s
         return (wf_mod.one_line(text, 60), "program")
     scoped: list = []
     known: dict = {}
+    inner: dict = {}
     memo: dict = {}
     for start, end, body in found:
         if not re.search(r"\binputs\b|\benv\b|action_path", body, re.I):
@@ -1777,16 +1786,18 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv, s
                 if any("\n" in item[:item.rfind(_SCOPE_PART)] for item in handed.texts if _SCOPE_PART in item):
                     return (text[start:end], "program")
                 if handed.clears and plain_shell:
-                    # The scope's part is one word inside another the value writes: read as that text, with a plain
-                    # word for it, so the rest of the line is read as the shell would read it.
-                    known[(start, end)] = handed.texts[0].replace(_SCOPE_PART, "x")
+                    # The scope's part is one word inside another the value writes: the value is read as its text, with
+                    # each part where it stands, as `_scope_at_program` reads the same line in a workflow's own step
+                    # (so a part that may finish a program's name, `.${{ env.A }}`, counts: the second review).
+                    inner[(start, end)] = handed.texts[0]
+                    scoped.append((start, end))
                     continue
             scoped.append((start, end))
         elif values:
             known[(start, end)] = values[0]
     if not scoped:
         return None
-    at = wf_mod._scope_at_program(text, tuple(scoped), known)
+    at = wf_mod._scope_at_program(text, tuple(scoped), known, inner)
     return None if at is None else (text[at[0]:at[1]], at[2])
 
 
