@@ -2277,8 +2277,10 @@ def read_shell_lines(text: str, ctx: af._Context, family: str) -> None:
             maybe.add(m.group(1).lower())
         # A loop's variable over values that hold the letters (`for /f %%i in ('where codexcli') do %%i ...`,
         # `foreach ($p in (Get-Command codexcli)) { & $p ... }`).
+        # Each is anchored at `for` and reads no bracket inside the list, so it stays linear (the third review: a
+        # lazy `.*?` before the variable took cubic time on a line of many `for ... in ( )`).
         loop = re.search(r"\bforeach\s*\(\s*\$(\w+)\s+in\s+(.*)", line, re.I) if family == "pwsh" else re.search(
-            r"\bfor\b.*?%%?(\w)\s+in\s*\((.*?)\)\s*do\b", line, re.I)
+            r"\bfor(?:\s+/\w+(?:\s+\"[^\"\n]*\")?)*\s+%%?(\w)\s+in\s*\(([^()]*)\)\s*do\b", line, re.I)
         if loop and af.appears(loop.group(2), ctx.programs, ctx.packages):
             maybe.add(loop.group(1).lower())
     # Only a script that names the tool (`names`) makes a command the checker cannot name "cannot tell" (flagship

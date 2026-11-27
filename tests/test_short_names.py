@@ -125,11 +125,11 @@ class TheIssuesCaseTest(unittest.TestCase):
                 self.assertEqual(findings(script, shell), ([], []))
 
 
-def retry(command):
+def retry(command, env=""):
     """OBAAF-GHA-026 findings of a step that gives `command` to an action's `command` input."""
     text = ("on: workflow_dispatch\npermissions: {}\njobs:\n  j:\n    runs-on: ubuntu-24.04\n    steps:\n"
             "      - uses: nick-fields/retry@" + "b" * 40 + "\n        with:\n          max_attempts: 2\n"
-            f"          command: '{command}'\n")
+            f"          command: '{command}'\n" + (f"        env:\n          {env}\n" if env else ""))
     with TempDir() as tmp:
         result = check(tmp, text)
     return sorted((f.severity, f.kind, f.facts.get("program")) for f in result.findings if f.rule == "OBAAF-GHA-026")
@@ -165,9 +165,39 @@ class WhereTheToolIsNamedTest(unittest.TestCase):
         self.assert_cannot_tell("%CLAUDEEXE% -p x", "cmd", "claude-code")
         self.assert_cannot_tell("set C=xclaude\n%C:~1% -p x", "cmd", "claude-code")
 
+    def test_a_variable_named_for_the_tool(self):
+        # The third review: a name given the value of a variable named for the tool, wherever it is given.
+        for shell, script in (("pwsh", "if ($IsWindows) { $t = $env:CODEXEXE } else { $t = $env:CODEXBIN }\n"
+                                       "& $t exec --yolo fix"),
+                              ("pwsh", "$t = Get-Command $env:CODEXBIN\nStart-Process $t @p"),
+                              ("pwsh", "$t = \"${{ steps.setup.outputs.codexbin }}\"\n& $t exec --yolo fix"),
+                              ("cmd", "for /f \"delims=\" %%i in ('where %CODEXBIN%') do set X=%%i\n%X% exec --yolo fix"),
+                              ("cmd", "set X=%CODEXBIN%\nset Y=%X%\n%Y% exec --yolo fix"),
+                              ("pwsh", "'acne'\nbash -c 'IFS=,; set -- $CODEXCMD; \"$@\"'")):
+            with self.subTest(shell=shell, script=script):
+                got, errors = findings(script, shell)
+                self.assertEqual(errors, [])
+                self.assertIn(CANNOT_TELL + ("codex",), got)
+        # Not for two letters, where `$cnt` is a count: a variable with `cn` inside a word counts only as the command.
+        self.assertEqual(findings("$cnt = 1\n& $exe --auto", "pwsh"), ([], []))
+
+    def test_an_alias_whose_value_holds_the_letters(self):
+        # As before: an alias whose value holds the letters anywhere is the program (`alias q=/opt/bin/xcodex`).
+        got, errors = findings("shopt -s expand_aliases\nalias q=/opt/bin/xcodex\nq exec --yolo x")
+        self.assertEqual(errors, [])
+        self.assertTrue(any(program == "codex" for _sev, _kind, program in got), got)
+
+    def test_a_cmd_loop_is_read_in_linear_time(self):
+        # The third review: the loop pattern took cubic time on a line of many `for ... in ( )`.
+        import time
+        started = time.monotonic()
+        findings("for %a in ( ) " * 3000 + "codex", "cmd")
+        self.assertLess(time.monotonic() - started, 5)
+
     def test_a_long_name_built_from_pieces(self):
         # A name of six letters or more counts anywhere, as before: the review's pieces glued to other letters.
         self.assert_cannot_tell("$t = 'xclaude'.Substring(1)\n& $t -p x", "pwsh", "claude-code")
+        self.assert_cannot_tell("$a = 'xclaude'.Substring(1)\n$b = $a\n& $b -p x", "pwsh", "claude-code")
         self.assert_cannot_tell("X=$(npm root -g)\nnode \"$X/cn.mjs\" --auto")
 
     def test_bash(self):
@@ -203,6 +233,13 @@ class WhereTheToolIsNamedTest(unittest.TestCase):
             with self.subTest(command):
                 self.assertIn(CANNOT_TELL + ("codex",), retry(command))
         self.assertEqual(retry("make picnic && $X --y"), [])
+        # A variable named for a tool of three letters or more names it in the whole input (the third review).
+        for command in ('bash -c "$CODEXCMD"', 'eval "$CODEXCMD"'):
+            with self.subTest(command):
+                self.assertIn(CANNOT_TELL + ("codex",), retry(command))
+        # The step's own naming counts there too: `AGENT: codex` in its `env`, and the input holds the letters.
+        self.assertIn(CANNOT_TELL + ("codex",), retry('echo codexes; eval "$AGENT_CMD"', env="AGENT: codex"))
+        self.assertEqual(retry('echo codexes; eval "$AGENT_CMD"'), [])
 
     def test_a_name_in_the_steps_env(self):
         self.assert_cannot_tell("IFS=,\n$T -p x", env={"T": "claude"}, program="claude-code")
@@ -266,6 +303,7 @@ class TheTestsThemselvesTest(unittest.TestCase):
                 self.assertTrue(agent_flags.mentions(text, *CLINE))
         self.assertTrue(agent_flags.mentions("%APPDATA%\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js",
                                              *CLAUDE))
+        self.assertTrue(agent_flags.mentions("%APPDATA%\\npm\\node_modules\\@continuedev\\cli\\dist\\index.js", *CN))
 
     def test_a_part_of_a_name(self):
         for text, tool in (("$CLAUDE_BIN", CLAUDE), ("$env:CN_BIN", CN), ("${CMD:-claude}", CLAUDE),

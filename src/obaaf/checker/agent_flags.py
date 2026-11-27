@@ -1894,6 +1894,9 @@ _EXPRESSION_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
 _PROPERTY_RE = re.compile(r"\$\{?[\w:]+\}?(?:\.\w+)+")
 # Where a name's case changes (`$claudeBin`, `$cnPath`, `$CLAUDEBin`), for `names`.
 _CASE_EDGE_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+# A reference to a variable or a GitHub expression, in bash, PowerShell or cmd (`$CODEXBIN`, `${X}`, `$env:X`,
+# `%X%`, `!X!`, `${{ steps.setup.outputs.codexbin }}`), for `names` (2d.23, from its third review).
+_REFERENCE_RE = re.compile(r"\$\{\{.*?\}\}|\$\{[^}\n]*\}|\$[\w:]+|%[^%\s]+%|![^!\s]+!", re.S)
 
 
 def _named(text: str, programs: list, packages: list, parts: bool) -> bool:
@@ -1907,12 +1910,15 @@ def _named(text: str, programs: list, packages: list, parts: bool) -> bool:
     such a name is in no ordinary word, and a name built from pieces glued to others (`'xclaude'.Substring(1)`,
     cmd's `%C:~1%` after `set C=xclaude`) is then still read as the tool's (found by the slice's review). Only
     a shorter one (Continue's `cn`, `kilo`, `qwen`, `cline`, `goose`, `codex`), which is in many words, must
-    stand as a name."""
+    stand as a name, except that one of three letters or more counts anywhere inside a reference to a variable
+    or an expression (`$CODEXBIN`, `%KILOBIN%`), but not in a string or a word (`'decline'`, `kilobyte`)."""
     low = re.sub(r"[\"'\\]", "", text).casefold()
-    scoped = [p for p in packages if p.startswith("@") or "/" in p]
     forms = [low]
     if "\\" in text:
         forms.append(re.sub(r"[\"']", "", text).replace("\\", "/").casefold())
+    if "$'" not in text and not any(p in form for p in [*programs, *packages] for form in forms):
+        return False        # the letters are nowhere (the common case, kept cheap; the third review measured it)
+    scoped = [p for p in packages if p.startswith("@") or "/" in p]
     if "$'" in text:
         decoded = re.sub(r"\$'((?:[^'\\]|\\.)*)'", lambda m: _ansi_c(m.group(1)), text).casefold()
         forms.append(re.sub(r"[\"'\\]", "", decoded))
@@ -1922,10 +1928,19 @@ def _named(text: str, programs: list, packages: list, parts: bool) -> bool:
     if parts and _CASE_EDGE_RE.search(text):
         cased = re.sub(r"[\"'\\]", "", _CASE_EDGE_RE.sub(" ", text)).casefold()
     dotted = None
+    references = None
     plain = [p for p in packages if p not in scoped]
     for program in [*programs, *plain]:
         if parts and len(program) >= 6 and any(program in form for form in forms):
             return True
+        if parts and len(program) >= 3 and program in low:
+            # The letters of a name of three letters or more anywhere inside a reference to a variable or an
+            # expression (`$CODEXBIN`, `%CODEXBIN%`, `${{ steps.setup.outputs.codexbin }}`): a name given for the
+            # tool, which may hold it wherever it is used (the third review). Not for two letters (`$cnt`).
+            if references is None:
+                references = " ".join(m.group(0) for m in _REFERENCE_RE.finditer(text)).casefold()
+            if program in references:
+                return True
         pattern = None
         # A change of case is an edge only for a name of three letters or more (`$codexBin`, not `$isCN`; the
         # second review).
