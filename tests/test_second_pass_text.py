@@ -137,6 +137,21 @@ class AValueNeverStartsAnExpressionTest(unittest.TestCase):
         self.assertEqual(found(composite("claude ${{ inputs.a }} -p hi"), caller(f"{{a: \"${{{{ '{SKIP}' }}}}\"}}")),
                          ([HIGH_026], []))
 
+    def test_a_string_handed_as_an_expression_beside_an_env_expression(self):
+        # The third review: 2d.19f's own reading of the line (`_caller_inputs`) took such a value for one it does not
+        # work out, so a line that also reads `env` stayed "cannot tell".
+        action_text = composite("claude ${{ inputs.a }} ${{ env.F }} -p hi")
+        self.assertEqual(found(action_text, caller(f"{{a: \"${{{{ '{SKIP}' }}}}\"}}", env="F: --verbose")),
+                         ([HIGH_026], []))
+        self.assertEqual(found(action_text, caller("{a: \"${{ '--model sonnet' }}\"}", env="F: --verbose")),
+                         ([], []))
+
+    def test_a_reusable_workflows_inputs_are_read_as_before(self):
+        # The third review: what a calling job hands a reusable workflow makes the words a baseline entry matches, so
+        # a string written as an expression stays the expression it was there.
+        self.assertEqual(checker_mod._caller_value_tokens("${{ '--x' }}"), [("op", "("), ("str", "--x"), ("op", ")")])
+        self.assertEqual(checker_mod._value_tokens("${{ '--x' }}", literals=True), [("str", "--x")])
+
     def test_a_joined_value_holding_a_close_reads_no_quote_wrongly(self):
         # The first review: `}}$` written whole as `${{ '}}$' }}` was ended at its `}}` by the readers that do not
         # know strings, which then read an unclosed quote (an extra medium). Only the `$` is an expression now.

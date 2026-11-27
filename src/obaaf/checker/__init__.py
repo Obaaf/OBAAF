@@ -2181,21 +2181,21 @@ def _written_tokens(toks: list) -> str:
     return "".join(out)
 
 
-def _value_tokens(value: str) -> list:
+def _value_tokens(value: str, literals: bool = False) -> list:
     """The tokens of an expression that gives `value`, the text a step's `with:` hands an input: a string
     for plain text, the expression in parentheses for one `${{ }}`, and `format()` for text with
     expressions in it. Text with an expression that does not end is taken as plain text. Literal text is
     an argument of `format()`, never part of its template, and `${{` in plain text is written `${ {`, so
     the expression made never holds `${{` in a string: a condition written without `${{ }}` that held one
     would be read as text, always true (the third review of slice 2d.4b3a found `${PREFIX}` in a value,
-    which a template writes `${{PREFIX}}`, end an `if:`'s narrowing to `push`)."""
+    which a template writes `${{PREFIX}}`, end an `if:`'s narrowing to `push`). With `literals` (a local
+    action's input, flagship slice 2d.20a), a value whose expressions are each one string is the text they
+    give (`_literals_text`)."""
+    if literals:
+        text = _literals_text(value)
+        if text is not None:
+            value = text
     parts = _expression_parts(value) if expr_mod.OPEN in value else None
-    if parts and all(kind == "text" or _string_literal(body) is not None for kind, body in parts):
-        # Expressions that are each one string give that text (flagship slice 2d.20a): a value the second pass
-        # made with `${{ '$' }}` for a join, handed on to a further local action, is the text GitHub hands it
-        # (the second review found `--dangerously-skip-permissions #${{ '$' }}{{ x` read there as `format()`).
-        value = "".join(body if kind == "text" else _string_literal(body) for kind, body in parts)
-        parts = None
     if not parts or all(kind == "text" for kind, _ in parts):
         return [("str", value.replace(expr_mod.OPEN, "${ {"))]
     exprs = [body for kind, body in parts if kind == "expr"]
@@ -2206,6 +2206,30 @@ def _value_tokens(value: str) -> list:
         toks.append(("op", ","))
         toks += [("str", body)] if kind == "text" else [("op", "("), *_unopened(expr_mod.tokens(body)), ("op", ")")]
     return toks + [("op", ")")]
+
+
+def _literals_text(value: str) -> str | None:
+    """The text a value gives when each of its `${{ }}` expressions is one string literal and nothing else
+    (`a${{ '$' }}b` gives `a$b`), else None (flagship slice 2d.20a): a value the second pass made with `${{ '$' }}`
+    for a join, handed on to a further local action, is the text GitHub hands it (the second review found
+    `--dangerously-skip-permissions #${{ '$' }}{{ x` read there as `format()`, which hid it), and so is a caller's
+    own `${{ '--yolo' }}`. Only for a local action's inputs: what a reusable workflow is handed is read as before,
+    so the words a baseline entry matches there stay as they were (found by the third review)."""
+    if expr_mod.OPEN not in value:
+        return None
+    parts = _expression_parts(value)
+    if not parts:
+        return None
+    pieces: list = []
+    for kind, body in parts:
+        if kind == "text":
+            pieces.append(body)
+            continue
+        text = _string_literal(body)
+        if text is None:
+            return None
+        pieces.append(text)
+    return "".join(pieces)
 
 
 def _string_literal(body: str) -> str | None:
@@ -2272,12 +2296,12 @@ def _inputs_put_in_body(body: str, inputs: dict, problems: list) -> str:
                 values = list(dict.fromkeys(inputs.values())) or [""]
                 out += [("id", "format"), ("op", "("), ("str", "".join("{" + str(n) + "}" for n in range(len(values))))]
                 for value in values:
-                    out += [("op", ","), *_value_tokens(value)]
+                    out += [("op", ","), *_value_tokens(value, literals=True)]
                 out.append(("op", ")"))
                 i += 1
                 changed = True
                 continue
-            out.extend(_value_tokens(inputs.get(wf_mod.input_name(name), inputs.get(_ANY_INPUT, ""))))
+            out.extend(_value_tokens(inputs.get(wf_mod.input_name(name), inputs.get(_ANY_INPUT, "")), literals=True))
             i += width
             changed = True
             continue
@@ -2624,7 +2648,9 @@ def _caller_inputs(outer: dict, given: dict, inputs: dict, top: "wf_mod.Step", n
     out: dict = {}
     pending = []
     for name, value in inputs.items():
-        if expr_mod.OPEN not in value:
+        # A value whose expressions are each one string is text, as the second pass reads it (`_literals_text`,
+        # flagship slice 2d.20a, from its third review).
+        if expr_mod.OPEN not in value or _literals_text(value) is not None:
             out[name] = value
             continue
         out[name] = _unworked_input(name)
