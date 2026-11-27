@@ -154,6 +154,12 @@ class ReleaseDecisionJsonTest(unittest.TestCase):
                     self.assertTrue(any(b.startswith("--approvals ") and "no approval was counted" in b
                                         for b in doc["blocks"]), doc["blocks"])
                     self.assertEqual(doc["approvals"], [])
+            # A good approval does not carry a malformed entry after it.
+            path = write_json(tmp / "approvals-second.json", load(r.approvals) + [{"user": "a"}])
+            code, doc, err = run_json(*cli_args(r), "--approvals", path)
+            self.assertNotIn("Traceback", err)
+            self.assertEqual((code, doc["allowed"], doc["approvals"]), (1, False, []))
+            self.assertIn("--approvals entry 2's user is not an object with a text login", doc["blocks"][-1])
             # The shape GitHub gives, with fields that count for nothing, is still read.
             entries = load(r.approvals) + [{"state": "approved", "environments": [{"name": None}], "user": None},
                                            {"state": "approved", "environments": [], "user": {"login": None}}]
@@ -175,7 +181,22 @@ class ReleaseDecisionJsonTest(unittest.TestCase):
                     self.assertEqual(out, "")
                     self.assertTrue(err.startswith("error: "), err)
                     self.assertNotIn("Traceback", err)
-                    self.assertFalse((tmp / "decision.json").exists())
+                    # The --output file is opened before the summary, and left empty.
+                    if "--output" in extra:
+                        self.assertEqual((tmp / "decision.json").read_text(encoding="utf-8"), "")
+
+    def test_an_output_file_that_cannot_be_written_stops_before_the_summary(self):
+        with TempDir() as tmp:
+            r = build_release(tmp)
+            summary = tmp / "summary.md"
+            blocked = r.policy / "decision.json"  # its folder is a file
+            for fmt in ("json", "text"):
+                with self.subTest(format=fmt), mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
+                    code, out, err = run_cli(*cli_args(r), "--approvals", r.approvals, "--format", fmt,
+                                             "--output", blocked)
+                    self.assertEqual((code, out), (1, ""))
+                    self.assertTrue(err.startswith("error: "), err)
+                    self.assertFalse(summary.exists())
 
     def test_the_decision_object(self):
         # What the API gives a program that calls verify_release itself.
