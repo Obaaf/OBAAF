@@ -2475,8 +2475,8 @@ def _caller_inputs(outer: dict, given: dict, inputs: dict, top: "wf_mod.Step", n
     before the action starts, with the `env` the caller sees (the workflow's, the job's and its own), so a value
     there that holds `${{ }}` expressions reading only `env` is the text they give (`_worked_by_caller`), not an
     expression the action's step would work out with its own `env` (the second pass puts it in as one). Any other
-    value with an expression, a `default` with one (whether the runner gives a default `env` is not established,
-    F-425), a `with:` written as one value, and an input the action's command lines do not read (`needed`, from
+    value with an expression, a `default` with one (GitHub refuses an action whose input `default` reads `env`, as
+    CI's job `composite-env-premise` shows, and other contexts are not read here), a `with:` written as one value, and an input the action's command lines do not read (`needed`, from
     `_command_inputs_read`; None for every input) are `_unworked_input`. What a value is worked out to is kept for
     the check, by the value and the mappings the caller sees, so many steps that hand it alike (a YAML alias) work
     it out once."""

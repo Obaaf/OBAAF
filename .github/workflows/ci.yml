@@ -525,9 +525,11 @@ jobs:
     # with the action step's; and a value put in is not read again as an expression. The action,
     # tests/premise/composite-env, prints and asserts each value. What an input's `default` that reads `env` gives
     # is printed by a second action, tests/premise/composite-env-default, in a step that may fail (F-425). It checks
-    # out the repository without keeping its token, holds no secret and writes nothing. Not probed: the workflow's
-    # own `env` (it would reach every job of this file), a further local action used by the action, and
-    # self-hosted runners.
+    # out the repository without keeping its token, holds no secret and writes nothing. Run 45955337311 showed
+    # every asserted value as recorded on ubuntu-24.04, macos-latest and windows-latest, and GitHub refusing the
+    # second action's manifest ("Unrecognized named-value: 'env'" in the input's `default`), so an action whose
+    # input default reads `env` does not load at all. Not probed: the workflow's own `env` (it would reach every
+    # job of this file), a further local action used by the action, and self-hosted runners.
     name: "Runner premise: the env context in a local composite action (2d.19f, ${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
