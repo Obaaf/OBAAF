@@ -4,6 +4,15 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### OBAAF-GHA-026 names a tool where its name stands as a name, not where its letters stand inside a word
+
+Slice 2d.23, from #388; decision D-151. OBAAF-GHA-026's "cannot tell" in a step that is not bash (pwsh, cmd, python, github-script and the others) was given wherever the tool's letters stood in any word, so Continue's two-letter program `cn` was "named" by `'acne'`, `$cnt = 1`, `-cne` or `example.cn`, Cline's `cline` by `decline`, and Kilo Code's `kilo` by `kilobyte`: with one construct the reader cannot read (`$x = (` closed on a later line), a medium, and a medium gate failed.
+
+- **Can let a check pass that failed.** The tool counts as named where its name stands as a name or a part of a variable's name (`$CN_BIN`, `$codexBin`, `${CMD:-cn}`), where a name of six letters or more stands anywhere, and where one of three letters or more stands inside a reference to a variable or an expression (`$CODEXBIN`, `%KILOBIN%`); not inside another word or string. A name of two letters is not one label of a dotted name (`edu.cn`, `cn.archive.ubuntu.com`), except before `.exe`, `.cmd`, `.ps1` and the like. In bash, a step that names `cn` only in such a host is no longer "named" either.
+- **Kept:** a command the checker cannot name whose own word holds the letters (`"$CLAUDEBIN"`, `& $claudeExe`, `%CODEXBIN%`), or that uses a name given such a value (`$t = 'cnx'.TrimEnd('x'); & $t`), or `IFS=` on its own, is "cannot tell" as before.
+- **Can fail a check that passed:** a bash step that names the tool behind a backslash (`C:\tools\cn.exe`), a `${{ }}` expression as a run step's command word (`${{ steps.install-claude.outputs.bin }} -p x`), a scoped package in a Windows path, and Python's `r'C:\tools\claude.exe'` with a warned option.
+- On this repository and on the first adopter the reports are byte-identical with `flagship` `84280c9`.
+
 ### A value handed to a local action: the scope's part in an option or an assignment, and a newline before it
 
 Slice 2d.22, from #399; decision D-150. Under an `env` written as one expression (`env: ${{ fromJSON(vars.E) }}`), D-145 read a value the caller hands a local composite action as giving the scope's value whole, wherever in the value the scope's part stood. So an input run as the command line (`run: ${{ inputs.run }}` in the action) given `npm test -- --shard=${{ env.SHARD }}` was an error of the file, where the same line in a workflow's own step is none.
