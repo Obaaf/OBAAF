@@ -2378,6 +2378,118 @@ def _both_conditions(outer, inner):
     return f"{expr_mod.OPEN} ({outer_body}) && ({inner_body}) {expr_mod.CLOSE}"
 
 
+# Characters of command lines `_given_texts` makes for one job and for the check (flagship slice 2d.19f). Past them a
+# line is not worked out, and OBAAF-GHA-026 reads it as the second pass puts it in: "cannot tell", never an error.
+GIVEN_TEXTS_JOB = LOCAL_STEPS_TEXT
+GIVEN_TEXTS_CHECK = LOCAL_STEPS_CHECK_TEXT
+
+
+def _unworked_input(name: str) -> str:
+    """What `_caller_inputs` hands an input whose value the checker does not work out in the caller's context: a
+    reference to the input itself, which D-143 does not work out (`inputs` is not `env`), so the line holding it is
+    read as one with a word the checker cannot read."""
+    shown = "*" if name == _ANY_INPUT else name.replace("'", "''")
+    return f"{expr_mod.OPEN} inputs['{shown}'] {expr_mod.CLOSE}"
+
+
+def _worked_by_caller(value: str, scopes: list, case: str) -> str | None:
+    """`value`, a text a job's step hands a local action's input in its `with:`, with its `${{ }}` expressions worked
+    out as GitHub works them out before the action starts, with the `env` the step sees (`scopes`, outermost first,
+    under the runner's comparison of names `case`), where the checker knows the one text (D-143's conditions:
+    `rules.env_expressions_only_env`, `rules.env_values_known`, one reading, nothing left unworked); None otherwise
+    (flagship slice 2d.19f)."""
+    try:
+        if not (rules_mod.env_expressions_only_env(value)
+                and rules_mod.env_values_known(scopes, case, env_expr.names_read(value))):
+            return None
+        # The text made is bounded as a line of a local action is (`LOCAL_ACTION_TEXT`) before it is made.
+        plan = env_expr.plan(value, env_expr.Env(scopes, case), room=LOCAL_ACTION_TEXT)
+    except (RecursionError, ValueError, env_expr.Unread, env_expr.NoRoom):
+        return None
+    if plan.readings != 1 or plan.scoped:
+        return None
+    made = env_expr.build(value, plan) if plan.units else value
+    return None if expr_mod.OPEN in made else made
+
+
+def _caller_inputs(outer: dict, given: dict, inputs: dict, top: "wf_mod.Step") -> tuple:
+    """(inputs, same) for `_given_texts` (flagship slice 2d.19f): the action's inputs (`_action_inputs_given`) as the
+    action's steps see them where `top`, a job's own step, uses the action. GitHub works out the caller's `with:`
+    before the action starts, with the `env` the caller sees (the workflow's, the job's and its own), so a value
+    there that holds `${{ }}` expressions reading only `env` is the text they give (`_worked_by_caller`), not an
+    expression the action's step would work out with its own `env` (the second pass puts it in as one). Any other
+    value with an expression, a `default` with one (whether the runner gives a default `env` is not established,
+    F-425) and a `with:` written as one value are `_unworked_input`. `same` is whether no value holds an expression,
+    so that every line is as the second pass puts it in."""
+    written = outer.get("with") if isinstance(outer, dict) else None
+    mapped = isinstance(written, dict)
+    scopes = top._env_scopes()
+    case = env_expr.env_case(top.job)
+    out: dict = {}
+    same = True
+    for name, value in inputs.items():
+        if expr_mod.OPEN not in value:
+            out[name] = value
+            continue
+        same = False
+        made = None
+        from_caller = (mapped and name != _ANY_INPUT and name in given
+                       and isinstance(given[name], (str, int, float, bool)) and wf_mod.as_text(given[name]) == value)
+        if from_caller:
+            made = _worked_by_caller(value, scopes, case)
+        out[name] = made if made is not None else _unworked_input(name)
+    if _ANY_INPUT in inputs:
+        out[_ANY_INPUT] = _unworked_input(_ANY_INPUT)
+    return out, same
+
+
+def _given_texts(step_raw: dict, put: dict, outer: dict, caller: tuple, folder: str, state: dict) -> dict | None:
+    """For `Step.given_texts` (flagship slice 2d.19f): each command line of a local action's step as the second pass
+    puts it in (`put`: its `run`, and the `script` or `run` input it gives an action), mapped to the line as the
+    action's file writes it (`step_raw`) with the inputs `_caller_inputs` gives put in. A line two places put in
+    alike but given otherwise maps to None. None where the using step's `env` or the action step's own is not a
+    mapping, since `_with_env` keeps only mappings in the `env` the second pass reads. Past `GIVEN_TEXTS_JOB` or
+    `GIVEN_TEXTS_CHECK` characters, or where a line would be longer than the checker reads, a line maps to None."""
+    inputs, same = caller
+    for scope in (outer.get("env") if isinstance(outer, dict) else None, step_raw.get("env")):
+        if scope is not None and not isinstance(scope, dict):
+            return None
+    pairs = [(step_raw.get("run"), put.get("run"))]
+    written_with, put_with = step_raw.get("with"), put.get("with")
+    if isinstance(written_with, dict) and isinstance(put_with, dict):
+        pairs += [(value, put_with.get(key)) for key, value in written_with.items()
+                  if isinstance(key, str) and wf_mod.input_name(key) in ("script", "run")]
+    out: dict = {}
+    for written, made in pairs:
+        if not isinstance(made, str):
+            continue
+        text = made
+        if not same and isinstance(written, str) and expr_mod.OPEN in written \
+                and re.search(r"\binputs\b", written, re.I):
+            text = _given_text(written, inputs, folder, state)
+        out[made] = None if made in out and out[made] != text else text
+    return out
+
+
+def _given_text(written: str, inputs: dict, folder: str, state: dict) -> str | None:
+    """`written` with `inputs` put in (`_inputs_put_in`), counted towards `GIVEN_TEXTS_JOB` and `GIVEN_TEXTS_CHECK`;
+    None past them or where the text could be longer than the checker reads (`LOCAL_ACTION_TEXT`), which is
+    decided before it is made: each reference to `inputs` puts in at most every value (`toJSON(inputs)`), each with
+    its quotes doubled."""
+    references = len(re.findall(r"\binputs\b", written, re.I))
+    if len(written) + references * sum(2 * len(value) + 8 for value in inputs.values()) > LOCAL_ACTION_TEXT:
+        return None
+    try:
+        text = _inputs_put_in(written, inputs, folder, [], state)
+    except _StepsExceeded:
+        return None
+    for scope, limit in ((state, GIVEN_TEXTS_JOB), (state["check"], GIVEN_TEXTS_CHECK)):
+        scope["given_chars"] = scope.get("given_chars", 0) + len(text)
+        if scope["given_chars"] > limit:
+            return None
+    return text
+
+
 def _local_steps(root: Path, uses: str, given: dict, given_env: dict, outer: dict, outer_name: str,
                  top: "wf_mod.Step", depth: int, seen: frozenset, state: dict, unread: list) -> list:
     """The steps of the local composite action `uses`, in the order they run, each as a `Step` the rules
@@ -2417,6 +2529,9 @@ def _local_steps(root: Path, uses: str, given: dict, given_env: dict, outer: dic
         given_problems: list = []
         inputs = _action_inputs_given(raw, outer, given, given_problems)
         unread.extend((shown, problem) for problem in given_problems)
+        # What the caller hands each input, worked out in its own context (flagship slice 2d.19f), for an action a
+        # job's own step uses; a further action's inputs are not.
+        caller = _caller_inputs(outer, given, inputs, top) if depth == 0 else None
         for number, step_raw in enumerate(steps, start=1):
             if not isinstance(step_raw, dict):
                 continue
@@ -2450,7 +2565,9 @@ def _local_steps(root: Path, uses: str, given: dict, given_env: dict, outer: dic
             # the job's own steps; the step has a number of its own there, which its copies keep.
             step = wf_mod.Step(index=0, raw=put, line=top.line, via=top, shown_name=name, written=step_raw,
                                put_ins=top.put_ins, seq=top.put_ins.number() if top.put_ins is not None else 0,
-                               inherited=top.inherited, job=top.job)
+                               inherited=top.inherited, job=top.job,
+                               given_texts=None if caller is None else _given_texts(step_raw, put, outer, caller,
+                                                                                    folder, state))
             out.append(step)
             unread.extend((shown, f"step {number}: {problem}") for problem in dict.fromkeys(problems))
             inner_uses = step_raw.get("uses")
