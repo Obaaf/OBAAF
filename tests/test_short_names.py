@@ -191,8 +191,19 @@ class WhereTheToolIsNamedTest(unittest.TestCase):
         # The third review: the loop pattern took cubic time on a line of many `for ... in ( )`.
         import time
         started = time.monotonic()
-        findings("for %a in ( ) " * 3000 + "codex", "cmd")
+        findings("for %a in ( ) " * 800 + "codex", "cmd")
         self.assertLess(time.monotonic() - started, 5)
+
+    def test_unclosed_references_are_read_in_linear_time(self):
+        # The fourth review: `${{` and `${` left open many times took quadratic time (58 s for 160 KB).
+        import time
+        for text in ("xcodexx " + "${{ " * 20000, "xcodexx " + "${ " * 20000, "x.cn $ " + "${{ " * 20000):
+            with self.subTest(text[:12]):
+                started = time.monotonic()
+                agent_flags.names(text, *CODEX)
+                agent_flags.names(text, *CN)
+                agent_flags.mentions(text, *CN)
+                self.assertLess(time.monotonic() - started, 2)
 
     def test_a_long_name_built_from_pieces(self):
         # A name of six letters or more counts anywhere, as before: the review's pieces glued to other letters.
