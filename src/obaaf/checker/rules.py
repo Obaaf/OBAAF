@@ -281,14 +281,19 @@ def env_expressions_only_env(text: str) -> bool:
     return True
 
 
-def env_values_known(scopes: list, case: str, names) -> bool:
+def env_values_known(scopes: list, case: str, names, env: "env_expr.Env | None" = None) -> bool:
     """Whether each of `names` (`env_expr.names_read`) is set, to text holding no `${{`, in the `env` mappings
-    `scopes` (outermost first) under the runner's comparison of names `case` (#387), and none of them is written as
+    `scopes` (outermost first) under the runner's comparison of names `case` (#387), none of them is written as
     one expression (D-143; since slice 2d.19d a name a nearer mapping sets is known to the lanes beside such a scope,
-    but here the rule stays as D-143 wrote it)."""
+    but here the rule stays as D-143 wrote it), and no name of theirs holds `${{` (flagship slice 2d.19f, from its
+    review: the runner may work out an expression in an `env` key, which may then name any variable). `env` is the
+    table of `scopes`, where the caller has made it."""
     if not names or any(scope is not None and not isinstance(scope, dict) for scope in scopes):
         return False
-    env = env_expr.Env(scopes, case)
+    if any(isinstance(key, str) and expr_mod.OPEN in key for scope in scopes if isinstance(scope, dict)
+           for key in scope):
+        return False
+    env = env_expr.Env(scopes, case) if env is None else env
     for name in names:
         for value in env.lookup(name):
             if not isinstance(value, str) or expr_mod.OPEN in value:

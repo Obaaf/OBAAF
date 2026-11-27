@@ -521,20 +521,25 @@ jobs:
     # What slice 2d.19f (#382) assumes before OBAAF-GHA-026 works out `${{ }}` expressions that read `env` in a
     # local composite action's steps: on a GitHub-hosted runner, a composite step's `env` context holds the job's,
     # the using step's and the composite step's own `env`, the nearest winning, and a later composite step does
-    # not see an earlier one's; and the caller's `with:` is worked out with the caller's `env` (its own included),
-    # not with the action step's. The action, tests/premise/composite-env, prints and asserts each value; what an
-    # input's `default` that reads `env` gives is printed, not asserted (F-425). It checks out the repository
-    # without keeping its token, holds no secret and writes nothing. Not probed: the workflow's own `env` (it
-    # would reach every job of this file), a further local action used by the action, macOS, Windows and
+    # not see an earlier one's; the caller's `with:` is worked out with the caller's `env` (its own included), not
+    # with the action step's; and a value put in is not read again as an expression. The action,
+    # tests/premise/composite-env, prints and asserts each value. What an input's `default` that reads `env` gives
+    # is printed by a second action, tests/premise/composite-env-default, in a step that may fail (F-425). It checks
+    # out the repository without keeping its token, holds no secret and writes nothing. Not probed: the workflow's
+    # own `env` (it would reach every job of this file), a further local action used by the action, and
     # self-hosted runners.
-    name: "Runner premise: the env context in a local composite action (2d.19f)"
-    runs-on: ubuntu-24.04
+    name: "Runner premise: the env context in a local composite action (2d.19f, ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     # Advisory: it is not a required check of main, so its failure is reported and does not fail the
     # run (OBAAF-SET-008). A maintainer may make it required.
     continue-on-error: true
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     env:
       PREMISE_JOB: from-job
       PREMISE_USING: from-job
@@ -554,3 +559,8 @@ jobs:
           given_using: ${{ env.PREMISE_USING }}
           given_own: ${{ env.PREMISE_OWN }}
           given_job: ${{ env.PREMISE_JOB }}
+          dollar: $
+      - name: Print what an input's default that reads env gives (not asserted)
+        if: always()
+        continue-on-error: true
+        uses: ./tests/premise/composite-env-default

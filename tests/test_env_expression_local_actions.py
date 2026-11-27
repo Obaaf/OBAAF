@@ -212,6 +212,68 @@ class WhatStaysCannotTellTest(unittest.TestCase):
                                 caller(job_env=f"FLAGS: {SKIP}")), (CANNOT_TELL, []))
 
 
+def block(*lines):
+    """A `run: |` block scalar of `lines`, for `bash_step`."""
+    return "|\n" + "".join(f"        {line}\n" for line in lines).rstrip("\n")
+
+
+class TheFirstReviewTest(unittest.TestCase):
+    """The first review of 2d.19f: each way past, false high and cost it found."""
+
+    def test_a_value_put_in_never_starts_an_expression(self):
+        # GitHub works the action's template out once: the `{{` after a value that ends in `$` is text, so bash runs
+        # the warned option on the middle line. The second pass's text holds an expression across the three lines,
+        # which D-143 would have worked out to `x`, hiding the option (the base reads the lines as written: high).
+        lines = ("# {}{{{{ env.F || '", f"claude {SKIP} -p hi", "# ' }}")
+        for name, action_text, workflow_text in (
+                ("empty input", composite(bash_step(block(lines[0].format("$${{ inputs.z }}"), *lines[1:]))),
+                 caller(job_env="F: x")),
+                ("default", composite(bash_step(block(lines[0].format("${{ inputs.d }}"), *lines[1:])),
+                                      inputs="  d:\n    default: $\n"),
+                 caller(job_env="F: x")),
+                ("the caller's env", composite(bash_step(block(lines[0].format("${{ inputs.d }}"), *lines[1:]))),
+                 caller(uses(with_="{d: '${{ env.D }}'}"), job_env="F: x, D: $"))):
+            with self.subTest(name=name):
+                self.assertEqual(gha026(action_text, workflow_text), (HIGH, []))
+        heredoc = composite(bash_step(block('cat <<"EOF"', "${{ inputs.d }}{{ env.F || '", "EOF",
+                                            f"claude {SKIP} -p hi", 'cat <<"EOF"', "' }}", "EOF")))
+        self.assertEqual(gha026(heredoc, caller(uses(with_="{d: $}"), job_env="F: x")), (HIGH, []))
+        brace = composite(bash_step(block("# ${{ inputs.d }}{ env.F || '", f"claude {SKIP} -p hi", "# ' }}")))
+        self.assertEqual(gha026(brace, caller(uses(with_="{d: '${'}"), job_env="F: x")), (HIGH, []))
+
+    def test_a_value_put_in_makes_no_expression_to_work_out(self):
+        # GitHub runs `claude ${{ env.F }} -p hi` as text: bash stops at a bad substitution. Not high.
+        self.assertEqual(gha026(composite(bash_step("claude ${{ inputs.d }}{{ env.F }} -p hi")),
+                                caller(uses(with_="{d: $}"), job_env=f"F: {SKIP}")), (CANNOT_TELL, []))
+
+    def test_an_env_key_that_holds_an_expression(self):
+        # The runner may work out the key, which may then name `F`.
+        own = composite("    - shell: bash\n      env:\n        ${{ inputs.k }}: " + SKIP + "\n"
+                        "      run: claude ${{ env.F }} -p hi\n")
+        self.assertEqual(gha026(own, caller(uses(with_="{k: F}"), job_env="F: --model sonnet")), (CANNOT_TELL, []))
+        using = composite(bash_step("claude ${{ env.F }} -p hi"))
+        self.assertEqual(gha026(using, caller(uses(env=f'{{"${{{{ vars.K }}}}": {SKIP}}}'), job_env="F: --model sonnet")),
+                         (CANNOT_TELL, []))
+        # The same in a workflow's own step, which D-143 read as quiet.
+        text = ("on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    permissions: {contents: read}\n"
+                "    env:\n      ANTHROPIC_API_KEY: ${{ secrets.K }}\n      F: --model sonnet\n    steps:\n"
+                f"      - env:\n          ${{{{ vars.K }}}}: {SKIP}\n        run: claude ${{{{ env.F }}}} -p hi\n")
+        self.assertEqual(gha026(composite(bash_step("echo")), text), (CANNOT_TELL, []))
+
+    def test_inputs_no_line_reads_are_not_worked_out(self):
+        # The review's case: 1,000 inputs read from 1,000 `env` entries, handed through one YAML alias to 10 steps of
+        # an action whose lines read none, took 13 times the base.
+        given = "{" + ", ".join(f"i{n}: '${{{{ env.E{n} }}}}'" for n in range(1000)) + "}"
+        using = (f"      - uses: ./.github/actions/run-claude\n        with: &w {given}\n"
+                 + "      - uses: ./.github/actions/run-claude\n        with: *w\n" * 9)
+        job_env = ", ".join(f"E{n}: v{n}" for n in range(1000))
+        for name, line in (("no input read", "echo hi"), ("every input read", "claude ${{ toJSON(inputs) }} -p hi")):
+            with self.subTest(name=name):
+                started = time.monotonic()
+                gha026(composite(bash_step(line)), caller(using, job_env=job_env))
+                self.assertLess(time.monotonic() - started, 30)
+
+
 class TheCostTest(unittest.TestCase):
     """Working out the callers' values once for each step that uses the action costs little."""
 
