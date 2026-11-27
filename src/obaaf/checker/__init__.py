@@ -2479,7 +2479,8 @@ def _caller_inputs(outer: dict, given: dict, inputs: dict, top: "wf_mod.Step", n
     CI's job `composite-env-premise` shows, and other contexts are not read here), a `with:` written as one value, and an input the action's command lines do not read (`needed`, from
     `_command_inputs_read`; None for every input) are `_unworked_input`. What a value is worked out to is kept for
     the check, by the value and the mappings the caller sees, so many steps that hand it alike (a YAML alias) work
-    it out once."""
+    it out once; the values made count towards `GIVEN_TEXTS_JOB` and `GIVEN_TEXTS_CHECK`, past which an input is
+    `_unworked_input`."""
     written = outer.get("with") if isinstance(outer, dict) else None
     mapped = isinstance(written, dict)
     out: dict = {}
@@ -2506,6 +2507,14 @@ def _caller_inputs(outer: dict, given: dict, inputs: dict, top: "wf_mod.Step", n
                         scope is not None and not isinstance(scope, dict) for scope in scopes) and not \
                         rules_mod.expression_keys(scopes, state["check"].setdefault("expression_keys", {})) else False
                 made = _worked_by_caller(value, scopes, case, table) if table is not False else None
+                if made is not None:
+                    # What the values come to is bounded as the lines are, for the job and for the check: past
+                    # it an input is not worked out (found by the third review: kept for the check, 1,000 values
+                    # of 100 KB for each of 20 using steps took 2.1 GB against 327 MB).
+                    for scope in (state, state["check"]):
+                        scope["worked_chars"] = scope.get("worked_chars", 0) + len(made)
+                    if state["worked_chars"] > GIVEN_TEXTS_JOB or state["check"]["worked_chars"] > GIVEN_TEXTS_CHECK:
+                        made = None
                 worked[key] = (made, scopes)
             made = worked[key][0]
             if made is not None:
