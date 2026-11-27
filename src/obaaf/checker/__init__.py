@@ -1582,13 +1582,15 @@ def _action_command_texts(raw: dict, step: "wf_mod.Step") -> list:
     return [text for text in texts if isinstance(text, str)]
 
 
-def _put_left(text: str, own: frozenset, folder: str, env: "_ActionEnv") -> str:
-    """`text` with each expression that reads `env` and is not one of `own` (the bodies the action wrote there)
-    worked out with `env`, keeping what a scope written as one expression may give (flagship slice 2d.19e)."""
-    if expr_mod.OPEN not in text:
+def _put_env(text, folder: str, env: "_ActionEnv"):
+    """`text` with each `${{ }}` expression that reads `env` worked out with `env`, keeping what a scope written as one
+    expression may give (flagship slice 2d.19e): an input's value as a local action is given it, where GitHub works
+    its expressions out with the `env` of the step that uses the action (its caller's `with:`) or of the action's
+    caller (a `default`). A value that is not text, or holds no such expression, is given back as it is."""
+    if not isinstance(text, str) or expr_mod.OPEN not in text:
         return text
-    left = [body for body in dict.fromkeys(_bodies_or_none(text)) if body not in own and env_expr.may_read_env(
-        expr_mod.OPEN + body + expr_mod.CLOSE)]
+    left = [body for body in dict.fromkeys(_bodies_or_none(text))
+            if env_expr.may_read_env(expr_mod.OPEN + body + expr_mod.CLOSE)]
     for body in left:
         whole = expr_mod.OPEN + body + expr_mod.CLOSE
         values = _token_values(expr_mod.tokens(body), {}, folder, env=env, cut=[])
@@ -1609,8 +1611,7 @@ def _bodies_or_none(text: str) -> list:
         return []
 
 
-def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv,
-                        skip: frozenset = frozenset()) -> tuple | None:
+def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -> tuple | None:
     """(the expression, where) for the first `${{ }}` expression in `text`, a command line of a local action's step,
     that may give what an `env` written as one expression sets and stands where an agent's name would be read as its
     command line or where a command's program goes, as `workflow._scope_at_program` reads a workflow's own step
@@ -1630,15 +1631,19 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv,
     known: dict = {}
     memo: dict = {}
     for start, end, body in found:
-        if body in skip or not re.search(r"\binputs\b|\benv\b|action_path", body, re.I):
+        if not re.search(r"\binputs\b|\benv\b|action_path", body, re.I):
             continue
         if body not in memo:
             toks = expr_mod.tokens(body)
-            memo[body] = (_token_values(toks, inputs, folder, env=env, cut=[]), bool(_env_names(toks)))
+            names = _input_names(toks)
+            handed = any(_FROM_SCOPE_TEXT in value for value in
+                         (inputs.values() if "*" in names else (inputs.get(name, "") for name in names)))
+            memo[body] = (_token_values(toks, inputs, folder, env=env, cut=[]), bool(_env_names(toks)) or handed)
         values, reads_env = memo[body]
         if values is None:
-            # Nested more deeply than the reader follows: where it reads `env`, it may give what the scope sets, as a
-            # workflow's own step refuses it (found by the review); else it is named as not read where it is put in.
+            # Nested more deeply than the reader follows: where it reads `env`, or an input that holds what the scope
+            # may give, it may give that, as a workflow's own step refuses it (found by the first and third reviews);
+            # else it is named as not read where it is put in.
             if reads_env:
                 scoped.append((start, end))
             continue
@@ -1820,6 +1825,14 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             out.unread.append((shown, "its `runs.steps` is not a list of steps"))
             continue
         inputs = _action_inputs(raw, given)
+        if env_scope is not None:
+            # An input's value (the caller's `with:`, or a `default`) that reads `env` is worked out here with the
+            # caller's `env`, where GitHub works it out, keeping what the scope may give, so a step of the action reads
+            # it as giving that wherever it stands, however it is handed on (found by the second and third reviews:
+            # left as text, it was read further on with an `env` that settled the name). Without such a scope it is
+            # left as text, as before.
+            caller_env = _ActionEnv(given_env, env_scope[1], env_scope[0], env_case)
+            inputs = {name: _put_env(value, folder, caller_env) for name, value in inputs.items()}
         for number, step_raw in enumerate(steps, start=1):
             if not isinstance(step_raw, dict):
                 out.unread.append((shown, f"its step {number} is not a mapping"))
@@ -1852,6 +1865,10 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 step_env = _put_inputs(step_env, inputs, folder, problems, {}, written_env)
                 if scope_where is None:
                     looked_up = step_env
+                else:
+                    # A value handed on from a caller may hold it as text, not as an expression.
+                    step_env = {name: value.replace(_FROM_SCOPE_TEXT, "") if isinstance(value, str) else value
+                                for name, value in step_env.items()}
             view = _ActionEnv(looked_up, settled, scope_where, env_case)
             out.by_case = out.by_case or scope_where is not None
             for key_name, value in merged.items():
@@ -1910,20 +1927,10 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 # What a scope written as one expression may give, where an agent's name would be read or a
                 # command's program goes, may name an agent the checker cannot see (flagship slice 2d.19e): the
                 # step is an error of its file, as a workflow's own step is (D-144).
-                # The lines as the action writes them, read with this step's `env`; and the lines with the inputs put
-                # in, for an expression a value handed in holds (a workflow's `with:` or an input's default that reads
-                # `env`, found by the review), read with the caller's (GitHub works the caller's `with:` out there).
-                caller = _ActionEnv(given_env, env_scope[1], env_scope[0], env_case) if env_scope is not None else None
-                written = _action_command_texts(merged, step)
-                checks = [(text, inputs, view, frozenset()) for text in written]
-                if caller is not None:
-                    # Only what a value handed in left: the action's own expressions are read above, with the step's
-                    # `env` (found by the second review: a text left as written past what the reader reads was read
-                    # again with the caller's).
-                    own = frozenset(body for text in written for body in _bodies_or_none(text))
-                    checks.extend((text, {}, caller, own) for text in _action_command_texts(put, step))
-                for text, given_inputs, seen_env, skip in checks:
-                    place = _action_scope_place(text, given_inputs, folder, seen_env, skip)
+                # The lines as the action writes them, read with this step's `env`; an input that holds what the scope
+                # may give (its value worked out where GitHub works it out, `_put_env`) is read as giving it.
+                for text in _action_command_texts(merged, step):
+                    place = _action_scope_place(text, inputs, folder, view)
                     if place is not None:
                         where_read = ("where a command's program goes" if place[1] == "program" else
                                       "where an agent's name would be read as its command line")
@@ -1939,22 +1946,15 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 handed = step.with_
                 if view.where is not None and isinstance(merged.get("with"), dict):
                     # The inputs it hands on keep what the scope may give, so the further action reads where it
-                    # stands (found by the review: `tool: ${{ env.AGENT }}` was handed on as empty). An expression a
-                    # value handed in to this action left (from its caller's `with:` or an input's default) is worked
-                    # out with the caller's `env`, where GitHub works it out, before it is handed on (found by the
-                    # second review: read further on, the `env` of this step settled it).
-                    caller_env = (_ActionEnv(given_env, env_scope[1], env_scope[0], env_case) if env_scope is not None
-                                  else _ActionEnv(given_env))
-                    handed_with: dict = {}
-                    for name, value in merged["with"].items():
-                        if isinstance(value, str):
-                            value = _put_in(value, inputs, folder, [], view, keep_scope=True)
-                            own = frozenset(_bodies_or_none(merged["with"][name]))
-                            value = _put_left(value, own, folder, caller_env)
-                        handed_with[name] = value
-                    handed = wf_mod.Step(index=0, raw={"with": handed_with}, line=0).with_
+                    # stands (found by the review: `tool: ${{ env.AGENT }}` was handed on as empty).
+                    handed = wf_mod.Step(index=0, raw={"with": {
+                        name: _put_in(value, inputs, folder, [], view, keep_scope=True) if isinstance(value, str)
+                        else value for name, value in merged["with"].items()}}, line=0).with_
+                # The `env` it hands on keeps what the scope may give, too (found by the third review: `T: ${{
+                # inputs.tool }}` handed on was read further on as empty).
                 inner = _agent_in_local_action(root, step.uses, actions, commands, depth + 1,
-                                               seen | set(folders), cache, handed, step.env,
+                                               seen | set(folders), cache, handed,
+                                               step.env if view.where is None else view.values,
                                                env_scope=None if view.where is None else (view.where, settled),
                                                env_case=env_case)
                 out.unread.extend(inner.unread)

@@ -352,5 +352,55 @@ class TheReviewersSecondPassTest(unittest.TestCase):
         self.assertEqual(len(readings), 2, calls)
 
 
+class TheReviewersThirdPassTest(unittest.TestCase):
+    """What the third review of 2d.19e found (2026-11-27): a value handed in was told apart by its text, and the
+    `env` handed on lost what the scope may give. An input is now worked out where it is given."""
+
+    def test_the_action_writing_the_same_expression_hides_nothing(self):
+        run = step("${{ inputs.tool }} -p x\necho ${{ env.AGENT }}", env="{AGENT: echo}")
+        for inputs, with_ in (("  tool: {default: echo}\n", "{tool: '${{ env.AGENT }}'}"),
+                              ("  tool: {default: '${{ env.AGENT }}'}\n", "")):
+            with self.subTest(inputs=inputs):
+                self.assertEqual(len(scope_errors(wf(job=JOB, with_=with_), files(run, inputs=inputs))), 1)
+
+    def test_handed_on_beside_the_same_expression(self):
+        inner = ("name: i\ninputs:\n  tool: {default: echo}\nruns:\n  using: composite\n  steps:\n"
+                 "    - run: ${{ inputs.tool }} -p x\n      shell: bash\n")
+        outer = ("name: x\ninputs:\n  tool: {default: echo}\nruns:\n  using: composite\n  steps:\n"
+                 "    - uses: ./.github/actions/inner\n      env: {AGENT: echo}\n      with:\n"
+                 "        tool: '${{ inputs.tool }} ${{ env.AGENT }}'\n")
+        given = {f"{ACTION_DIR}/action.yml": outer, ".github/actions/inner/action.yml": inner}
+        self.assertEqual(len(scope_errors(wf(job=JOB, with_="{tool: '${{ env.AGENT }}'}"), given)), 1)
+
+    def test_handed_on_through_env(self):
+        reader = composite("    - run: ${{ env.T }} -p x\n      shell: bash\n")
+        outer = ("name: x\ninputs:\n  tool: {default: echo}\nruns:\n  using: composite\n  steps:\n"
+                 "    - uses: ./.github/actions/inner\n      env: {AGENT: echo, T: '${{ inputs.tool }}'}\n")
+        given = {f"{ACTION_DIR}/action.yml": outer, ".github/actions/inner/action.yml": reader}
+        self.assertEqual(len(scope_errors(wf(job=JOB, with_="{tool: '${{ env.AGENT }}'}"), given)), 1)
+        # Three levels: the scope's value handed in `with:`, then on through the next step's `env`.
+        middle = ("name: m\ninputs:\n  tool: {default: echo}\nruns:\n  using: composite\n  steps:\n"
+                  "    - uses: ./.github/actions/third\n      env: {T: '${{ inputs.tool }}'}\n")
+        given = {f"{ACTION_DIR}/action.yml": composite("    - uses: ./.github/actions/inner\n      with:\n"
+                                                       "        tool: ${{ env.AGENT }}\n"),
+                 ".github/actions/inner/action.yml": middle, ".github/actions/third/action.yml": reader}
+        self.assertEqual(len(scope_errors(wf(job=JOB), given)), 1)
+        self.assertEqual(lane(wf(job="{AGENT: claude}"), given), "agent")
+
+    def test_a_long_text_does_not_hide_a_handed_value(self):
+        lines = [f"echo 'line {n}: some ordinary build output goes here for the record'" for n in range(250)]
+        run = "\n".join([*lines, "echo ${{ inputs.b0 || 'd0' }} ${{ inputs.b1 || 'd1' }} ${{ inputs.b2 || 'd2' }} "
+                          "${{ inputs.b3 || 'd3' }}", "${{ inputs.tool }} -p x"])
+        inputs = "".join(f"  b{n}: {{default: ''}}\n" for n in range(4)) + "  tool: {default: echo}\n"
+        given = files(step(run), inputs=inputs)
+        self.assertEqual(len(scope_errors(wf(job=JOB, with_="{tool: '${{ env.AGENT }}'}"), given)), 1)
+
+    def test_a_handed_value_nested_more_deeply_than_the_reader_follows(self):
+        run = "${{ " + "(inputs.z == 'q' || " * 10 + "inputs.tool" + ")" * 10 + " }} -p x"
+        given = files(step(run), inputs="  tool: {default: echo}\n  z: {default: ''}\n")
+        self.assertEqual(len(scope_errors(wf(job=JOB, with_="{tool: '${{ env.AGENT }}'}"), given)), 1)
+        self.assertEqual(scope_errors(wf(job=JOB, with_="{tool: claude}"), given), [])
+
+
 if __name__ == "__main__":
     unittest.main()
