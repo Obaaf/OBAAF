@@ -2041,17 +2041,22 @@ _RUNS_NEXT = frozenset({"eval", "call", "start", "iex", "invoke-expression", "st
                         "elif", "if", "while", "until", "!", "time"})
 _REDIRECTION = re.compile(r"\d*(?:[<>]{1,2}|&>{1,2}|>&|<&)(.*)")
 _SCOPE_PATTERNS: list = []
+# The shape of the catalog's pattern for an agent's command line, `(^|[\s;&|(/"'`])NAME["'`]?\s+([^\n;&|]*\s)?TAIL`:
+# what may stand before the name, and the keyword it needs later in the same piece (`(-p|--print)\b`, `exec\b`).
+_SCOPE_PATTERN_HEAD = '(^|[\\s;&|(/"\'`])'
+_SCOPE_PATTERN_MIDDLE = '["\'`]?\\s+([^\\n;&|]*\\s)?'
 
 
 def _scope_patterns():
-    """The catalog's patterns for an agent's command line with the program's name in them made the probe, for the
-    tools whose pattern needs more than the name and a word after it (`claude ... -p`, `codex ... exec`), compiled as
-    one (flagship slice 2d.19d, from its second review): such a pattern is searched for anywhere in a line, as the
-    lanes search for it, so a value of a scope written as one expression is seen wherever the name written out
-    would be. Cline's and Aider's patterns need only the name and a space, so for them `_scope_at_program` reads
-    only where a command's program goes."""
+    """What the catalog's patterns for an agent's command line need after the name, for the tools whose pattern needs
+    more than the name and a word after it (`claude ... -p`, `codex ... exec`), as one search for a space and the
+    keyword (flagship slice 2d.19d, from its second and third reviews): the lanes search for such a pattern anywhere
+    in a line, so a value of a scope written as one expression is seen wherever the name written out would be. A
+    pattern of another shape is left out, and a test holds every strict pattern of the catalog to this shape (the
+    third review: the one try per piece of `_scope_pattern_matches` rests on it). Cline's and Aider's patterns need
+    only the name and a space, so for them `_scope_at_program` reads only where a command's program goes."""
     if not _SCOPE_PATTERNS:
-        parts = []
+        tails = []
         for tool in load_catalog().detection.get("agent_tools", []) or []:
             for program in tool.get("programs") or []:
                 for pattern in tool.get("commands") or []:
@@ -2059,77 +2064,91 @@ def _scope_patterns():
                         continue
                     if re.search(pattern, f"{program} zzz", re.M) is not None:
                         continue
-                    parts.append("(?:" + pattern.replace(program, re.escape(_SCOPE_PROBE)) + ")")
-        _SCOPE_PATTERNS.append(re.compile("|".join(parts), re.M) if parts else None)
+                    shaped = _SCOPE_PATTERN_HEAD + re.escape(program) + _SCOPE_PATTERN_MIDDLE
+                    if pattern.replace(program, re.escape(program), 1).startswith(shaped):
+                        tails.append("(?:" + pattern.replace(program, re.escape(program), 1)[len(shaped):] + ")")
+        _SCOPE_PATTERNS.append(re.compile(r"\s(?:" + "|".join(tails) + ")") if tails else None)
     return _SCOPE_PATTERNS[0]
 
 
 def _scope_pattern_matches(line: str) -> bool:
-    """Whether a reading of `line` matches `_scope_patterns` (flagship slice 2d.19d). Each pattern ends its match
-    at a line break, `;`, `&` or `|`, so each piece between them is tried once, at the first probe that stands as a
-    word of its own (what is before it a space, a bracket, a slash or a quote, a space after it): a later one's
-    match would lie inside that one's. Linear in the line, however many probes it holds."""
-    patterns = _scope_patterns()
-    if patterns is None:
+    """Whether a reading of `line` matches what `_scope_patterns` holds with the probe as the name (flagship slice
+    2d.19d): the probe standing as a word of its own (before it the start, a space, a bracket, a slash or a quote;
+    after it an optional quote and a space), and the keyword after a space later in the same piece between line
+    breaks, `;`, `&` and `|`, where each pattern ends its match. Each piece is tried once, at its first such probe:
+    a later one's keyword is after the first one's too. One search of the rest of the piece, so linear in the line
+    (found by the third review: the patterns themselves backtracked quadratically over a long run of spaces)."""
+    tail = _scope_patterns()
+    if tail is None:
         return False
     for reading in _readings(line):
         for piece in re.split(r"[\n;&|]", reading):
             at = piece.find(_SCOPE_PROBE)
             while at != -1:
                 before = piece[at - 1] if at else ""
-                after = piece[at + len(_SCOPE_PROBE):at + len(_SCOPE_PROBE) + 2]
-                if (not before or before.isspace() or before in "(/\"'`") and re.match(r"[\"'`]?\s", after):
-                    if patterns.match(piece, max(0, at - 1)) is not None:
+                rest = piece[at + len(_SCOPE_PROBE):]
+                if rest[:1] in ("\"", "'", "`"):
+                    rest = rest[1:]
+                if (not before or before.isspace() or before in "(/\"'`") and rest[:1].isspace():
+                    if tail.search(rest) is not None:
                         return True
                     break
                 at = piece.find(_SCOPE_PROBE, at + 1)
     return False
 
 
-def _scope_at_program(text: str, scoped: tuple) -> tuple | None:
-    """The first of `scoped` ((start, end) of `${{ }}` expressions in `text` whose text may hold what a scope written
-    as one expression gives, `env_expr.Plan.scoped`) that may name an agent the lanes would see written out (flagship
-    slice 2d.19d), in a line of `text` (with the lines a backslash continues), with each such expression read as one
-    word and every other expression as a plain word:
+def _scope_at_program(text: str, scoped: tuple, known: dict | None = None) -> tuple | None:
+    """(start, end, where) for the first of `scoped` ((start, end) of `${{ }}` expressions in `text` whose text may hold
+    what a scope written as one expression gives, `env_expr.Plan.scoped`) that may name an agent the lanes would see
+    written out (flagship slice 2d.19d), in a line of `text` (with the lines a backslash continues, and a PowerShell
+    backtick or a cmd caret at a line's end), with each such expression read as one word, every other expression
+    that reads `env` as its first known text (`known`, from the plan) and any other as a plain word:
 
-    - where an agent's name in its place would match the catalog's pattern for its command line, searched for in the
-      line's readings as the lanes search (`_scope_patterns`: `if x; then ${{ env.A }} -p y; fi`, `xvfb-run
-      ${{ env.A }} -p y`); or
-    - where a command's program goes, as the lanes read commands: after quotes are taken out, with the lines a
-      backslash continues joined, split where a shell starts a command (`command_segments`: `;`, `&&`, `|`, a
-      substitution, a group, a shell's `-c`, after assignments and wrappers such as `sudo`, `env` or `npx`), past
-      `_RUNS_NEXT` and a redirection, in the first word's last part after `/` or `\\` (`${{ env.DIR }}/bin/tool`
-      runs `tool`; `${{ env.P }}claude` may run anything).
+    - `where` "pattern": where an agent's name in its place would match the catalog's pattern for its command line,
+      searched for in the line's readings as the lanes search (`_scope_pattern_matches`: `if x; then ${{ env.A }} -p
+      y; fi`, `xvfb-run ${{ env.A }} -p y`, and an option's value before another keyword, `psql -h ${{ env.H }} -p
+      5432`); or
+    - `where` "program": where a command's program goes, as the lanes read commands: after quotes are taken out,
+      with the lines a backslash continues joined, split where a shell starts a command (`command_segments`: `;`,
+      `&&`, `|`, a substitution, a group, a shell's `-c`, after assignments and wrappers such as `sudo`, `env` or
+      `npx`), past `_RUNS_NEXT` and a redirection, in the first word's last part after `/` or `\\` (`${{ env.DIR
+      }}/bin/tool` runs `tool`; `${{ env.P }}claude` may run anything).
 
     None where none does. Each line is read once, so the work is linear in the text."""
     try:
         every = [(start, end) for start, end, _body in env_expr.spans(text)]
     except expr_mod.TooComplex:
-        return scoped[0] if scoped else None
+        return (*scoped[0], "program") if scoped else None
+    known = known or {}
     wanted = set(scoped)
     w = 0
     for u_start, u_end in env_expr._units(text, list(scoped)):
+        # A line a PowerShell backtick or a cmd caret continues is read with the next (found by the third review).
+        while u_end < len(text) and text[u_end - 1:u_end] in ("`", "^"):
+            nxt = text.find("\n", u_end + 1)
+            u_end = len(text) if nxt == -1 else nxt
         pieces: list = []
         at = u_start
         first = None
         while w < len(every) and every[w][0] < u_end:
             start, end = every[w]
             w += 1
-            if end <= u_start:
+            if end <= u_start or start < at:
                 continue
             pieces.append(text[at:start])
             if (start, end) in wanted:
                 pieces.append(_SCOPE_PROBE)
                 first = first or (start, end)
             else:
-                pieces.append("x")
+                value = known.get((start, end))
+                pieces.append(value if isinstance(value, str) and expr_mod.OPEN not in value else "x")
             at = end
         pieces.append(text[at:u_end])
         if first is None:
             continue
         line = "".join(pieces)
         if _scope_pattern_matches(line):
-            return first
+            return (*first, "pattern")
         # The lines a backslash continues are read joined only, so a continued line's first word, an argument, is
         # not taken for a program (found by the second review).
         for reading in upload_readings(line)[1:]:
@@ -2145,7 +2164,7 @@ def _scope_at_program(text: str, scoped: tuple) -> tuple | None:
                     else:
                         break
                 if i < len(words) and _SCOPE_PROBE in re.split(r"[/\\]", words[i])[-1]:
-                    return first
+                    return (*first, "program")
     return None
 
 
@@ -2474,10 +2493,15 @@ class Step:
                 # What a scope written as one expression gives, where a command's program goes, may name an agent
                 # the checker cannot see (flagship slice 2d.19d): the step is an error of its file. Elsewhere in a
                 # line it is read as a value of another context is, as written.
-                at = _scope_at_program(own, plan.scoped) if plan.scoped else None
+                at = None
+                if plan.scoped:
+                    known = {(start, end): texts[0] for _u0, _u1, here in plan.units for start, end, texts in here}
+                    at = _scope_at_program(own, plan.scoped, known)
                 if at is not None:
+                    place = ("where a command's program goes" if at[2] == "program" else
+                             "where an agent's name would be read as its command line")
                     why = (f"its command lines hold an expression that reads `env` which the checker does not work "
-                           f"out (one ('{env_expr._short(own[at[0]:at[1]])}'), where a command's program goes, reads "
+                           f"out (one ('{env_expr._short(own[at[0]:at[1]])}'), {place}, reads "
                            f"from `env` what {env.where} `env`, written as one expression the checker does not "
                            "read, may set)")
                     if put_ins is not None:

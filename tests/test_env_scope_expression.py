@@ -9,7 +9,8 @@ scope may give any name any text: an expression whose text may be what it gives 
 sets, under the runner's comparison of names, or the whole `env`) still makes no reading, but where it stands where
 a command's program goes the step is an error of its file, as D-142's other refusals are. Elsewhere in a line
 (`echo ${{ env.VERSION }}`, `mkdir -p ${{ env.CCACHE_DIR }}`) it is read as before, so the ordinary idiom
-`env: ${{ matrix.env }}` gives no new error.
+`env: ${{ matrix.env }}` gives no new error there; where the value is the program (`${{ env.CC }} --version`) it is
+an error, since the checker does not read the matrix through it.
 """
 
 import time
@@ -56,7 +57,8 @@ class TheCaseOfF418Test(unittest.TestCase):
     def test_the_issue_case_is_an_error_of_the_file(self):
         (error,) = problems(wf("${{ env.AGENT }} -p review", job=JOB))
         self.assertIn(UNREAD, error)
-        self.assertIn(f"('${{{{ env.AGENT }}}}'), {PLACE}, reads from `env` what the job's `env`, {SCOPE}", error)
+        self.assertIn("('${{ env.AGENT }}'), where an agent's name would be read as its command line, reads from "
+                      f"`env` what the job's `env`, {SCOPE}", error)
         self.assertIn("so the checker cannot tell whether an agent runs in it", error)
 
     def test_each_scope_is_named_and_the_nearest_one(self):
@@ -106,7 +108,7 @@ class WhereACommandsProgramGoesTest(unittest.TestCase):
         # the agent's command line (`claude ... -p`), wherever the line holds it.
         for run in ("if true; then ${{ env.AGENT }} -p x; fi", "for i in 1; do ${{ env.AGENT }} -p x; done",
                     "if ${{ env.AGENT }} -p x; then :; fi", "while ${{ env.AGENT }} -p x; do break; done",
-                    "! ${{ env.AGENT }} -p x", "${{ env.PRE }} ${{ env.AGENT }} -p x", "${{ '' }} ${{ env.AGENT }} -p x",
+                    "! ${{ env.AGENT }} -p x", "${{ '' }} ${{ env.AGENT }} -p x",
                     "${{ github.event.inputs.sudo }} ${{ env.AGENT }} -p x", "xvfb-run ${{ env.AGENT }} -p x",
                     "strace -f ${{ env.AGENT }} -p x", "flock /tmp/l ${{ env.AGENT }} -p x",
                     "find . -exec ${{ env.AGENT }} -p x {} \\;", "su runner -c \"${{ env.AGENT }} -p x\"",
@@ -119,8 +121,58 @@ class WhereACommandsProgramGoesTest(unittest.TestCase):
             with self.subTest(run=run):
                 self.assertEqual(len(scope_errors(wf(run, job=JOB))), 1, problems(wf(run, job=JOB)))
                 # The control: the name written out puts the job in the agent lane.
-                self.assertEqual(lane(wf(run.replace("${{ env.AGENT }}", "claude").replace(" exec ", " -p ")
-                                         .replace(" run ", " -p "))), "agent")
+                program = "codex" if " exec '" in run else "opencode" if " run '" in run else "claude"
+                self.assertEqual(lane(wf(run.replace("${{ env.AGENT }}", program))), "agent")
+
+    def test_another_expression_before_it_is_read_as_its_value(self):
+        # From the second and third reviews: a known value of another expression on the line is put in.
+        for step in ("{PRE: ''}", "{PRE: sudo}"):
+            with self.subTest(step=step):
+                text = wf("${{ env.PRE }} ${{ env.AGENT }} -p x", job=JOB, step=step)
+                (error,) = scope_errors(text)
+                self.assertIn("${{ env.AGENT }}", error)
+        text = wf("xvfb-run ${{ env.AGENT }} ${{ env.F }} x", job=JOB, step="{F: -p}")
+        self.assertEqual(len(scope_errors(text)), 1)
+        self.assertEqual(lane(wf("xvfb-run claude ${{ env.F }} x", step="{F: -p}")), "agent")
+
+    def test_the_message_says_which_place(self):
+        (program,) = scope_errors(wf("${{ env.AGENT }} --task x", job=JOB))
+        self.assertIn(PLACE, program)
+        (pattern,) = scope_errors(wf("xvfb-run ${{ env.AGENT }} -p x", job=JOB))
+        self.assertIn("where an agent's name would be read as its command line", pattern)
+
+    def test_continued_by_a_backtick_or_a_caret(self):
+        # From the third review: PowerShell's and cmd's continuations, which the lanes join for a name written out.
+        self.assertEqual(len(scope_errors(wf("Start-Process -FilePath ${{ env.AGENT }} `\n  -ArgumentList '-p x'",
+                                             job=JOB, shell="pwsh", runs_on="windows-latest"))), 1)
+        self.assertEqual(len(scope_errors(wf("xvfb-run ${{ env.AGENT }} ^\n  -p x", job=JOB, shell="cmd",
+                                             runs_on="windows-latest"))), 1)
+
+    def test_every_strict_pattern_has_the_shape_the_search_rests_on(self):
+        # The third review: one try per piece holds because every such pattern is the name, an optional quote, a
+        # space, anything, then its keyword; a pattern of another shape would be left out without this test.
+        import re
+        from obaaf.checker import workflow as wf_mod
+        for tool in wf_mod.load_catalog().detection.get("agent_tools", []):
+            for program in tool.get("programs") or []:
+                for pattern in tool.get("commands") or []:
+                    if pattern.startswith("@") or re.search(pattern, f"{program} zzz", re.M):
+                        continue
+                    with self.subTest(pattern=pattern):
+                        self.assertEqual(pattern.count(program), 1)
+                        self.assertTrue(pattern.startswith(wf_mod._SCOPE_PATTERN_HEAD + program
+                                                           + wf_mod._SCOPE_PATTERN_MIDDLE), pattern)
+
+    def test_stated_limits(self):
+        # A keyword after an option's value from such a scope is an error, as an agent's name there would be read as
+        # its command line; a package's name is not tried; a value holding a whole command elsewhere is not seen.
+        for run in ("psql -h ${{ env.PGHOST }} -p 5432", "npm --prefix ${{ env.APP_DIR }} run build",
+                    "docker compose -f ${{ env.COMPOSE_FILE }} run --rm app"):
+            with self.subTest(run=run):
+                self.assertEqual(len(scope_errors(wf(run, job=JOB))), 1)
+        for run in ("deno run -A npm:${{ env.PKG }} -p x", "echo ${{ env.CMD }}"):
+            with self.subTest(run=run):
+                self.assertEqual(problems(wf(run, job=JOB)), [])
 
     def test_powershell_and_cmd(self):
         for run, shell in (("& ${{ env.AGENT }} -p x", "pwsh"), ("iex \"${{ env.AGENT }} -p x\"", "pwsh"),
