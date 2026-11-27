@@ -178,6 +178,33 @@ class JenkinsReleaseLaneTest(unittest.TestCase):
         self.assertTrue(result.ok, result.blocks)
         self.assertEqual(result.to_text().splitlines()[0],
                          "Pre-approval checks: PASSED, full verification is still required")
+        # Nor is its JSON a decision to upload (#394): the tie to the tag build is not checked yet.
+        doc = result.to_dict()
+        self.assertEqual((doc["allowed"], doc["checksPassed"], doc["preApproval"], doc["approvalsRequired"]),
+                         (False, True, True, 0))
+
+    def test_the_json_decision_of_a_jenkins_release(self):
+        # #394: a pre-approval run's JSON never says the upload may proceed; the full run's does.
+        envelopes = self.write_records()
+        (self.tmp / "publish-run.json").write_text(json.dumps(publish_run()))
+        (self.tmp / "release-run.json").write_text(json.dumps(tag_build(self.rev)))
+        args = ["verify", "release", "--policy", self.policy, "--artifacts", self.dist,
+                "--release-run", self.tmp / "release-run.json", "--repo-dir", self.repo,
+                "--source-revision", self.rev, "--format", "json"]
+        for env in envelopes:
+            args += ["--dsse", env]
+        cases = ((["--pre-approval"], 0, (False, True, True)),
+                 ([], 1, (False, False, False)),
+                 (["--approvals", self.tmp / "publish-run.json"], 0, (True, True, False)))
+        for extra, expected_code, expected in cases:
+            with self.subTest(extra=extra):
+                code, out, err = run_cli(*args, *extra)
+                self.assertEqual(code, expected_code, err or out)
+                doc = json.loads(out)
+                self.assertEqual(doc["format"], "obaaf-release-decision/v0.2")
+                self.assertEqual((doc["allowed"], doc["checksPassed"], doc["preApproval"]), expected, doc["blocks"])
+                self.assertEqual(doc["approvalsRequired"], 1)
+                self.assertEqual(doc["approvals"], ["carol"] if expected[0] else [])
 
     def test_raw_r_s_signatures_from_a_key_service_are_accepted(self):
         self.assertTrue(self.verify(self.write_records(p1363=True), pre_approval=True).ok)
