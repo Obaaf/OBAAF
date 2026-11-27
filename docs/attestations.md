@@ -125,6 +125,14 @@ A record without a patch cannot accompany a commit that changes files. A merge m
 - the commit after which agent commits are checked (`agents.since`);
 - where agent records live, and which workflows must sign them.
 
-The policy decides what may ship, so both commands read it strictly. Each field must have its YAML type: text, `true` or `false`, a whole number of 0 or more (`min_approvals`), or a list of texts, even with one entry (`source_refs: ["refs/tags/v*"]`, not `source_refs: refs/tags/v*`). OBAAF reads YAML 1.2, so `no`, `off` and `"false"` are text, not false. A key the policy does not read (a misspelling such as `min_aprovals`), a key written with no value, an empty `allowed_tiers`, `environments` or `effect_identities`, and YAML that cannot be read are each an `error:` naming the field and its line, and the command ends with status 2 before it checks anything. Remove a key to use its default. `branch: ""` still turns the protected-branch check off, and an empty text for the other text fields still gives their default.
+The policy decides what may ship, so both commands read it strictly. Each field must have its YAML type: text, `true` or `false`, a whole number of 0 or more written in plain decimal digits (`min_approvals`), or a list of non-empty texts, even with one entry (`source_refs: ["refs/tags/v*"]`, not `source_refs: refs/tags/v*`). Booleans follow YAML 1.2, so `no`, `off` and `"false"` are text, not false; a whole number such as `010` or `0x10`, which PyYAML reads as YAML 1.1 does (8 and 16), is refused. These are each an `error:` naming the file, and the command ends with status 2 before it checks anything:
+
+- a value of another type, or an empty list (remove the key instead: for `approvers` and `runner_environments` that means no restriction, for the others the default);
+- a field written with no value (a section with nothing under it is read as empty);
+- a key the policy does not define (a misspelling such as `min_aprovals`), and a key it does not read with the chosen `signing`: with `signing: keys` the verifier checks each record's key and not the workflow, ref, runner or issuer, so `provenance` may hold none of its four fields and `agents` neither `propose_workflow`, `apply_workflow` nor `source_ref`; with `signing: sigstore` there may be no `keys` section;
+- both `release.environment` and `release.environments`;
+- YAML that cannot be read, and a file that is not UTF-8.
+
+The error names the field and its line where it can; an error from the YAML loader names the line where the loader gives one. Remove a key to use its default. `branch: ""` still turns the protected-branch check off, `since: ""` still means not set, and an empty text still gives the other text fields that have a default (`signer_workflow`, `issuer`, `environment`, `records_dir`, the two agent workflows, `source_ref`) that default.
 
 Missing certificate fields fail verification. An attestation that fails the policy is ignored, with a warning, when a valid one exists for the same file.

@@ -11,12 +11,14 @@ Slice 2d.21, from #395; decision D-149. `obaaf verify release` and `obaaf verify
 - `source_refs: "refs/tags/v*"`, written as text instead of a list, became one pattern per character, and the pattern `*` allowed provenance signed from any ref;
 - `allow_self_hosted_runners: "false"` or `no` (text in YAML 1.2, which OBAAF reads) was true, so agent runs on self-hosted runners were allowed;
 - `min_approvals: 0.5`, `false` or `-1` turned the approvals check off;
-- `approvers: alice` let the one-letter logins `a`, `l`, `i`, `c` and `e` approve;
-- an empty `allowed_tiers`, `environments` or `effect_identities` gave the default, and a misspelt key (`min_aprovals: 2`) left its default in force.
+- `approvers: alice` let the one-letter logins `a`, `l`, `i`, `c` and `e` approve, and `approvers: []` (or a flow list with its entries commented out) let anyone;
+- `min_approvals: 010` was 8 (PyYAML reads YAML 1.1's numbers);
+- an empty `allowed_tiers`, `environments` or `effect_identities` was replaced by a default, and a misspelt key (`min_aprovals: 2`) left its default in force;
+- with `signing: keys`, `provenance.source_refs`, `runner_environments`, `issuer` and `signer_workflow`, and the agent lane's `propose_workflow`, `apply_workflow` and `source_ref`, loaded and were never checked: that kind of signing checks each record's key only.
 
-`min_approvals: null`, a section that is not a mapping (`release: [1]`) and YAML the loader refuses ended the command in a traceback.
+`min_approvals: null` or `.inf`, a section that is not a mapping (`release: [1]`) and most YAML the loader refuses (a syntax error, a duplicate key, two documents, a tag it refuses, nesting too deep) ended the command in a traceback.
 
-- **Now each field must have its YAML type**: text, `true` or `false`, a whole number of 0 or more, or a list of non-empty texts. A value of another type, a key the policy does not read, a key written with no value, an empty list the verifier needs an entry of, both `environment` and `environments`, and YAML that cannot be read are each an `error:` that names the field and its line, with exit status 2. A section written with nothing under it is still empty, `branch: ""` still turns the protected-branch check off, and an empty text still gives the other text fields their default.
+- **Now each field must have its YAML type**: text, `true` or `false` (as YAML 1.2 writes them), a whole number of 0 or more in plain decimal digits, or a list of at least one non-empty text. A value of another type, an empty list, a field written with no value, a key the policy does not define, a key the chosen `signing` does not read (and a `keys` section with `signing: sigstore`), both `environment` and `environments`, and YAML that cannot be read are each an `error:` that names the file, and the field and its line where it can, with exit status 2. A section written with nothing under it is still empty, `branch: ""` still turns the protected-branch check off, `since: ""` still means not set, and an empty text still gives the text fields that have a default their default.
 - **Can stop a release that passed**, with status 2 before anything is checked. `docs/upgrading.md` has the row. The policies OBAAF ships (this repository's and the two examples) load with the same values. `obaaf check` is unchanged: it does not read the release policy.
 - **Released versions have the loose reading**, 0.3.0 included; it ends with a release that has this change.
 

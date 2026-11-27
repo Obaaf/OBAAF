@@ -1,10 +1,11 @@
 """The release policy: who may sign what, and what a release needs before upload.
 
 The policy decides what may ship, so it is read strictly (slice 2d.21, #395). Each field must have its
-YAML type: text, true or false, a whole number, or a list of texts. A value of another type, a key the
-policy does not read, and YAML that cannot be read are each a `PolicyError` that names the field and its
-line. Before, values were converted with `int()`, `bool()`, `str()` and `list()`, so `"false"` was true,
-`0.5` approvals turned the approvals check off and `source_refs: "refs/tags/v*"` allowed any ref.
+YAML type: text, true or false, a whole number written in plain decimal, or a list of non-empty texts. A
+value of another type, a key the policy does not define or does not read with its `signing`, and YAML
+that cannot be read are each a `PolicyError` that names the file, and the field and line where it can.
+Before, values were converted with `int()`, `bool()`, `str()` and `list()`, so `"false"` was true, `0.5`
+approvals turned the approvals check off and `source_refs: "refs/tags/v*"` allowed any ref.
 """
 
 from __future__ import annotations
@@ -15,6 +16,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from obaaf import yamlutil
 
@@ -35,6 +38,11 @@ SECTIONS = {
 KEY_ROLES = ("provenance", "build_record", "agent_run", "approval")
 TOP_KEYS = ("format", "repository", "signing", "keys") + tuple(SECTIONS)
 TIERS = ("A", "B")
+# Keys the verifier reads only with one kind of signing. With `signing: keys` it checks each record's key
+# and nothing else about who signed it: no workflow, ref, runner or issuer. With `signing: sigstore` it
+# reads no key file. A key the chosen kind does not read would look like a check that is not made.
+SIGSTORE_ONLY = {"provenance": ("signer_workflow", "source_refs", "runner_environments", "issuer"),
+                 "agents": ("propose_workflow", "apply_workflow", "source_ref")}
 
 _MISSING = object()
 
@@ -47,6 +55,36 @@ def _short(text: str, limit: int = 60) -> str:
     """`text` quoted for a message: control and format characters escaped, at most `limit` characters."""
     shown = text if len(text) <= limit else text[:limit] + "..."
     return repr(shown)
+
+
+def _printable(text: str) -> str:
+    """`text` on one line, with every character that is not printable written as an escape."""
+    return "".join(c if c.isprintable() else f"\\u{ord(c):04x}" for c in " ".join(text.split()))
+
+
+class _PolicyLoader(yamlutil._Loader):
+    """OBAAF's loader, with whole numbers only in plain decimal. PyYAML reads YAML 1.1's other forms:
+    `010` is 8 and `1:30` is 90, so `min_approvals: 010` would ask for fewer approvals than it shows."""
+
+
+def _construct_int(loader: _PolicyLoader, node: yaml.ScalarNode) -> int:
+    if not isinstance(node.value, str) or not re.fullmatch(r"[-+]?(?:0|[1-9][0-9]*)", node.value):
+        raise yaml.constructor.ConstructorError(
+            None, None, f"the whole number {_short(str(node.value))} is not written in plain decimal digits "
+            "(YAML 1.1 reads 010 as 8, 0x10 as 16 and 1:30 as 90)", node.start_mark)
+    return yaml.SafeLoader.construct_yaml_int(loader, node)
+
+
+def _construct_bool(loader: _PolicyLoader, node: yaml.ScalarNode) -> bool:
+    # Untagged, only true and false are booleans (yamlutil); `!!bool yes` would bring YAML 1.1's back.
+    if node.value not in ("true", "True", "TRUE", "false", "False", "FALSE"):
+        raise yaml.constructor.ConstructorError(
+            None, None, f"{_short(str(node.value))} is not true or false", node.start_mark)
+    return node.value.lower() == "true"
+
+
+_PolicyLoader.add_constructor("tag:yaml.org,2002:int", _construct_int)
+_PolicyLoader.add_constructor("tag:yaml.org,2002:bool", _construct_bool)
 
 
 def describe(value: Any) -> str:
@@ -83,7 +121,7 @@ class _Section:
         self.path = path
         self.mapping = mapping
         self.name = name
-        self.line = getattr(mapping, "line", 0) or line
+        self.line = line or getattr(mapping, "line", 0)
 
     def where(self, key: Any = _MISSING, item: Any = None) -> str:
         line = getattr(item, "line", 0) if item is not None else 0
@@ -102,9 +140,17 @@ class _Section:
         for key in self.mapping:
             if key not in known:
                 where = f" in {self.name}" if self.name else ""
-                shown = _short(key) if isinstance(key, str) else repr(key)
+                shown = _short(key) if isinstance(key, str) else describe(key)
                 raise PolicyError(f"{self.where(key)}: unknown key {shown}{where}; the policy reads "
                                   f"{', '.join(known)} here")
+
+    def check_unread(self, keys: tuple[str, ...], signing: str) -> None:
+        """Refuse a key the verifier does not read with this kind of signing."""
+        for key in keys:
+            if key in self.mapping:
+                raise PolicyError(f"{self.where(key)}: {self.full(key)} is not read with signing: {signing}, which "
+                                  "checks each record's key and not the workflow, ref, runner or issuer that "
+                                  "signed it; remove it, or use signing: sigstore")
 
     def section(self, key: str) -> "_Section":
         """A mapping under `key`. Nothing there (the key absent, or written with no value) is an empty one."""
@@ -113,8 +159,8 @@ class _Section:
             value = {}
         if not isinstance(value, dict):
             raise self.fail(key, "a mapping", value)
-        return _Section(self.path, value, self.full(key), self.mapping.line_of(key)
-                        if hasattr(self.mapping, "line_of") else 0)
+        line = self.mapping.line_of(key) if key in self.mapping and hasattr(self.mapping, "line_of") else 0
+        return _Section(self.path, value, self.full(key), line)
 
     def text(self, key: str, default: str) -> str:
         """Text. Absent gives `default`; an empty text gives `default` too, as it did before."""
@@ -142,16 +188,19 @@ class _Section:
             raise self.fail(key, "a whole number, 0 or more", value)
         return value
 
-    def names(self, key: str, default: list[str], *, at_least_one: bool = False) -> list[str]:
-        """A list of non-empty texts. Absent gives `default`."""
+    def names(self, key: str, default: list[str]) -> list[str]:
+        """A list of at least one non-empty text. Absent gives `default`. An empty list is refused: for some
+        fields the base replaced it with the default, and for the others (`approvers`, `runner_environments`)
+        it means no restriction, which is what leaving the key out says."""
         if key not in self.mapping:
             return list(default)
         value = self.mapping[key]
         if not isinstance(value, list):
             raise self.fail(key, "a list (for example [" + (default[0] if default else "name") + "])", value)
-        if at_least_one and not value:
+        if not value:
+            meaning = f"the default ({', '.join(default)})" if default else "no restriction"
             raise PolicyError(f"{self.where(key)}: {self.full(key)} must name at least one entry; remove the key "
-                              "to use the default" + (f" ({', '.join(default)})" if default else ""))
+                              f"for {meaning}")
         out = []
         for index, item in enumerate(value, 1):
             if not isinstance(item, str):
@@ -165,11 +214,14 @@ class _Section:
 
 def _read(path: str | Path) -> Any:
     try:
-        return yamlutil.load_file(path)
-    except OSError:
-        raise
-    except Exception as exc:    # YAML errors, duplicate keys, text that is not UTF-8, nesting too deep
-        detail = " ".join(str(exc).split()) or type(exc).__name__
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except UnicodeDecodeError as exc:
+        raise PolicyError(f"{path}: is not UTF-8 text ({_printable(str(exc))[:200]})") from exc
+    try:
+        return yaml.load(text, Loader=_PolicyLoader)  # noqa: S506 - _PolicyLoader derives from SafeLoader
+    except Exception as exc:    # YAML errors, duplicate keys, a tag the safe loader refuses, nesting too deep
+        detail = _printable(str(exc)) or type(exc).__name__
         raise PolicyError(f"{path}: cannot be read as YAML: {detail[:300]}") from exc
 
 
@@ -207,7 +259,8 @@ class Policy:
         if data is None:
             data = {}
         if not isinstance(data, dict) or data.get("format") != FORMAT or not isinstance(data.get("format"), str):
-            raise PolicyError(f"{path}: expected 'format: {FORMAT}'")
+            line = data.line_of("format") if isinstance(data, yamlutil.LineDict) and "format" in data else 0
+            raise PolicyError(f"{path}{f', line {line}' if line else ''}: expected 'format: {FORMAT}'")
         top = _Section(path, data, None)
         top.check_keys(TOP_KEYS)
         repo = data.get("repository")
@@ -228,12 +281,19 @@ class Policy:
         agents.check_keys(SECTIONS["agents"])
         keys = top.section("keys")
         keys.check_keys(KEY_ROLES)
+        if signing == "keys":
+            prov.check_unread(SIGSTORE_ONLY["provenance"], signing)
+            agents.check_unread(SIGSTORE_ONLY["agents"], signing)
+        elif "keys" in data:
+            raise PolicyError(f"{top.where('keys')}: keys is not read with signing: sigstore, which checks the "
+                              "Sigstore certificate's workflow, ref, runner and issuer and no key file; remove it, "
+                              "or use signing: keys")
 
         if "environments" in release.mapping and "environment" in release.mapping:
             raise PolicyError(f"{release.where('environment')}: write release.environments or release.environment, "
                               "not both")
         if "environments" in release.mapping:
-            environments = release.names("environments", ["release"], at_least_one=True)
+            environments = release.names("environments", ["release"])
         else:
             environments = [release.text("environment", "release")]
         if "branch" in release.mapping:
@@ -249,7 +309,7 @@ class Policy:
             if not isinstance(since, str):
                 raise agents.fail("since", "a full commit SHA written as text (quote it)", since)
             since = since or None
-        tiers = build.names("allowed_tiers", ["A", "B"], at_least_one=True)
+        tiers = build.names("allowed_tiers", ["A", "B"])
         for index, tier in enumerate(tiers, 1):
             if tier not in TIERS:
                 raise PolicyError(f"{build.where('allowed_tiers', build.mapping.get('allowed_tiers'))}: "
@@ -275,7 +335,7 @@ class Policy:
             propose_workflow=agents.text("propose_workflow", f"{repo}/.github/workflows/obaaf-agent-propose.yml"),
             apply_workflow=agents.text("apply_workflow", f"{repo}/.github/workflows/obaaf-agent-apply.yml"),
             agent_source_ref=agents.text("source_ref", "refs/heads/main"),
-            effect_identities=agents.names("effect_identities", ["obaaf-effect-lane"], at_least_one=True),
+            effect_identities=agents.names("effect_identities", ["obaaf-effect-lane"]),
             require_exact_diff=agents.flag("require_exact_diff", True),
             allow_self_hosted_agents=agents.flag("allow_self_hosted_runners", False),
             approvers=release.names("approvers", []),
@@ -284,15 +344,15 @@ class Policy:
         )
         if policy.signing == "sigstore" and not policy.source_refs:
             # No default: which refs may produce a release is the policy's main decision (FR4).
-            raise PolicyError(f"{prov.where('source_refs')}: provenance.source_refs is required "
-                              "(for example ['refs/tags/v*'])")
+            raise PolicyError(f"{prov.where('source_refs')}: provenance.source_refs is required with signing: "
+                              "sigstore (for example ['refs/tags/v*'])")
         if policy.agents_since and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", policy.agents_since):
             raise PolicyError(f"{agents.where('since')}: agents.since must be a full commit SHA; it is "
                               f"{describe(policy.agents_since)}")
         if policy.signing == "keys":
             for role in ("provenance", "build_record"):
                 if not policy.keys.get(role):
-                    raise PolicyError(f"{path}: signing: keys needs keys.{role}")
+                    raise PolicyError(f"{keys.where(role)}: signing: keys needs keys.{role}")
         return policy
 
     def key_paths(self, role: str) -> list[Path]:
