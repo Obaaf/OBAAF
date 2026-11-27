@@ -4,6 +4,16 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### OBAAF-GHA-026 in a local composite action's steps
+
+Slice 2d.19f, from #382; decision D-146. D-143 made OBAAF-GHA-026 read `claude ${{ env.FLAGS }} -p review` in a workflow's own step as GitHub runs it. In a local composite action's step it still read the line as written: with `FLAGS: --dangerously-skip-permissions` in the job's `env` it was the medium "cannot tell", where GitHub runs the warned option.
+
+- **Now a step of a local action that a job's own step uses is read as GitHub runs it**, where the checker knows the one text: the action's inputs as the caller's `with:` gives them (worked out with the caller's `env`, not the action step's), and the action's own expressions with the action step's `env` (the workflow's, the job's, the using step's and its own, the nearest winning). The option is then the high finding it is written out; a harmless value is no finding.
+- **Still "cannot tell":** a step of a further local action; an input whose value reads another context, or whose `default` holds an expression; `with:` written as one value; a using step's or action step's `env` written as one expression; a value put in that would start an expression in the action's text (a `$` before `{{`), which GitHub never works out; an earlier step that may write the `env` context; D-143's other cases.
+- **An `env` key that holds `${{`** (`env: {"${{ vars.K }}": ...}`) now makes OBAAF-GHA-026 "cannot tell" in a workflow's own step too, where D-143 read the option as known.
+- **Can fail a gate that passed** (medium to high), or let one pass; a baseline entry that accepted the medium no longer matches. `docs/upgrading.md` has the row. On this repository and on the first adopter the reports are byte-identical with `flagship` `3bf8e04`.
+- **CI:** a new advisory job, `composite-env-premise`, asserts on a GitHub-hosted `ubuntu-24.04` runner the order of the `env` scopes a composite action's step sees, and that the caller's `with:` is worked out with the caller's `env`.
+
 ### An `env` written as one expression, for a local action's steps
 
 Slice 2d.19e, from #382; decision D-145. D-144 made `${{ env.AGENT }} -p review` under `env: ${{ fromJSON(vars.E) }}` an error of the file in a workflow's own step. In a local composite action's step it was not: the reader dropped such a scope and read the name as empty, so the job was in no agent lane, with no error.

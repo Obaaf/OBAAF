@@ -247,6 +247,79 @@ def _continues_on_error(raw) -> bool:
     return value not in (None, False) and "".join(as_text(value).split()).lower() not in ("false", "${{false}}")
 
 
+# The functions whose value `env_expr` works out as GitHub does for OBAAF-GHA-026 (D-143). `fromJSON` is parsed more
+# strictly than the runner parses it (single quotes, comments, trailing commas: found by the second review of slice
+# 2d.19c), `toJSON` may escape otherwise, and the others give true or false: each refuses.
+ENV_ONLY_FUNCTIONS = frozenset({"format", "join"})
+# The words that may stand at the head of a reference in an expression the checker works out for OBAAF-GHA-026:
+# `env` and the literals. Any other context (`inputs`, `matrix`, `github`, `vars`, a step's output) is a value the
+# checker does not know, which `env_expr` reads as empty inside `format` and `join` and leaves out beside a known
+# value of `||` (found by the review of 2d.19c).
+ENV_ONLY_HEADS = frozenset({"env", "true", "false", "null", "nan", "infinity"})
+
+
+def env_expressions_only_env(text: str) -> bool:
+    """Whether some `${{ }}` expression of `text` reads `env`, each that does names every name it reads (`env.NAME`,
+    `env['NAME']`), nothing but `env` and literals stands at the head of a reference in it, and its only functions are
+    `format` and `join` (D-143). Raises as `env_expr.spans` and `expr.tokens` do."""
+    names = env_expr.names_read(text)
+    if not names:
+        return False
+    for _start, _end, body in env_expr.spans(text):
+        toks = expr_mod.tokens(body)
+        if not env_expr.head_reads_env(toks):
+            continue
+        for i, (kind, word) in enumerate(toks):
+            if kind != "id" or (i and toks[i - 1] == ("op", ".")):
+                continue
+            if i + 1 < len(toks) and toks[i + 1] == ("op", "("):
+                if word.lower() not in ENV_ONLY_FUNCTIONS:
+                    return False
+                continue
+            if word.lower() not in ENV_ONLY_HEADS:
+                return False
+    return True
+
+
+def expression_keys(scopes: list, seen: dict | None = None) -> bool:
+    """Whether a name of one of the `env` mappings `scopes` holds `${{` (flagship slice 2d.19f, from its review: the
+    runner may work out an expression in an `env` key, which may then name any variable). Each mapping is read once
+    for `seen`, by its identity, which keeps it (found by the second review: read again for every input of every
+    step that uses an action, the names of a 3,000-entry `env` took 3.3 times the base)."""
+    found = False
+    for scope in scopes:
+        if not isinstance(scope, dict):
+            continue
+        if seen is not None and id(scope) in seen:
+            holds = seen[id(scope)][0]
+        else:
+            holds = any(isinstance(key, str) and expr_mod.OPEN in key for key in scope)
+            if seen is not None:
+                seen[id(scope)] = (holds, scope)
+        found = found or holds
+    return found
+
+
+def env_values_known(scopes: list, case: str, names, env: "env_expr.Env | None" = None,
+                     seen: dict | None = None) -> bool:
+    """Whether each of `names` (`env_expr.names_read`) is set, to text holding no `${{`, in the `env` mappings
+    `scopes` (outermost first) under the runner's comparison of names `case` (#387), none of them is written as
+    one expression (D-143; since slice 2d.19d a name a nearer mapping sets is known to the lanes beside such a scope,
+    but here the rule stays as D-143 wrote it), and no name of theirs holds `${{` (`expression_keys`, flagship slice
+    2d.19f). `env` is the table of `scopes` where the caller has made it, and then has also found that no name holds
+    `${{`; `seen` is `expression_keys`'s record."""
+    if not names or any(scope is not None and not isinstance(scope, dict) for scope in scopes):
+        return False
+    if env is None and expression_keys(scopes, seen):
+        return False
+    env = env_expr.Env(scopes, case) if env is None else env
+    for name in names:
+        for value in env.lookup(name):
+            if not isinstance(value, str) or expr_mod.OPEN in value:
+                return False
+    return True
+
+
 # Expressions whose value cannot hold shell syntax: numbers, commit hashes, names GitHub restricts to
 # letters, digits, `-`, `_` and `.`, and runner paths (flagship slice 2d.2e).
 _SHELL_SAFE_EXPRESSIONS = frozenset({
@@ -2347,15 +2420,10 @@ class WorkflowRules:
     _ENV_CONTEXT_WRITERS_RE = re.compile(r"GITHUB_ENV|github\s*\.\s*env\b|\[\s*['\"]env['\"]\s*\]|exportVariable"
                                          r"|_runner_file|set_env_|set-env|ACTIONS_ALLOW_UNSECURE_COMMANDS"
                                          r"|toJSON\s*\(\s*github\s*\)|@actions/core", re.I)
-    # The functions whose value `env_expr` works out as GitHub does for this purpose. `fromJSON` is parsed more
-    # strictly than the runner parses it (single quotes, comments, trailing commas: found by the second review),
-    # `toJSON` may escape otherwise, and the others give true or false: each refuses.
-    _ENV_ONLY_FUNCTIONS = frozenset({"format", "join"})
-    # The words that may stand at the head of a reference in an expression the checker works out for
-    # OBAAF-GHA-026: `env` and the literals. Any other context (`inputs`, `matrix`, `github`, `vars`, a step's
-    # output) is a value the checker does not know, which `env_expr` reads as empty inside `format` and `join`
-    # and leaves out beside a known value of `||` (found by the review of 2d.19c).
-    _ENV_ONLY_HEADS = frozenset({"env", "true", "false", "null", "nan", "infinity"})
+    # The functions and the heads of a reference D-143 lets an expression it works out hold: the module's
+    # `ENV_ONLY_FUNCTIONS` and `ENV_ONLY_HEADS`, which `_given_texts` reads too (flagship slice 2d.19f).
+    _ENV_ONLY_FUNCTIONS = ENV_ONLY_FUNCTIONS
+    _ENV_ONLY_HEADS = ENV_ONLY_HEADS
 
     def _env_expressions_worked(self, job: Job, step: Step, text: str) -> str:
         """`text`, a command line of `step` that GitHub works out before it runs, with its `${{ }}` expressions
@@ -2365,17 +2433,30 @@ class WorkflowRules:
         that reads `env` reads nothing else, names each name it reads (`env.NAME`, `env['NAME']`), each such
         name is set to text with no expression in it, in the `env` of the step, its job or its workflow, under
         the runner's comparison of names, no `env` is one expression, no step before this one may set a
-        variable of the `env` context, the step is not a local action's (whose inputs its caller works out in
-        its own context), and every line comes to one reading. Worked out once for the step and the text."""
+        variable of the `env` context, and every line comes to one reading. Worked out once for the step and the
+        text. A step of a local composite action that a job's own step uses (flagship slice 2d.19f) is read from
+        its `given_texts`: the action's inputs put in as its caller works them out in its own context, and the
+        expressions left, which the action wrote, worked out with the action step's `env` (the workflow's, the
+        job's, the using step's and the action step's own, the nearest winning); a step of a further local
+        action is read as written."""
         if not isinstance(text, str) or not env_expr.may_read_env(text):
             return text
         cache = self.__dict__.setdefault("_env_worked_cache", {})
         key = (step.seq, id(step.raw), id(job), text)
         if key in cache:
             return cache[key][0]
-        worked = text
-        if self._env_expressions_known(job, step, text):
-            made, _size, readings, _why = step._env_expressions(text)
+        worked = source = text
+        if step.via is not None:
+            # A step of a local action (flagship slice 2d.19f): the line with the action's inputs put in as its
+            # caller works them out (`Step.given_texts`), whose remaining expressions read the action step's `env`.
+            # Where its inputs gave values the caller works out from `env`, a step before may have set them.
+            source = (step.given_texts or {}).get(text)
+            if source is None or (source != text and not self._no_env_writer_before(job, step)):
+                source = None
+            else:
+                worked = source
+        if source is not None and env_expr.may_read_env(source) and self._env_expressions_known(job, step, source):
+            made, _size, readings, _why = step._env_expressions(source)
             # Several readings of a line are several texts, of which GitHub runs one: read together, a heredoc
             # the first opens can hold the second (found by the review), and the rule cannot say which runs.
             if made is not None and readings == 1:
@@ -2426,45 +2507,31 @@ class WorkflowRules:
             cache[key] = (first, job)
         return cache[key][0]
 
+    def _no_env_writer_before(self, job: Job, step: Step) -> bool:
+        """Whether no step of `job` before `step`, and neither the job's nor the workflow's `env` or `defaults`, may
+        set a variable of the `env` context (`_first_env_writer`). A step of a local action that is not among the
+        job's steps (flagship slice 2d.19f: the second pass's copy holds it) is read as having one."""
+        index = next((n for n, other_step in enumerate(job.steps) if other_step is step), None)
+        if index is None:
+            if step.via is not None:
+                return False
+            index = 0
+        return self._first_env_writer(job) >= index
+
     def _env_expressions_known(self, job: Job, step: Step, text: str) -> bool:
         """Whether every `${{ }}` expression of `text` that reads `env` gives a text the checker knows (see
-        `_env_expressions_worked`)."""
-        if step.via is not None:
+        `_env_expressions_worked`). For a step of a local action, `text` is one of its `given_texts` (flagship slice
+        2d.19f); a step of a further local action is not read."""
+        if step.via is not None and step.given_texts is None:
             return False
-        index = next((n for n, other_step in enumerate(job.steps) if other_step is step), 0)
-        if self._first_env_writer(job) < index:
+        if not self._no_env_writer_before(job, step):
             return False
         try:
-            found = env_expr.spans(text)
-            names = env_expr.names_read(text)
-            if not names:
-                return False
-            for _start, _end, body in found:
-                toks = expr_mod.tokens(body)
-                if not env_expr.head_reads_env(toks):
-                    continue
-                for i, (kind, word) in enumerate(toks):
-                    if kind != "id" or (i and toks[i - 1] == ("op", ".")):
-                        continue
-                    if i + 1 < len(toks) and toks[i + 1] == ("op", "("):
-                        if word.lower() not in self._ENV_ONLY_FUNCTIONS:
-                            return False
-                        continue
-                    if word.lower() not in self._ENV_ONLY_HEADS:
-                        return False
-            scopes = step._env_scopes()
-            # No `env` written as one expression (flagship slice 2d.19d): since that slice a name a nearer mapping sets
-            # is known to the lanes beside such a scope, but here the rule stays as D-143 wrote it.
-            if any(scope is not None and not isinstance(scope, dict) for scope in scopes):
-                return False
-            env = env_expr.Env(scopes, env_expr.env_case(step.job))
-            for name in names:
-                for value in env.lookup(name):
-                    if not isinstance(value, str) or expr_mod.OPEN in value:
-                        return False
-        except (RecursionError, ValueError, env_expr.Unread):
+            return env_expressions_only_env(text) and env_values_known(
+                step._env_scopes(), env_expr.env_case(step.job), env_expr.names_read(text),
+                seen=self.__dict__.setdefault("_expression_keys", {}))
+        except (RecursionError, ValueError, env_expr.Unread, expr_mod.TooComplex):
             return False
-        return True
 
     def _agent_command(self, job: Job, step: Step, tool: str, name: str, flags: list, programs: list,
                        packages: list) -> None:

@@ -206,8 +206,10 @@ class WhatTheReviewFoundTest(unittest.TestCase):
         text = flow("claude ${{ env.FLAGS }} -p review", job_env="{FLAGS: --model x, ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'}")
         self.assertEqual(gha026(text), CANNOT_TELL)
 
-    def test_a_local_actions_step_is_read_as_written(self):
-        # The caller works its `with` out in its own context; the action's step reads its own `env`.
+    def test_a_local_actions_input_is_worked_out_in_its_callers_context(self):
+        # The caller works its `with` out in its own context; the action's step reads its own `env`. Slice 2d.19c read
+        # this as written ("cannot tell"); since slice 2d.19f the input is the caller's value of `X`, the warned
+        # option, as GitHub hands it (tests/test_env_expression_local_actions.py has the rest).
         action = ("runs:\n  using: composite\n  steps:\n    - shell: bash\n      env: {X: --model sonnet}\n"
                   "      run: claude ${{ inputs.flags }} -p hi\n")
         text = ("on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    permissions: {contents: read}\n"
@@ -217,7 +219,7 @@ class WhatTheReviewFoundTest(unittest.TestCase):
             result = check(tmp, text, files={".github/actions/run-claude/action.yml": action})
         self.assertEqual(list(result.errors), [])
         found = sorted((f.severity, f.kind) for f in result.findings if f.rule == "OBAAF-GHA-026")
-        self.assertEqual(found, CANNOT_TELL)
+        self.assertEqual(found, HIGH)
 
     def test_many_values_under_odd_names_do_not_raise(self):
         job_env = "{" + ", ".join(f"{n}: v{n}" for n in range(4200)) + ", X: --model sonnet}"

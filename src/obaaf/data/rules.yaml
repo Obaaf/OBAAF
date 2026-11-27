@@ -1057,7 +1057,9 @@ rules:
       `--name=false` is not a match; a `--` right after an option may be its value and does not end them. "Cannot tell", at most medium, is case `command-computed`, in a step
       that names the tool: a word of the program's command with a variable or substitution outside quotes,
       `"$@"`, `"${NAME[@]}"`, an unquoted glob or a `${{ }}` expression (one that reads only `env` is worked
-      out first where the checker knows the one text it gives, flagship slice 2d.19c); a quoted word that could start a
+      out first where the checker knows the one text it gives, flagship slice 2d.19c, and in a local composite
+      action's step a job's own step uses, with the action's inputs as the caller works them out, slice 2d.19f); a
+      quoted word that could start a
       warned option (`"--dangerously-$X"`, `"$EMPTY"--yolo`, `"${F:---yolo}"`); a warned option that takes a
       value given one the checker cannot read; the program run by `xargs` or `parallel`; a command the
       checker cannot name (`$C`, `"$(command -v claude)"`, `{claude,}`) or a new name made for a program
