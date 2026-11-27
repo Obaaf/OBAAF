@@ -516,3 +516,53 @@ jobs:
             throw "the process held $($names -join ', '), expected $($want -join ', ')"
           }
           "$($env:RUNNER_OS): as recorded."
+
+  composite-env-premise:
+    # What slice 2d.19f (#382) assumes before OBAAF-GHA-026 works out `${{ }}` expressions that read `env` in a
+    # local composite action's steps: on a GitHub-hosted runner, a composite step's `env` context holds the job's,
+    # the using step's and the composite step's own `env`, the nearest winning, and a later composite step does
+    # not see an earlier one's; the caller's `with:` is worked out with the caller's `env` (its own included), not
+    # with the action step's; and a value put in is not read again as an expression. The action,
+    # tests/premise/composite-env, prints and asserts each value. What an input's `default` that reads `env` gives
+    # is printed by a second action, tests/premise/composite-env-default, in a step that may fail (F-425). It checks
+    # out the repository without keeping its token, holds no secret and writes nothing. Run 45955337311 showed
+    # every asserted value as recorded on ubuntu-24.04, macos-latest and windows-latest, and GitHub refusing the
+    # second action's manifest ("Unrecognized named-value: 'env'" in the input's `default`), so an action whose
+    # input default reads `env` does not load at all. Not probed: the workflow's own `env` (it would reach every
+    # job of this file), a further local action used by the action, and self-hosted runners.
+    name: "Runner premise: the env context in a local composite action (2d.19f, ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    # Advisory: it is not a required check of main, so its failure is reported and does not fail the
+    # run (OBAAF-SET-008). A maintainer may make it required.
+    continue-on-error: true
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    env:
+      PREMISE_JOB: from-job
+      PREMISE_USING: from-job
+      PREMISE_OWN: from-job
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Use the premise action
+        uses: ./tests/premise/composite-env
+        env:
+          PREMISE_USING: from-using-step
+          PREMISE_OWN: from-using-step
+          PREMISE_USING_ONLY: using-only
+        with:
+          given_using: ${{ env.PREMISE_USING }}
+          given_own: ${{ env.PREMISE_OWN }}
+          given_job: ${{ env.PREMISE_JOB }}
+          dollar: $
+      - name: Print what an input's default that reads env gives (not asserted)
+        if: always()
+        continue-on-error: true
+        uses: ./tests/premise/composite-env-default

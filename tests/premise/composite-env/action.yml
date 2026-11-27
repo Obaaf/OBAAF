@@ -1,0 +1,55 @@
+# A local composite action for CI's job `composite-env-premise` (plan slice 2d.19f, #382): what the env context
+# and the inputs give a local composite action's steps on a GitHub-hosted runner. It prints harmless marker values,
+# holds no secret, writes nothing and fails where a value is not the one OBAAF-GHA-026 assumes. Its descriptions
+# hold no expression, so that the manifest loads whatever contexts GitHub allows there (found by the review).
+name: OBAAF premise, the env context in a local composite action
+description: Prints and asserts what env and inputs expressions give a composite action's steps.
+inputs:
+  given_using:
+    description: The caller's env.PREMISE_USING, which its own env sets.
+    required: true
+  given_own:
+    description: The caller's env.PREMISE_OWN, which the action step's own env sets otherwise.
+    required: true
+  given_job:
+    description: The caller's env.PREMISE_JOB, which only the job's env sets.
+    required: true
+  dollar:
+    description: A dollar sign, put in before text that would start an expression if it were read again.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: The env context and the inputs in a step with an env of its own
+      shell: bash
+      env:
+        PREMISE_OWN: from-action-step
+        PREMISE_OWN_ONLY: own-only
+      run: |
+        fail=0
+        seen() {
+          if [ "$2" = "$3" ]; then echo "$1 gave '$2'"; else echo "::error::$1 gave '$2', expected '$3'"; fail=1; fi
+        }
+        seen 'env.PREMISE_JOB' '${{ env.PREMISE_JOB }}' 'from-job'
+        seen 'env.PREMISE_USING' '${{ env.PREMISE_USING }}' 'from-using-step'
+        seen 'env.PREMISE_USING_ONLY' '${{ env.PREMISE_USING_ONLY }}' 'using-only'
+        seen 'env.PREMISE_OWN' '${{ env.PREMISE_OWN }}' 'from-action-step'
+        seen 'env.PREMISE_OWN_ONLY' '${{ env.PREMISE_OWN_ONLY }}' 'own-only'
+        seen 'inputs.given_using' '${{ inputs.given_using }}' 'from-using-step'
+        seen 'inputs.given_own' '${{ inputs.given_own }}' 'from-using-step'
+        seen 'inputs.given_job' '${{ inputs.given_job }}' 'from-job'
+        # A value put in is not read again: the dollar and the braces after it stay text. The expected value is
+        # written in two quoted pieces, so that this file holds no such expression itself.
+        seen 'inputs.dollar before braces' '${{ inputs.dollar }}{{ env.PREMISE_JOB }}' '$''{{ env.PREMISE_JOB }}'
+        exit "$fail"
+    - name: The env context in a later step with no env of its own
+      shell: bash
+      run: |
+        fail=0
+        seen() {
+          if [ "$2" = "$3" ]; then echo "$1 gave '$2'"; else echo "::error::$1 gave '$2', expected '$3'"; fail=1; fi
+        }
+        seen 'env.PREMISE_OWN' '${{ env.PREMISE_OWN }}' 'from-using-step'
+        seen 'env.PREMISE_OWN_ONLY' '${{ env.PREMISE_OWN_ONLY }}' ''
+        seen 'env.PREMISE_USING' '${{ env.PREMISE_USING }}' 'from-using-step'
+        exit "$fail"

@@ -2276,6 +2276,12 @@ class Step:
     # step of a local action read for an agent (2d.4a), whose expressions that reader works out itself; then every
     # reading is kept.
     job: Any = field(default=None, repr=False, compare=False)
+    # Flagship slice 2d.19f (#382): for a step of a local composite action that the second pass reads (2d.4b2), and
+    # that a job's own step uses (not a further action's), each command line as the second pass puts it in (its
+    # `run`, a github-script script, the egress action's command), mapped to the same line with the action's inputs
+    # put in as the caller works them out (`_given_texts`); a line mapped to None, or not in it, is not worked out.
+    # None for every other step.
+    given_texts: Any = field(default=None, repr=False, compare=False)
 
     @property
     def name(self) -> str:
