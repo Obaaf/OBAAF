@@ -140,7 +140,14 @@ class _Section:
         for key in self.mapping:
             if key not in known:
                 where = f" in {self.name}" if self.name else ""
-                shown = _short(key) if isinstance(key, str) else describe(key)
+                if isinstance(key, str):
+                    shown = _short(key)
+                elif key is None or isinstance(key, bool):
+                    shown = "null" if key is None else ("true" if key else "false")
+                elif isinstance(key, int) and abs(key) >= 10 ** 30:
+                    shown = "(a whole number too long to print)"
+                else:
+                    shown = repr(key)
                 raise PolicyError(f"{self.where(key)}: unknown key {shown}{where}; the policy reads "
                                   f"{', '.join(known)} here")
 
@@ -188,19 +195,20 @@ class _Section:
             raise self.fail(key, "a whole number, 0 or more", value)
         return value
 
-    def names(self, key: str, default: list[str]) -> list[str]:
+    def names(self, key: str, default: list[str], absent: str = "") -> list[str]:
         """A list of at least one non-empty text. Absent gives `default`. An empty list is refused: for some
-        fields the base replaced it with the default, and for the others (`approvers`, `runner_environments`)
-        it means no restriction, which is what leaving the key out says."""
+        fields the base replaced it with the default, and for `approvers` and `runner_environments` it means
+        no restriction, which is what leaving the key out says. `absent` says what leaving the key out means,
+        for the error; "" where the key is needed (`source_refs` with Sigstore, a role under `keys`)."""
         if key not in self.mapping:
             return list(default)
         value = self.mapping[key]
         if not isinstance(value, list):
             raise self.fail(key, "a list (for example [" + (default[0] if default else "name") + "])", value)
         if not value:
-            meaning = f"the default ({', '.join(default)})" if default else "no restriction"
-            raise PolicyError(f"{self.where(key)}: {self.full(key)} must name at least one entry; remove the key "
-                              f"for {meaning}")
+            meaning = absent or (f"the default ({', '.join(default)})" if default else "")
+            raise PolicyError(f"{self.where(key)}: {self.full(key)} must name at least one entry"
+                              + (f"; remove the key for {meaning}" if meaning else ""))
         out = []
         for index, item in enumerate(value, 1):
             if not isinstance(item, str):
@@ -284,7 +292,8 @@ class Policy:
         if signing == "keys":
             prov.check_unread(SIGSTORE_ONLY["provenance"], signing)
             agents.check_unread(SIGSTORE_ONLY["agents"], signing)
-        elif "keys" in data:
+        elif keys.mapping:
+            # An empty `keys:` is read as absent, like any section with nothing under it.
             raise PolicyError(f"{top.where('keys')}: keys is not read with signing: sigstore, which checks the "
                               "Sigstore certificate's workflow, ref, runner and issuer and no key file; remove it, "
                               "or use signing: keys")
@@ -320,7 +329,7 @@ class Policy:
             signing=signing,
             provenance_workflow=prov.text("signer_workflow", f"{repo}/.github/workflows/obaaf-release.yml"),
             source_refs=prov.names("source_refs", []),
-            runner_environments=prov.names("runner_environments", []),
+            runner_environments=prov.names("runner_environments", [], absent="no restriction"),
             issuer=prov.text("issuer", "https://token.actions.githubusercontent.com"),
             keys={role: keys.names(role, []) for role in keys.mapping},
             allowed_tiers=tiers,
@@ -338,7 +347,7 @@ class Policy:
             effect_identities=agents.names("effect_identities", ["obaaf-effect-lane"]),
             require_exact_diff=agents.flag("require_exact_diff", True),
             allow_self_hosted_agents=agents.flag("allow_self_hosted_runners", False),
-            approvers=release.names("approvers", []),
+            approvers=release.names("approvers", [], absent="no restriction"),
             jenkins_project=release.text("jenkins_project", "").strip("/"),
             base_dir=Path(path).parent,
         )

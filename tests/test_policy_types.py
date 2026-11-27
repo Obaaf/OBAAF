@@ -403,6 +403,13 @@ class FailOpenTest(Fixture):
                              ("agents", "effect_identities")):
             with self.subTest(field=f"{section}.{key}"):
                 self.refused(set_field(FULL, section, key, "[]"), f"{section}.{key}", "at least one", "the default")
+        # A list the policy needs an entry of: no hint to remove the key.
+        for section, key, text in (("provenance", "source_refs", FULL), ("keys", "agent_run", KEYS_FULL),
+                                   ("keys", "provenance", KEYS_FULL)):
+            with self.subTest(field=f"{section}.{key}"):
+                message = self.refused(set_field(text, section, key, "[]"), f"{section}.{key} must name at least "
+                                       "one entry")
+                self.assertNotIn("remove the key", message)
 
     def test_other_lists_written_as_text(self):
         for section, key, kind in FIELDS:
@@ -453,6 +460,10 @@ class FailOpenTest(Fixture):
                 self.refused(text, f"{section}.{key} is not read with signing: keys", "line")
         message = self.refused(FULL + "keys:\n  provenance: [k.pem]\n", "keys is not read with signing: sigstore")
         self.assertIn(f"line {len(FULL.splitlines()) + 1}", message)
+        # An empty `keys:` is read as absent, as any section with nothing under it.
+        for empty in ("keys:\n", "keys: {}\n", "keys: null\n"):
+            with self.subTest(keys=empty):
+                self.assertEqual(self.load(FULL + empty).keys, {})
         # An empty provenance section is still allowed with signing: keys.
         self.assertEqual(self.load(KEYS_FULL + "provenance:\n").source_refs, [])
 
@@ -470,8 +481,9 @@ class KeysAndValuesTest(Fixture):
                              "'tiers' in build_record"),
             "keys": (KEYS_FULL.replace("  approval: [keys/r.pem]", "  approval: [keys/r.pem]\n  agent-run: [x]"),
                      "'agent-run' in keys"),
-            "number key": (FULL + "1: x\n", "unknown key a whole number (1)"),
-            "null key": (FULL + "~: x\n", "unknown key nothing (null)"),
+            "number key": (FULL + "1: x\n", "unknown key 1;"),
+            "null key": (FULL + "~: x\n", "unknown key null;"),
+            "true key": (FULL + "true: x\n", "unknown key true;"),
             "look-alike": (FULL.replace("  branch: release", "  brаnch: release"), "'brаnch' in release"),
             "case": (FULL.replace("  branch: release", "  Branch: release"), "'Branch' in release"),
         }
@@ -481,7 +493,7 @@ class KeysAndValuesTest(Fixture):
 
     def test_a_huge_number_as_a_key(self):
         # repr() of an int over 4,300 digits raises ValueError; the message gives no number.
-        self.refused(FULL + "? " + "9" * 4200 + "\n: 1\n", "unknown key a whole number;")
+        self.refused(FULL + "? " + "9" * 4200 + "\n: 1\n", "unknown key (a whole number too long to print);")
         self.refused(FULL + "? " + "9" * 4400 + "\n: 1\n", "cannot be read as YAML")
 
     def test_the_known_keys_are_named(self):
