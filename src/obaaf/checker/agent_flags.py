@@ -1890,15 +1890,37 @@ def _name_pattern(program: str, parts: bool, package: bool = False) -> re.Patter
 
 # A `.` that GitHub's expressions or a variable's property read as a separator, not as a part of a dotted name
 # (`${{ inputs.cn }}`, `${{ steps.cn.outputs.bin }}`, `$tools.cn`; found by 2d.23's review).
-# Each scan stops at the next `$` or brace, so an unclosed `${{` or `${` costs no more than its own text (the fourth
-# review: `.*?` made a text of many unclosed `${{` quadratic, 58 s for 160 KB).
-_EXPRESSION_RE = re.compile(r"\$\{\{[^${}]*\}\}")
+def _expression_spans(text: str) -> list:
+    """Where each `${{ ... }}` stands, found with `str.find`: a brace inside one (`format('{0}', ...)`) does not end
+    it, and where one `${{` has no `}}` after it none after it has either, so the search stops there and stays
+    linear (the fourth and fifth reviews: `.*?` was quadratic on many unclosed `${{`, and `[^${}]*` lost
+    `${{ format('{0}', steps.cn.outputs.bin) }}`)."""
+    spans: list = []
+    at = text.find("${{")
+    while at != -1:
+        end = text.find("}}", at + 3)
+        if end == -1:
+            break
+        spans.append((at, end + 2))
+        at = text.find("${{", end + 2)
+    return spans
+
+
+def _dots_as_spaces_in_expressions(text: str) -> str:
+    out, last = [], 0
+    for start, end in _expression_spans(text):
+        out.append(text[last:start])
+        out.append(text[start:end].replace(".", " "))
+        last = end
+    out.append(text[last:])
+    return "".join(out)
 _PROPERTY_RE = re.compile(r"\$\{?[\w:]+\}?(?:\.\w+)+")
 # Where a name's case changes (`$claudeBin`, `$cnPath`, `$CLAUDEBin`), for `names`.
 _CASE_EDGE_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
-# A reference to a variable or a GitHub expression, in bash, PowerShell or cmd (`$CODEXBIN`, `${X}`, `$env:X`,
-# `%X%`, `!X!`, `${{ steps.setup.outputs.codexbin }}`), for `names` (2d.23, from its third review).
-_REFERENCE_RE = re.compile(r"\$\{\{[^${}]*\}\}|\$\{[^${}\n]*\}|\$[\w:]+|%[^%\s]+%|![^!\s]+!")
+# A reference to a variable, in bash, PowerShell or cmd (`$CODEXBIN`, `${X}`, `$env:X`, `%X%`, `!X!`), for `names`
+# (2d.23, from its third review); a GitHub expression's is found by `_expression_spans`. A `${` stops at the next
+# `$` or brace, so an unclosed one costs no more than its own text (the fourth review).
+_REFERENCE_RE = re.compile(r"\$\{[^${}\n]*\}|\$[\w:]+|%[^%\s]+%|![^!\s]+!")
 
 
 def _named(text: str, programs: list, packages: list, parts: bool) -> bool:
@@ -1940,7 +1962,8 @@ def _named(text: str, programs: list, packages: list, parts: bool) -> bool:
             # expression (`$CODEXBIN`, `%CODEXBIN%`, `${{ steps.setup.outputs.codexbin }}`): a name given for the
             # tool, which may hold it wherever it is used (the third review). Not for two letters (`$cnt`).
             if references is None:
-                references = " ".join(m.group(0) for m in _REFERENCE_RE.finditer(text)).casefold()
+                references = " ".join([text[a:b] for a, b in _expression_spans(text)]
+                                      + [m.group(0) for m in _REFERENCE_RE.finditer(text)]).casefold()
             if program in references:
                 return True
         pattern = None
@@ -1954,7 +1977,7 @@ def _named(text: str, programs: list, packages: list, parts: bool) -> bool:
         if len(program) == 2 and "." in text and "$" in text:
             if dotted is None:
                 spaced = _PROPERTY_RE.sub(lambda m: m.group(0).replace(".", " "),
-                                          _EXPRESSION_RE.sub(lambda m: m.group(0).replace(".", " "), text))
+                                          _dots_as_spaces_in_expressions(text))
                 dotted = re.sub(r"[\"'\\]", "", spaced).casefold()
             if program in dotted and (pattern or _name_pattern(
                     program, parts, program in plain)).search(dotted):

@@ -173,7 +173,9 @@ class WhereTheToolIsNamedTest(unittest.TestCase):
                               ("pwsh", "$t = \"${{ steps.setup.outputs.codexbin }}\"\n& $t exec --yolo fix"),
                               ("cmd", "for /f \"delims=\" %%i in ('where %CODEXBIN%') do set X=%%i\n%X% exec --yolo fix"),
                               ("cmd", "set X=%CODEXBIN%\nset Y=%X%\n%Y% exec --yolo fix"),
-                              ("pwsh", "'acne'\nbash -c 'IFS=,; set -- $CODEXCMD; \"$@\"'")):
+                              ("pwsh", "'acne'\nbash -c 'IFS=,; set -- $CODEXCMD; \"$@\"'"),
+                              ("pwsh", "$t = \"${{ format('{0}/bin', steps.codexsetup.outputs.dir) }}\"\n& $t exec --yolo x"),
+                              ("pwsh", "$t = \"${{ fromJSON('{\\\"a\\\":1}').codexbin }}\"\n& $t exec --yolo x")):
             with self.subTest(shell=shell, script=script):
                 got, errors = findings(script, shell)
                 self.assertEqual(errors, [])
@@ -234,6 +236,8 @@ class WhereTheToolIsNamedTest(unittest.TestCase):
             with self.subTest(script):
                 self.assert_cannot_tell(script, program=program)
         self.assert_cannot_tell("& \"${{ steps.cn.outputs.bin }}\" $flags", "pwsh")
+        # A brace inside the expression does not end it (the fifth review).
+        self.assert_cannot_tell("$t = \"${{ format('{0}', steps.cn.outputs.bin) }}\"\n& $t --auto", "pwsh")
         self.assert_cannot_tell("IFS=,\nset -- $AGENT_CMD\n\"$@\"", program="claude-code",
                                 env={"CLAUDE_CODE_OAUTH_TOKEN": "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"})
 
