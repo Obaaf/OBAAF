@@ -125,4 +125,6 @@ A record without a patch cannot accompany a commit that changes files. A merge m
 - the commit after which agent commits are checked (`agents.since`);
 - where agent records live, and which workflows must sign them.
 
+The policy decides what may ship, so both commands read it strictly. Each field must have its YAML type: text, `true` or `false`, a whole number of 0 or more (`min_approvals`), or a list of texts, even with one entry (`source_refs: ["refs/tags/v*"]`, not `source_refs: refs/tags/v*`). OBAAF reads YAML 1.2, so `no`, `off` and `"false"` are text, not false. A key the policy does not read (a misspelling such as `min_aprovals`), a key written with no value, an empty `allowed_tiers`, `environments` or `effect_identities`, and YAML that cannot be read are each an `error:` naming the field and its line, and the command ends with status 2 before it checks anything. Remove a key to use its default. `branch: ""` still turns the protected-branch check off, and an empty text for the other text fields still gives their default.
+
 Missing certificate fields fail verification. An attestation that fails the policy is ignored, with a warning, when a valid one exists for the same file.
