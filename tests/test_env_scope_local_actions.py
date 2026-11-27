@@ -279,5 +279,78 @@ class TheReviewersFindingsTest(unittest.TestCase):
         self.assertEqual(scope_errors(wf(job=JOB), files(step(run))), [])
 
 
+class TheReviewersSecondPassTest(unittest.TestCase):
+    """What the second review of 2d.19e found (2026-11-27)."""
+
+    INNER = (".github/actions/inner/action.yml", "name: i\ninputs:\n  tool: {default: echo}\nruns:\n  using: composite\n"
+             "  steps:\n    - run: ${{ inputs.tool }} -p x\n      shell: bash\n")
+
+    def test_a_value_handed_in_is_worked_out_with_the_env_it_was_written_under(self):
+        """The workflow's `with:` (or an input's default) that reads `env`, handed on to a further action by a step
+        whose own `env` settles the name: GitHub works it out in the workflow's step, where the scope may set it."""
+        handing = ("    - uses: ./.github/actions/inner\n      env: {AGENT: echo}\n      with:\n"
+                   "        tool: ${{ inputs.tool }}\n")
+        for inputs, with_ in (("  tool: {default: echo}\n", "{tool: '${{ env.AGENT }}'}"),
+                              ("  tool: {default: '${{ env.AGENT }}'}\n", "")):
+            with self.subTest(inputs=inputs):
+                given = {f"{ACTION_DIR}/action.yml": f"name: x\ninputs:\n{inputs}runs:\n  using: composite\n  steps:\n"
+                         + handing, self.INNER[0]: self.INNER[1]}
+                (error,) = scope_errors(wf(job=JOB, with_=with_), given)
+                self.assertIn("in step 1 of the local action ./.github/actions/inner", error)
+
+    def test_a_value_handed_in_through_the_next_steps_env(self):
+        inner = ("name: i\ninputs:\n  tool: {default: echo}\nruns:\n  using: composite\n  steps:\n"
+                 "    - shell: bash\n      env: {T: '${{ inputs.tool }}'}\n      run: ${{ env.T }} -p x\n")
+        given = {f"{ACTION_DIR}/action.yml": composite("    - uses: ./.github/actions/inner\n      with:\n"
+                                                       "        tool: ${{ env.AGENT }}\n"),
+                 ".github/actions/inner/action.yml": inner}
+        self.assertEqual(len(scope_errors(wf(job=JOB), given)), 1)
+        # Without the scope, the job's value is read through, as before.
+        self.assertEqual(lane(wf(job="{AGENT: claude}"), given), "agent")
+
+    def test_a_text_left_as_written_past_what_the_reader_reads_is_a_note_as_before(self):
+        """Sixteen readings of a long `run` pass what the reader reads, so the text is left as written and named in
+        the note; the step's own `env` settles `PY`, so the caller's `env` is not the one to read it with."""
+        lines = [f"echo 'line {n}: some ordinary build output goes here for the record'" for n in range(250)]
+        run = "\n".join([*lines, "echo ${{ inputs.b0 || 'd0' }} ${{ inputs.b1 || 'd1' }} ${{ inputs.b2 || 'd2' }} "
+                          "${{ inputs.b3 || 'd3' }}", "${{ env.PY }} -m build"])
+        inputs = "".join(f"  b{n}: {{default: ''}}\n" for n in range(4))
+        text = wf(job="${{ matrix.env }}").replace("    env: ${{ matrix.env }}\n",
+                                                   "    strategy: {matrix: {env: [{A: '1'}]}}\n"
+                                                   "    env: ${{ matrix.env }}\n")
+        with TempDir() as tmp:
+            notes: list = []
+            errors: list = []
+            checker.lanes(build(tmp, text, files(step(run, env="{PY: python3}"), inputs=inputs)), notes=notes,
+                          errors=errors, seen=[])
+        self.assertEqual(errors, [])
+        self.assertTrue(any("longer than the checker reads" in note for note in notes), notes)
+
+    def test_without_a_scope_jobs_on_both_kinds_of_runner_share_a_reading(self):
+        """With the runner's kind in every key, an action used by Linux and Windows jobs was read once for each
+        kind; it is kept by kind only where it was read under a scope."""
+        from obaaf import checker as checker_mod
+        calls = []
+        real = checker_mod._charge
+
+        def counting(cache, units):
+            calls.append(units)
+            return real(cache, units)
+
+        jobs = "".join(f"  {kind}{n}:\n    runs-on: {runs_on}\n    steps:\n      - uses: {USES}\n        with: {{k: v{n}}}\n"
+                       for n in range(2) for kind, runs_on in (("l", "ubuntu-24.04"), ("w", "windows-2022")))
+        text = "on: workflow_dispatch\njobs:\n" + jobs
+        given = files(step("echo ${{ inputs.k }}"), inputs="  k: {default: a}\n")
+        checker_mod._charge = counting
+        try:
+            with TempDir() as tmp:
+                checker.lanes(build(tmp, text, given), notes=[], errors=[], seen=[])
+        finally:
+            checker_mod._charge = real
+        readings = [units for units in calls if units > 0]
+        # One reading for each input value, as on the base, whatever the runners.
+        self.assertEqual(len(readings), 2, calls)
+
+
 if __name__ == "__main__":
     unittest.main()

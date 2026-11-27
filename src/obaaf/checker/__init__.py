@@ -272,6 +272,9 @@ class _ActionReading:
     agent: str | None = None
     unread: list = field(default_factory=list)
     cut: bool = False
+    # Whether it read a step under a scope written as one expression, where how the runner compares names decides
+    # what is settled (flagship slice 2d.19e): such a reading is kept for uses on a runner of the same kind only.
+    by_case: bool = False
 
 
 def _is_local_like(uses) -> bool:
@@ -1529,23 +1532,23 @@ def _put_in(text: str, inputs: dict, folder: str, problems: list, env: dict | No
 
 
 def _put_inputs(value, inputs: dict, folder: str, problems: list, _done: dict | None = None, env: dict | None = None,
-                counts: list | None = None):
+                counts: list | None = None, keep_scope: bool = False):
     """A step of a composite action with `_put_in` applied to every text it holds. A value YAML gives
     many times through an alias is worked on once (a file of a few kilobytes can name a million)."""
     done = {} if _done is None else _done
     if id(value) in done:
         return done[id(value)]
     if isinstance(value, str):
-        out = _put_in(value, inputs, folder, problems, env, counts)
+        out = _put_in(value, inputs, folder, problems, env, counts, keep_scope)
     elif isinstance(value, dict):
         out = {}
         done[id(value)] = out
         for key, item in value.items():
-            out[key] = _put_inputs(item, inputs, folder, problems, done, env, counts)
+            out[key] = _put_inputs(item, inputs, folder, problems, done, env, counts, keep_scope)
     elif isinstance(value, list):
         out = []
         done[id(value)] = out
-        out.extend(_put_inputs(item, inputs, folder, problems, done, env, counts) for item in value)
+        out.extend(_put_inputs(item, inputs, folder, problems, done, env, counts, keep_scope) for item in value)
     else:
         out = value
     done[id(value)] = out
@@ -1579,7 +1582,35 @@ def _action_command_texts(raw: dict, step: "wf_mod.Step") -> list:
     return [text for text in texts if isinstance(text, str)]
 
 
-def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -> tuple | None:
+def _put_left(text: str, own: frozenset, folder: str, env: "_ActionEnv") -> str:
+    """`text` with each expression that reads `env` and is not one of `own` (the bodies the action wrote there)
+    worked out with `env`, keeping what a scope written as one expression may give (flagship slice 2d.19e)."""
+    if expr_mod.OPEN not in text:
+        return text
+    left = [body for body in dict.fromkeys(_bodies_or_none(text)) if body not in own and env_expr.may_read_env(
+        expr_mod.OPEN + body + expr_mod.CLOSE)]
+    for body in left:
+        whole = expr_mod.OPEN + body + expr_mod.CLOSE
+        values = _token_values(expr_mod.tokens(body), {}, folder, env=env, cut=[])
+        if values is None:
+            values = [_FROM_SCOPE_TEXT] if env.where is not None else [""]
+        made = "\n".join(dict.fromkeys(text.replace(whole, value) for value in values))
+        # Past what the reader reads, it is read as what the scope may give, or as empty without one.
+        text = made if len(made) <= LOCAL_ACTION_TEXT else text.replace(
+            whole, _FROM_SCOPE_TEXT if env.where is not None else "")
+    return text
+
+
+def _bodies_or_none(text: str) -> list:
+    """The bodies of the `${{ }}` expressions in `text`, after `github.action_path` (none where it cannot be read)."""
+    try:
+        return [body for _start, _end, body in env_expr.spans(text)]
+    except expr_mod.TooComplex:
+        return []
+
+
+def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv,
+                        skip: frozenset = frozenset()) -> tuple | None:
     """(the expression, where) for the first `${{ }}` expression in `text`, a command line of a local action's step,
     that may give what an `env` written as one expression sets and stands where an agent's name would be read as its
     command line or where a command's program goes, as `workflow._scope_at_program` reads a workflow's own step
@@ -1599,7 +1630,7 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -
     known: dict = {}
     memo: dict = {}
     for start, end, body in found:
-        if not re.search(r"\binputs\b|\benv\b|action_path", body, re.I):
+        if body in skip or not re.search(r"\binputs\b|\benv\b|action_path", body, re.I):
             continue
         if body not in memo:
             toks = expr_mod.tokens(body)
@@ -1751,11 +1782,14 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
     # kept for every use that gives those the same values. The environment is kept whole: a further
     # local action may read any of it.
     key = (tuple(folders), fixed(given, None if "*" in read_names else read_names), fixed(given_env),
-           None if env_scope is None else (env_scope[0], tuple(sorted(env_scope[1]))), env_case)
+           None if env_scope is None else (env_scope[0], tuple(sorted(env_scope[1]))))
     context = (key, frozenset(seen), depth)
     for known in (key, context):
-        if known in cache:
-            return cache[known]
+        hit = cache.get(known)
+        if hit is _BY_CASE:
+            hit = cache.get((known, _BY_CASE, env_case))
+        if hit is not None:
+            return hit
     cost = 1 + size // _BYTES_PER_UNIT + _UNITS_PER_STEP * sum(
         len(raw["runs"]["steps"]) if isinstance(raw.get("runs"), dict) and isinstance(raw["runs"].get("steps"), list)
         else 1 for _, raw in raws)
@@ -1807,10 +1841,19 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             # The step's `env` first, with its inputs put in, so `${{ env.T }}` elsewhere reads what GitHub
             # gives it (`T: ${{ inputs.tool }}`).
             step_env = merged.get("env") if isinstance(merged.get("env"), dict) else {}
+            looked_up = step_env
             if step_env:
-                step_env = _put_inputs(step_env, inputs, folder, problems, {},
-                                       _ActionEnv(step_env, settled, scope_where, env_case))
-            view = _ActionEnv(step_env, settled, scope_where, env_case)
+                written_env = _ActionEnv(step_env, settled, scope_where, env_case)
+                if scope_where is not None:
+                    # What `${{ env.T }}` reads keeps what the scope may give where `T` holds it (`T: ${{ inputs.tool
+                    # }}` with a tool handed in from the scope; found by the second review); the `env` the step's
+                    # Step is given, read for `$T` and as command lines, has it as empty.
+                    looked_up = _put_inputs(step_env, inputs, folder, [], {}, written_env, keep_scope=True)
+                step_env = _put_inputs(step_env, inputs, folder, problems, {}, written_env)
+                if scope_where is None:
+                    looked_up = step_env
+            view = _ActionEnv(looked_up, settled, scope_where, env_case)
+            out.by_case = out.by_case or scope_where is not None
             for key_name, value in merged.items():
                 if key_name == "env":
                     put[key_name] = step_env
@@ -1871,11 +1914,16 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 # in, for an expression a value handed in holds (a workflow's `with:` or an input's default that reads
                 # `env`, found by the review), read with the caller's (GitHub works the caller's `with:` out there).
                 caller = _ActionEnv(given_env, env_scope[1], env_scope[0], env_case) if env_scope is not None else None
-                checks = [(text, inputs, view) for text in _action_command_texts(merged, step)]
+                written = _action_command_texts(merged, step)
+                checks = [(text, inputs, view, frozenset()) for text in written]
                 if caller is not None:
-                    checks.extend((text, {}, caller) for text in _action_command_texts(put, step))
-                for text, given_inputs, seen_env in checks:
-                    place = _action_scope_place(text, given_inputs, folder, seen_env)
+                    # Only what a value handed in left: the action's own expressions are read above, with the step's
+                    # `env` (found by the second review: a text left as written past what the reader reads was read
+                    # again with the caller's).
+                    own = frozenset(body for text in written for body in _bodies_or_none(text))
+                    checks.extend((text, {}, caller, own) for text in _action_command_texts(put, step))
+                for text, given_inputs, seen_env, skip in checks:
+                    place = _action_scope_place(text, given_inputs, folder, seen_env, skip)
                     if place is not None:
                         where_read = ("where a command's program goes" if place[1] == "program" else
                                       "where an agent's name would be read as its command line")
@@ -1891,20 +1939,42 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 handed = step.with_
                 if view.where is not None and isinstance(merged.get("with"), dict):
                     # The inputs it hands on keep what the scope may give, so the further action reads where it
-                    # stands (found by the review: `tool: ${{ env.AGENT }}` was handed on as empty).
-                    handed = wf_mod.Step(index=0, raw={"with": {
-                        name: _put_in(value, inputs, folder, [], view, keep_scope=True) if isinstance(value, str)
-                        else value for name, value in merged["with"].items()}}, line=0).with_
+                    # stands (found by the review: `tool: ${{ env.AGENT }}` was handed on as empty). An expression a
+                    # value handed in to this action left (from its caller's `with:` or an input's default) is worked
+                    # out with the caller's `env`, where GitHub works it out, before it is handed on (found by the
+                    # second review: read further on, the `env` of this step settled it).
+                    caller_env = (_ActionEnv(given_env, env_scope[1], env_scope[0], env_case) if env_scope is not None
+                                  else _ActionEnv(given_env))
+                    handed_with: dict = {}
+                    for name, value in merged["with"].items():
+                        if isinstance(value, str):
+                            value = _put_in(value, inputs, folder, [], view, keep_scope=True)
+                            own = frozenset(_bodies_or_none(merged["with"][name]))
+                            value = _put_left(value, own, folder, caller_env)
+                        handed_with[name] = value
+                    handed = wf_mod.Step(index=0, raw={"with": handed_with}, line=0).with_
                 inner = _agent_in_local_action(root, step.uses, actions, commands, depth + 1,
                                                seen | set(folders), cache, handed, step.env,
                                                env_scope=None if view.where is None else (view.where, settled),
                                                env_case=env_case)
                 out.unread.extend(inner.unread)
                 out.cut = out.cut or inner.cut
+                out.by_case = out.by_case or inner.by_case
                 out.agent = out.agent or inner.agent
     # A reading a cycle or the depth cut short is kept only for a use in the same place in a chain.
-    cache[context if out.cut else key] = out
+    kept = context if out.cut else key
+    if out.by_case:
+        # Only a reading under such a scope depends on the runner's kind (found by the second review: with the kind
+        # in every key, twelve Linux and Windows jobs read an action twelve times, where the base read it six, and
+        # passed the check's units).
+        cache[kept] = _BY_CASE
+        cache[(kept, _BY_CASE, env_case)] = out
+    else:
+        cache[kept] = out
     return out
+
+
+_BY_CASE = "by-case"        # in the cache: a reading kept by the runner's kind, under (key, _BY_CASE, kind)
 
 
 # A reading costs one unit, three for each step it reads (a step costs about three times as much to read
