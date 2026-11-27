@@ -2342,14 +2342,21 @@ def _pieces_joined(pieces: list) -> tuple[str, list]:
     GitHub works the action's template out once, so a value put in is text and never joins the text around it into
     an expression (flagship slice 2d.20a, #401; slice 2d.19f found the same for its own lines): in
     `# ${{ inputs.a }}{{ x` given `$`, the `{{` is text and the line after it runs. Joined as text, the pieces would
-    read `# ${{ x`, an expression up to the next `}}`, which hides from every rule what lies between. So a "value"
-    that is part of a `${{` the pieces make (a `$` before `{{`, `${` before `{`, `$` and `{{` from two values, an
-    empty value between `$` and `{{`) is written as an expression that gives it (`_literal_expression`): the text
-    made then holds the same characters for the shell as GitHub's, and only the expressions it keeps. The action's
-    own text between two expressions holds no `${{` (it would be one), so every `${{` outside a kept expression
-    takes in a value, and none is left once those values are expressions."""
+    read `# ${{ x`, an expression up to the next `}}`, which hides from every rule what lies between. So the
+    characters of a value that are part of a `${{` the pieces make (a `$` before `{{`, `${` before `{`, `$` and `{{`
+    from two values) are written as an expression that gives them (`_literal_expression`: `${{ '$' }}`), and an
+    empty value that stands inside one as `${{ '' }}`; the rest of the value stays text, so the rules read it as
+    GitHub runs it (found by the review: a whole value written so hid `--dangerously-skip-permissions #$` from
+    OBAAF-GHA-026). Such an expression holds only `$` and `{`, never a `}}` or a quote that a reader which does not
+    know strings would end it at. The text made holds, for the shell, the characters GitHub's does. The action's own
+    text between two expressions holds no `${{` (it would be one), so every `${{` the joined text holds outside a
+    kept expression takes in a value's character or an empty value, and none is left once those are expressions (a
+    `$` just before such an expression makes no `${{` with it, whose own first character is a `$`). Linear in the
+    text: each `${{` looks only at the pieces it touches (`bisect`)."""
     kinds = [kind for kind, _ in pieces]
     texts = [text for _, text in pieces]
+    # For each value in a join: the offsets of its characters inside a `${{`, or -1 for an empty value inside one.
+    joined: dict = {}
     i = 0
     while i < len(pieces):
         if kinds[i] == "expr":
@@ -2372,23 +2379,41 @@ def _pieces_joined(pieces: list) -> tuple[str, list]:
                 k = max(bisect.bisect_right(starts, hit) - 1, 0)
                 while k < len(starts) and starts[k] < end_hit:
                     start, end = starts[k], starts[k] + len(texts[i + k])
-                    # The value has a character in the `${{`, or, empty, stands inside it.
-                    if kinds[i + k] == "value" and hit < end and start < end_hit and (end > start or hit < start):
-                        kinds[i + k] = "joined"
+                    if kinds[i + k] == "value":
+                        if end > start and hit < end and start < end_hit:
+                            joined.setdefault(i + k, set()).update(range(max(hit, start) - start,
+                                                                         min(end_hit, end) - start))
+                        elif end == start and hit < start < end_hit:
+                            joined.setdefault(i + k, set()).add(-1)
                     k += 1
                 hit = run.find(expr_mod.OPEN, hit + 1)
-            for k in range(i, j):
-                if kinds[k] == "joined":
-                    kinds[k], texts[k] = "expr", _literal_expression(texts[k])
         i = j
     out: list = []
     spans: list = []
     at = 0
-    for kind, text in zip(kinds, texts):
+
+    def add(kind: str, text: str) -> None:
+        nonlocal at
         if kind == "expr":
             spans.append((at, at + len(text)))
         out.append(text)
         at += len(text)
+
+    for k, (kind, text) in enumerate(zip(kinds, texts)):
+        inside = joined.get(k)
+        if inside is None:
+            add("expr" if kind == "expr" else "text", text)
+            continue
+        if not text:
+            add("expr", _literal_expression(""))
+            continue
+        n = 0
+        while n < len(text):
+            m = n
+            while m < len(text) and (m in inside) == (n in inside):
+                m += 1
+            add("expr", _literal_expression(text[n:m])) if n in inside else add("text", text[n:m])
+            n = m
     return "".join(out), spans
 
 

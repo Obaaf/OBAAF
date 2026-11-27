@@ -9,10 +9,11 @@ expression, up to the next `}}`: a `claude ${{ env.F }} -p hi` or `npm install -
 next line was inside it, so OBAAF-GHA-026 and OBAAF-GHA-025 said nothing where GitHub runs both. Slice 2d.19f
 refused such a line for its own reading (`_given_text`) and fell back to the second pass's text.
 
-Now a value that would join the text around it into `${{` (a `$` before `{{`, `${` before `{`, a `$` and a `{{` from
-two values or from the action's folder) is written as an expression that gives it, `${{ '$' }}`, in the second
-pass's text and in 2d.19f's lines, so no reader finds an expression GitHub does not; and a text the checker cannot
-build so is an error of the check.
+Now the characters of a value that would join the text around it into `${{` (a `$` before `{{`, `${` before `{`, a
+`$` and a `{{` from two values or from the action's folder) are written as an expression that gives them,
+`${{ '$' }}`, in the second pass's text and in 2d.19f's lines, and the rest of the value stays text, so no reader
+finds an expression GitHub does not and every rule reads the value as GitHub runs it; a text the checker cannot build
+so is an error of the check.
 """
 
 import random
@@ -99,6 +100,38 @@ class AValueNeverStartsAnExpressionTest(unittest.TestCase):
         self.assertIn("OBAAF-GHA-025", [rule for rule, _, _ in expected[0]])
         self.assertEqual(found(composite(script), caller("{a: $}", env="F: x")), expected)
 
+    def test_the_rest_of_a_joined_value_is_read(self):
+        # The first review: the whole value written as an expression hid what it holds. Only the `$` is.
+        option = composite("claude ${{ inputs.a }}{{ x")
+        self.assertEqual(found(option, caller(f"{{a: '{SKIP} #$'}}", env="F: x")), ([HIGH_026], []))
+        install = "${{ inputs.a }}{{ x\nclaude -p hi"
+        for name, script, with_ in (
+                ("a value ending in `$`", install, "{a: 'npm install -g @anthropic-ai/claude-code #$'}"),
+                ("a value ending in `${`", install.replace("}}{{ x", "}}{ x"),
+                 "{a: 'npm install -g @anthropic-ai/claude-code #${'}"),
+                ("a value starting `{{`", "echo '$${{ inputs.a }}\nclaude -p hi",
+                 '{a: "{{ x\'; npm install -g @anthropic-ai/claude-code #"}')):
+            with self.subTest(name):
+                self.assertIn(("OBAAF-GHA-025", "high", "agent-cli"),
+                              found(composite(script), caller(with_, env="F: x"))[0])
+
+    def test_a_joined_value_holding_a_close_reads_no_quote_wrongly(self):
+        # The first review: `}}$` written whole as `${{ '}}$' }}` was ended at its `}}` by the readers that do not
+        # know strings, which then read an unclosed quote (an extra medium). Only the `$` is an expression now.
+        action_text = composite(f"echo '${{{{ inputs.a }}}}{{{{ x'\nclaude {SKIP} -p hi")
+        self.assertEqual(found(action_text, caller("{a: '}}$'}", env="F: x")), ([HIGH_026], []))
+
+    def test_a_join_no_longer_makes_an_expression_github_never_works_out(self):
+        # The other way: on the base the joined text read `# ${{ github.event.issue.title }}`, an outsider's text put
+        # into the script (OBAAF-GHA-010, high), where GitHub runs the comment as text.
+        action_text = composite("# ${{ inputs.a }}{{ github.event.issue.title }}\necho hi")
+        workflow_text = ("on: issues\npermissions: {}\njobs:\n  j:\n    runs-on: ubuntu-24.04\n    steps:\n"
+                         "      - uses: ./.github/actions/x\n        with: {a: $}\n")
+        with TempDir() as tmp:
+            result = check(tmp, workflow_text, files={ACTION: action_text})
+        self.assertEqual([f for f in result.findings if f.rule == "OBAAF-GHA-010"], [])
+        self.assertEqual(list(result.errors), [])
+
     def test_what_github_runs_as_text_stays_text(self):
         # GitHub runs `claude ${{ env.F }} -p hi` as text, which bash stops at (a bad substitution): not high, and
         # read as written, "cannot tell" (2d.19f's case).
@@ -144,14 +177,19 @@ def _github_reading(text, inputs, folder):
     return "".join(out)
 
 
+_NAIVE_RE = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+
+
 def _second_pass_reading(text):
     """The same of a text the second pass made: an expression that is one string literal gives its text, and any
     other is the same mark, by its tokens; None where a reader of the text would find an expression end otherwise
-    than `env_expr.spans` does."""
+    than `env_expr.spans` does, whether it knows strings or not (`rules._EXPRESSION_RE`), or where a literal holds
+    more than the characters of a `${{` (the rest of a value must stay text, for the rules to read)."""
     parts = checker_mod._expression_parts(text)
     if parts is None:
         return None
-    if [(s, e) for s, e, _ in env_expr.spans(text)] != _spans_of(parts):
+    spans = _spans_of(parts)
+    if [(s, e) for s, e, _ in env_expr.spans(text)] != spans or [m.span() for m in _NAIVE_RE.finditer(text)] != spans:
         return None
     out = []
     for kind, body in parts:
@@ -159,7 +197,9 @@ def _second_pass_reading(text):
             out.append(body)
             continue
         toks = expr_mod.tokens(body)
-        if len(toks) == 1 and toks[0][0] == "str":
+        if len(toks) == 1 and toks[0][0] == "str" and body.strip().startswith("'"):
+            if len(toks[0][1]) > 2 or set(toks[0][1]) - set("${"):
+                return None
             out.append(toks[0][1])
         else:
             out.append("\x00" + "".join(t for _, t in toks).strip("()") + "\x00")
@@ -210,6 +250,32 @@ class TheSecondPassTextIsWhatGitHubRunsTest(unittest.TestCase):
                     self.assertEqual(_second_pass_reading(given), expected)
         self.assertGreater(tried, 1500)
 
+    def test_texts_made_to_join(self):
+        # The first review found that the random texts above join in about one case in seventy: these are built so
+        # that most do, with empty values, values on both sides of a `${{` and the action's folder among them.
+        rng = random.Random(2020)
+        ends, heads = ["", "$", "${", "x$", "$$", "'$"], ["", "{", "{{", "{ x", "{{ x }}", "}"]
+        values = ["$", "${", "{", "{{", "", "a$", "{b", "$$", "}}$", "'$", "--yolo #$"]
+        joins = 0
+        for _ in range(3000):
+            text = rng.choice(ends)
+            for _ in range(rng.randint(1, 4)):
+                text += "${{ " + rng.choice(("inputs.a", "inputs.b", "github.action_path", "env.F")) + " }}"
+                text += rng.choice(heads) + rng.choice(["", "\n", " "]) + rng.choice(ends)
+            inputs = {"a": rng.choice(values), "b": rng.choice(values)}
+            folder = rng.choice(["a", "a$", "a${"])
+            expected = _github_reading(text, inputs, folder)
+            if expected is None:
+                continue
+            made = checker_mod._inputs_put_in(text, inputs, folder, [], {})
+            joins += "${{ '" in made
+            with self.subTest(text=text, inputs=inputs, folder=folder):
+                self.assertEqual(_second_pass_reading(made), expected)
+                given = checker_mod._given_text(text, inputs, folder, {"check": {}})
+                self.assertIsNotNone(given)
+                self.assertEqual(_second_pass_reading(given), expected)
+        self.assertGreater(joins, 1000)
+
     def test_an_ordinary_text_is_unchanged(self):
         # Texts with no join are made as before: values as text, other expressions as written.
         for text, inputs, made in (
@@ -224,11 +290,17 @@ class TheSecondPassTextIsWhatGitHubRunsTest(unittest.TestCase):
     def test_a_join_is_an_expression_that_gives_the_value(self):
         self.assertEqual(checker_mod._inputs_put_in("# ${{ inputs.a }}{{ x", {"a": "$"}, "f", [], {}),
                          "# ${{ '$' }}{{ x")
+        # Only the characters in the `${{`; the rest of the value, and the other values, stay text.
         self.assertEqual(checker_mod._inputs_put_in("# ${{ inputs.a }}{{ x", {"a": "it's $"}, "f", [], {}),
-                         "# ${{ 'it''s $' }}{{ x")
-        # Only the values in a join; the others stay text.
+                         "# it's ${{ '$' }}{{ x")
         self.assertEqual(checker_mod._inputs_put_in("${{ inputs.b }} ${{ inputs.a }}{{", {"a": "$", "b": "y"},
                                                     "f", [], {}), "y ${{ '$' }}{{")
+        self.assertEqual(checker_mod._inputs_put_in("# $${{ inputs.a }} x", {"a": "{{ y"}, "f", [], {}),
+                         "# $${{ '{{' }} y x")
+        self.assertEqual(checker_mod._inputs_put_in("# $${{ inputs.a }}{{ x", {"a": ""}, "f", [], {}),
+                         "# $${{ '' }}{{ x")
+        self.assertEqual(checker_mod._inputs_put_in("${{ github.action_path }}{{", {}, "a$", [], {}),
+                         "./a${{ '$' }}{{")
 
 
 if __name__ == "__main__":
