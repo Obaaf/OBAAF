@@ -42,6 +42,7 @@ inside a group of letters (`-yp`). Nothing after a word `--` is an option. `--na
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
@@ -995,13 +996,15 @@ def _read_command(command: Command, ctx: _Context) -> None:
         if w.computed and not re.match(r"[A-Za-z_][A-Za-z0-9_]*\+?=", w.text):
             # What is written of the name decides: `"$(npm prefix -g)/bin/claude"` is the program,
             # `"$GITHUB_WORKSPACE/scripts/post.sh"` is not, and `$C` or `"$(command -v claude)"` may be.
+            # A word that names the tool as a part of its name (`"$CLAUDE_BIN"`) may be too, but not one that holds
+            # its letters in another word (`"$CNT"`, `"$DECLINED"`; flagship slice 2d.23, #388).
             literal = _known_part(w.text)
             base = _base(literal) if not literal.endswith("/") else ""
             if base in ctx.programs and not (w.glob or w.brace):
                 _read_program_args(_arguments(words[i + 1:]), ctx)
                 return
             if (not base or w.glob or w.brace or base in ctx.programs) and not ctx.prose and (
-                    ctx.mentioned or appears(w.shown, ctx.programs, ctx.packages)):
+                    ctx.mentioned or names(w.shown, ctx.programs, ctx.packages)):
                 for flag in ctx.flags:
                     ctx.reading.cannot_tell(flag, w.shown)
             continue
@@ -1257,7 +1260,9 @@ def _start(words: list, bases: list, i: int, ctx: _Context, command: Command, ru
                 ctx.cannot_tell(x.shown)
                 continue
             _read_nested(value, ctx)
-            if appears(value, ctx.programs, ctx.packages):
+            # An alias names the program where its value names it as a name (2d.23): `alias x='echo acne'` does
+            # not make `x` Continue's `cn`.
+            if names(value, ctx.programs, ctx.packages):
                 ctx.programs.append(head.casefold())
         return True
     return False
@@ -1626,7 +1631,7 @@ def _read_widest(text: str, programs: list, packages: list, flags: list, reading
 def read_script(text: str, programs: list, packages: list, flags: list, variables: dict | None = None,
                 mentioned: bool | None = None, bash: bool = True, unread: dict | None = None,
                 written_files: set | None = None, loose: bool | None = None, prose: bool = False,
-                language: str = "", budget: PutInBudget | None = None) -> Reading:
+                language: str = "", budget: PutInBudget | None = None, named: bool | None = None) -> Reading:
     """Each warned flag a script gives the tool's program, and what the checker cannot read there.
     `mentioned`: whether the step names the tool anywhere (its script, its `env` values or the job's and
     workflow's); "cannot tell" about a command the checker cannot name is given only then. `bash` False:
@@ -1634,7 +1639,12 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
     it names the tool and nothing is found; `language` (a shell's or an interpreter's name, or
     `github-script`) says how `agent_code` reads it by its tokens as well. `unread`: `env` values the checker
     cannot read, shown with a word that uses them. `budget`: the step's `PutInBudget`, shared by every
-    script of the step that is read (flagship slice 2d.16); a new one by default."""
+    script of the step that is read (flagship slice 2d.16); a new one by default. `named`: whether the step
+    names the tool as a name of its own or a part of one (`names`) in one of its texts or in a text with its
+    variables put in; by default, `mentioned` or `names` of this text. A bash script's `IFS=` on its own, and
+    in another language or shell a command or code the checker cannot read, is "cannot tell" only then:
+    before flagship slice 2d.23 (#388) it was wherever the name's letters stood in any word (`loose`), so a
+    PowerShell step with `'acne'` and a bracket left open at a line's end was "cannot tell" for Continue."""
     reading = Reading()
     if not text or not flags:
         return reading
@@ -1646,12 +1656,14 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
         loose = mentioned or appears(text, programs, packages)
     if not mentioned and not loose:
         return reading          # the tool is not named at all (the common case, kept cheap)
+    if named is None:
+        named = mentioned or names(text, programs, packages)
     held_text, held = _hold_expressions(text)
     if bash:
         written = set(written_files or ()) | {m.group(1) for m in re.finditer(
             r"(?:>>?|\btee(?:\s+-a)?)\s*['\"]?([^\s'\";&|<>]+)", held_text)}
         ctx = _Context(list(programs), packages, flags, dict(variables or {}), mentioned, written, reading,
-                       loose=loose, prose=prose, budget=PutInBudget() if budget is None else budget)
+                       loose=loose and named, prose=prose, budget=PutInBudget() if budget is None else budget)
         _read_text(held_text, ctx)
         if held or unread:
             shown: dict = {}
@@ -1673,7 +1685,9 @@ def read_script(text: str, programs: list, packages: list, flags: list, variable
     if not bash and loose:
         if language:
             from obaaf.checker import agent_code
-            ctx = _Context(list(programs), packages, flags, {}, True, set(), reading, loose=True)
+            # Only where the script names the tool (2d.23): `True` here made what the readers cannot read "cannot
+            # tell" wherever the name's letters stood in a word (`'acne'`, `$cnt`, `decline`, `kilobyte`).
+            ctx = _Context(list(programs), packages, flags, {}, named, set(), reading, loose=named)
             agent_code.read_language(text, language, ctx)
     return reading
 
@@ -1822,7 +1836,10 @@ def names_when_put_in(text: str, scopes: list, programs: list, packages: list) -
 
 def appears(text: str, programs: list, packages: list) -> bool:
     """Whether the tool's name is anywhere in a text, even inside a word, once quotes, backslashes and
-    `$'...'` are read: the check that decides whether a step is read at all."""
+    `$'...'` are read: the check that decides whether a step is read at all. It decides no "cannot tell":
+    a short program name is inside many words (Continue's `cn` in `acne` and `$cnt`, `cline` in `decline`,
+    `kilo` in `kilobyte`), so where a "cannot tell" turns on the tool being named, `mentions` or `names`
+    decides (flagship slice 2d.23, #388)."""
     names = [n.casefold() for n in programs + packages]
     low = re.sub(r"[\"'\\]", "", text).casefold()
     if any(n in low for n in names):
@@ -1834,21 +1851,64 @@ def appears(text: str, programs: list, packages: list) -> bool:
     return False
 
 
-def mentions(text: str, programs: list, packages: list) -> bool:
-    """Whether a text names the tool: its program as a word (not after `@` or a letter), or its package,
-    once quotes, backslashes and `$'...'` are read."""
+@functools.lru_cache(maxsize=512)
+def _name_pattern(program: str, parts: bool) -> re.Pattern:
+    """`program` standing as a name of its own in a text whose quotes are taken out and whose case is folded.
+    Never inside a longer word: not after or before a letter or digit (and, for `mentions`, an `_`), nor after
+    `@` (`@claude` in a comment's prose) or, for `mentions`, a `-`, nor before a `-`. Never one label of a
+    dotted name (flagship slice 2d.23, #388): not after a dot that follows a letter or digit (`example.cn`,
+    `pypi.tuna.tsinghua.edu.cn`) and not before a dot and a letter or digit (`cn.archive.ubuntu.com`,
+    `~/.claude.json`), unless what follows the dot is a suffix Windows runs (`cn.exe`, `claude.cmd`).
+    `parts`: an `_` and a `-` before it count as the name's edge, so a part of a variable's name counts
+    (`$CLAUDE_BIN`, `$env:CN_BIN`, `${CMD:-claude}`); this is `names`."""
+    letter = r"[^\W_]" if parts else r"\w"
+    before = "@" if parts else "@-"
+    return re.compile(rf"(?<!{letter})(?<![{before}])(?<![^\W_]\.)" + re.escape(program)
+                      + rf"(?!{letter}|-)(?!\.(?!(?:exe|cmd|bat|ps1|com)(?![^\W_]))[^\W_])")
+
+
+def _named(text: str, programs: list, packages: list, parts: bool) -> bool:
+    """`mentions` (`parts` False) and `names` (`parts` True). A package with a scope or a folder in its name
+    (`@continuedev/cli`) counts anywhere in the text; one with a plain name is a name like a program's, since
+    such a name is inside other words too (Cline's `cline` in `decline`; flagship slice 2d.23, #388)."""
     low = re.sub(r"[\"'\\]", "", text).casefold()
-    if any(p in low for p in packages):
+    scoped = [p for p in packages if p.startswith("@") or "/" in p]
+    if any(p in low for p in scoped):
         return True
-    for program in programs:
-        if re.search(r"(?<![\w@-])" + re.escape(program) + r"(?![\w-])", low):
-            return True
+    forms = [low]
+    if "\\" in text:
+        # A backslash is no escape in PowerShell or cmd, but a folder's separator (`C:\tools\cn.exe`); taking it
+        # out glued the folder's name to the program's (2d.23).
+        forms.append(re.sub(r"[\"']", "", text).replace("\\", "/").casefold())
     if "$'" in text:
         decoded = re.sub(r"\$'((?:[^'\\]|\\.)*)'", lambda m: _ansi_c(m.group(1)), text).casefold()
         decoded = re.sub(r"[\"'\\]", "", decoded)
-        return any(p in decoded for p in packages) or any(
-            re.search(r"(?<![\w@-])" + re.escape(p) + r"(?![\w-])", decoded) for p in programs)
+        if any(p in decoded for p in scoped):
+            return True
+        forms.append(decoded)
+    for program in [*programs, *(p for p in packages if p not in scoped)]:
+        pattern = None
+        for form in forms:
+            if program in form:
+                pattern = pattern or _name_pattern(program, parts)
+                if pattern.search(form):
+                    return True
     return False
+
+
+def mentions(text: str, programs: list, packages: list) -> bool:
+    """Whether a text names the tool: its program, or a package with a plain name, as a word (see
+    `_name_pattern`), or a package with a scope or a folder anywhere, once quotes, backslashes and `$'...'` are
+    read, and once more with a backslash read as a folder's separator."""
+    return _named(text, programs, packages, False)
+
+
+def names(text: str, programs: list, packages: list) -> bool:
+    """Whether a text names the tool as a name of its own or a part of one: as `mentions`, and also where an
+    `_` or, before it, a `-` is its edge (`$CLAUDE_BIN`, `$env:CN_BIN`, `${CMD:-claude}`). It decides the
+    "cannot tell" that `appears`, a test for the letters anywhere, decided before flagship slice 2d.23
+    (#388): code in another language or shell, a command bash cannot name, an alias, a command input."""
+    return _named(text, programs, packages, True)
 
 
 def starts_program(text: str, programs: list, packages: list) -> bool:
