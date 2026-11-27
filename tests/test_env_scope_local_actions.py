@@ -405,19 +405,28 @@ class TheReviewersThirdPassTest(unittest.TestCase):
 class TheReviewersFourthPassTest(unittest.TestCase):
     """What the fourth review of 2d.19e found (2026-11-27)."""
 
-    def test_a_value_from_the_scope_in_an_argument_of_a_handed_command(self):
-        """An input run as the command line, holding a value from the scope in an argument's place, is read where
-        the value stands in it, as the same command written in a workflow's own step is."""
+    def test_a_value_from_the_scope_in_an_argument_of_a_handed_command_is_a_known_false_error(self):
+        """An input run as the command line that holds a value from the scope in an argument's place is read as
+        giving that value whole, so it is an error of the file where the input stands where a command's program goes
+        (D-145's known false errors). A version that read where in the value it stands was got past by the fifth
+        review twice (a value that opens an expression with the action's own text, and readings of two expressions
+        paired only by their order), so it was taken back. Where the caller's `env` settles the name, or the input
+        stands elsewhere, there is no error."""
         given = files(step("${{ inputs.run }}"), inputs="  run: {required: true}\n")
-        for command in ("npm test -- --shard=${{ env.SHARD }}", "make ${{ env.TARGET }}",
-                        "pytest -k ${{ env.K }} tests/"):
-            with self.subTest(command=command):
-                self.assertEqual(scope_errors(wf(job=JOB, with_="{run: '" + command + "'}"), given), [])
-        for command in ("${{ env.AGENT }} -p x", "npx ${{ env.AGENT }}", "if true; then ${{ env.A }} -p y; fi"):
+        for command in ("npm test -- --shard=${{ env.SHARD }}", "${{ env.AGENT }} -p x", "npx ${{ env.AGENT }}"):
             with self.subTest(command=command):
                 self.assertEqual(len(scope_errors(wf(job=JOB, with_="{run: '" + command + "'}"), given)), 1)
-        default = files(step("${{ inputs.run }}"), inputs="  run: {default: 'make ${{ env.TARGET }}'}\n")
-        self.assertEqual(scope_errors(wf(job=JOB), default), [])
+        self.assertEqual(scope_errors(wf(job=JOB, step="{SHARD: '1'}",
+                                         with_="{run: 'npm test -- --shard=${{ env.SHARD }}'}"), given), [])
+        echo = files(step("echo ${{ inputs.run }}"), inputs="  run: {required: true}\n")
+        self.assertEqual(scope_errors(wf(job=JOB, with_="{run: 'npm test -- --shard=${{ env.SHARD }}'}"), echo), [])
+
+    def test_the_fifth_reviews_ways_past_a_reading_of_where_a_value_stands(self):
+        forged = files(step("# ${{ inputs.d }}{{ '\n${{ env.AGENT }} -p x\n# ' }}"), inputs="  d: {default: $}\n")
+        self.assertEqual(len(scope_errors(wf(job=JOB), forged)), 1)
+        paired = ("${{ env.Q1 == 'a' && format('echo {0};', env.X) || format('echo {0}', env.X) }} "
+                  "${{ env.Q2 == 'a' && format('x {0}', env.Y) || env.Y }} --yes")
+        self.assertEqual(len(scope_errors(wf(job=JOB), files(step(paired)))), 1)
 
     def test_inputs_no_step_reads_are_not_worked_out(self):
         import time

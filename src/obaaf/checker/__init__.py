@@ -1617,7 +1617,10 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -
     command line or where a command's program goes, as `workflow._scope_at_program` reads a workflow's own step
     (flagship slice 2d.19e, after D-144); None where none does, or where no scope of the chain is written so. Each
     other expression that reads an input or `env` is read as its first value, any other as a plain word. Only the
-    expressions are worked out again, and only under such a scope."""
+    expressions are worked out again, and only under such a scope. An expression whose value only holds what the scope
+    may give, beside other text (an input handed in as `npm test -- --shard=${{ env.SHARD }}`), is read as giving it
+    whole, as a workflow's own step reads such an expression: a known false error where it stands where a command's
+    program goes (the fifth review got past a reading of where in the value it stands, which a value can steer)."""
     if env.where is None or not isinstance(text, str):
         return None
     text = _ACTION_PATH_EXPR_RE.sub(lambda _m: f"./{folder}", text)
@@ -1627,11 +1630,8 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -
         found = env_expr.spans(text)
     except expr_mod.TooComplex:
         return (wf_mod.one_line(text, 60), "program")
-    # Each expression that reads an input or `env`: (start, end, values that hold what the scope may give, or None,
-    # its first value otherwise). A value is put in where the expression stands, with what the scope may give in it
-    # as an expression of its own, so where in the value it stands is read (found by the fourth review: an input of
-    # `npm test -- --shard=${{ env.SHARD }}` run as a command line is not a program from the scope).
-    entries: list = []
+    scoped: list = []
+    known: dict = {}
     memo: dict = {}
     for start, end, body in found:
         if not re.search(r"\binputs\b|\benv\b|action_path", body, re.I):
@@ -1648,47 +1648,16 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -
             # may give, it may give that, as a workflow's own step refuses it (found by the first and third reviews);
             # else it is named as not read where it is put in.
             if reads_env:
-                entries.append((start, end, [_FROM_SCOPE_TEXT], None))
+                scoped.append((start, end))
             continue
-        held = [value for value in values if _FROM_SCOPE_TEXT in value]
-        entries.append((start, end, held or None, None if held else (values[0] if values else None)))
-    passes = max((len(held) for _s, _e, held, _k in entries if held), default=0)
-    # One pass for each value that holds it (at most 16), each other expression read as its first value: linear in
-    # the text for each pass.
-    for k in range(passes):
-        pieces: list = []
-        placed: list = []       # (start, end) in the text made, and the expression's (start, end) in `text`
-        at = made = 0
-        for start, end, held, first in entries:
-            pieces.append(text[at:start])
-            made += start - at
-            if held:
-                value = held[min(k, len(held) - 1)].replace(expr_mod.OPEN, "$ {")
-                piece = value.replace(_FROM_SCOPE_TEXT, _SCOPE_MARK)
-                placed.append((made, made + len(piece), start, end))
-            else:
-                piece = first if isinstance(first, str) and expr_mod.OPEN not in first else "x"
-            pieces.append(piece)
-            made += len(piece)
-            at = end
-        pieces.append(text[at:])
-        line = "".join(pieces)
-        try:
-            marks = tuple((s0, e0) for s0, e0, body in env_expr.spans(line) if body == _SCOPE_MARK_BODY)
-        except expr_mod.TooComplex:
-            return (wf_mod.one_line(text, 60), "program")
-        place = wf_mod._scope_at_program(line, marks, {})
-        if place is not None:
-            for m0, m1, start, end in placed:
-                if m0 <= place[0] < m1:
-                    return (text[start:end], place[2])
-            return (wf_mod.one_line(text, 60), place[2])
-    return None
-
-
-# What stands for what the scope may give in a value `_action_scope_place` puts in: an expression of its own.
-_SCOPE_MARK_BODY = " \ue004scope\ue005 "
-_SCOPE_MARK = expr_mod.OPEN + _SCOPE_MARK_BODY + expr_mod.CLOSE
+        if any(_FROM_SCOPE_TEXT in value for value in values):
+            scoped.append((start, end))
+        elif values:
+            known[(start, end)] = values[0]
+    if not scoped:
+        return None
+    at = wf_mod._scope_at_program(text, tuple(scoped), known)
+    return None if at is None else (text[at[0]:at[1]], at[2])
 
 
 def _expand_variables(run: str, env: dict, problems: list) -> str:
