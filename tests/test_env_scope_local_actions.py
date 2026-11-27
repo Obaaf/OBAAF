@@ -402,5 +402,33 @@ class TheReviewersThirdPassTest(unittest.TestCase):
         self.assertEqual(scope_errors(wf(job=JOB, with_="{tool: claude}"), given), [])
 
 
+class TheReviewersFourthPassTest(unittest.TestCase):
+    """What the fourth review of 2d.19e found (2026-11-27)."""
+
+    def test_a_value_from_the_scope_in_an_argument_of_a_handed_command(self):
+        """An input run as the command line, holding a value from the scope in an argument's place, is read where
+        the value stands in it, as the same command written in a workflow's own step is."""
+        given = files(step("${{ inputs.run }}"), inputs="  run: {required: true}\n")
+        for command in ("npm test -- --shard=${{ env.SHARD }}", "make ${{ env.TARGET }}",
+                        "pytest -k ${{ env.K }} tests/"):
+            with self.subTest(command=command):
+                self.assertEqual(scope_errors(wf(job=JOB, with_="{run: '" + command + "'}"), given), [])
+        for command in ("${{ env.AGENT }} -p x", "npx ${{ env.AGENT }}", "if true; then ${{ env.A }} -p y; fi"):
+            with self.subTest(command=command):
+                self.assertEqual(len(scope_errors(wf(job=JOB, with_="{run: '" + command + "'}"), given)), 1)
+        default = files(step("${{ inputs.run }}"), inputs="  run: {default: 'make ${{ env.TARGET }}'}\n")
+        self.assertEqual(scope_errors(wf(job=JOB), default), [])
+
+    def test_inputs_no_step_reads_are_not_worked_out(self):
+        import time
+        big = " ".join(f"${{{{ env.X{n} || 'a' || 'b' || 'c' }}}}" for n in range(400))
+        handed = "{" + ", ".join(f"i{n}: *big" for n in range(40)) + "}"
+        text = 'x-big: &big "' + big + '"\n' + wf(job=JOB, with_=handed)
+        started = time.monotonic()
+        self.assertEqual(result(text, files(step("echo hi"))).errors, [])
+        # About 1 s here; forty times the value's work took about 45 s at 1,300 expressions.
+        self.assertLess(time.monotonic() - started, 20)
+
+
 if __name__ == "__main__":
     unittest.main()
