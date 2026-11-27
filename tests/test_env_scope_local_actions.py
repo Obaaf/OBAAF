@@ -439,5 +439,20 @@ class TheReviewersFourthPassTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 20)
 
 
+class TheReviewersSixthPassTest(unittest.TestCase):
+    """What the sixth check of 2d.19e found (2026-11-27): a handed command line put in an argument's place."""
+
+    def test_a_value_from_the_scope_after_a_separator_in_a_handed_value(self):
+        echo = files(step("echo ${{ inputs.cmd }}"), inputs="  cmd: {default: x}\n")
+        for command in ("make; ${{ env.AGENT }} -p review", "make && ${{ env.AGENT }} -p review",
+                        "x $(${{ env.AGENT }} -p review)", "make | ${{ env.AGENT }}"):
+            with self.subTest(command=command):
+                (error,) = scope_errors(wf(job=JOB, with_="{cmd: '" + command + "'}"), echo)
+                self.assertIn("where a command's program goes", error)
+        default = files(step("echo ${{ inputs.cmd }}"), inputs="  cmd: {default: 'make; ${{ env.AGENT }} -p x'}\n")
+        self.assertEqual(len(scope_errors(wf(job=JOB), default)), 1)
+        self.assertEqual(scope_errors(wf(job=JOB, with_="{cmd: 'make ${{ env.TARGET }}'}"), echo), [])
+
+
 if __name__ == "__main__":
     unittest.main()
