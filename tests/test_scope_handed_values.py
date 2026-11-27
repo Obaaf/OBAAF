@@ -4,20 +4,24 @@ Slice 2d.19e (D-145) made a local composite action's steps fail closed as D-144 
 closed: under a scope written as one expression (`env: ${{ fromJSON(vars.E) }}`), a name no nearer mapping sets may
 be any text, and where an expression that may give it stands where a command's program goes, or where an agent's
 name would be read as its command line, the step is an error of its file. A value handed in through the caller's
-`with:` was read as giving the scope's value whole, wherever in the value the scope's text stood. So an input run
+`with:` is read as giving the scope's value whole, wherever in the value the scope's part stands. So an input run
 as the command line (`run: ${{ inputs.run }}`) given `npm test -- --shard=${{ env.SHARD }}` was an error, where the
 same line in a workflow's own step is none: D-145's known false error.
 
-Now an action's expression that is one plain reference to an input the caller hands in is read as the text the
-caller's value makes, with each of the caller's expressions read as D-144 reads them in a workflow's own step: one
-that may give what the scope sets as one word from the scope, any other that reads `env` as its first value, any
-other as a plain word. `workflow._scope_at_program` reads the line made so, as it reads a workflow's own step. That
-also reads a newline, a single `&` and a process substitution before the scope's text in such a value, which the
-separator rule did not count (D-145's stated ways past).
+D-150: that reading stays, apart from two changes for an expression that is one plain reference to an input whose
+value, as the caller wrote it, holds what the scope may give:
 
-Anything else is read as before: an action's own expression that is not one plain reference to an input, a value
-handed on through a further local action, a value the reader cannot work out, and a line past the text this reading
-may make.
+- **Cleared.** In a bash or sh step's `run`, a value that is one text of plain characters (`_PLAIN_TEXT`) whose
+  every expression is one plain reference to `env`, each scope's part inside a word after a character other than a
+  space or `/` (`--shard=${{ env.SHARD }}`), is read as its text, with the scope's part as a plain word. Whatever
+  one word the scope gives there, no program and no command a program runs from its arguments is named by it.
+- **Added.** A newline before a scope's part, in any text the caller's value can make, is a program's place, as a
+  shell reads it, also where the value is put after `echo` (one of D-145's stated ways past).
+
+Everything else is read as before. The first review of this slice showed why the wider reading first built here
+(the line made read as D-144 reads a workflow's own step) was quieter than the base: D-144's program reader does not
+know every program that runs its arguments (`xvfb-run`, `find -exec`, `trap`), a line a `^` or a backtick continues,
+separators written inside the caller's expressions, or a comment's backslash.
 """
 
 import json
@@ -29,120 +33,102 @@ from test_env_scope_local_actions import JOB, files, lane, result, scope_errors,
 INPUT = "  run: {required: true}\n"
 
 
-def handed(command, action_run="${{ inputs.run }}", **scopes):
-    """The errors of a job under the job's `env` written as one expression whose step hands COMMAND to a local
-    action that runs ACTION_RUN."""
+def handed(command, action_run="${{ inputs.run }}", shell="bash", **scopes):
+    """The scope errors of a job under the job's `env` written as one expression whose step hands COMMAND to a local
+    action that runs ACTION_RUN in a step with SHELL."""
     scopes.setdefault("job", JOB)
     return scope_errors(wf(with_="{run: " + json.dumps(command) + "}", **scopes),
-                        files(step(action_run), inputs=INPUT))
+                        files(step(action_run, shell=shell), inputs=INPUT))
 
 
-class TheKnownFalseErrorTest(unittest.TestCase):
-    """D-145's known false error is gone: the line is read as a workflow's own step reads it."""
+class TheKnownFalseErrorIsClearedTest(unittest.TestCase):
+    """D-145's known false error is gone where the scope's part stands inside a word of a plain value."""
 
-    def test_a_value_from_the_scope_in_an_arguments_place(self):
-        for command in ("npm test -- --shard=${{ env.SHARD }}", "make ${{ env.TARGET }}",
-                        "pytest -k ${{ env.K }} tests/", "./build.sh --out=${{ env.OUT }}/bin",
-                        "echo ${{ env.A }} ${{ env.B }}", "git checkout ${{ github.head_ref || env.REF }}",
-                        "deploy --to ${{ format('{0}-{1}', env.REGION, env.STAGE) }}",
-                        "${{ env.DIR }}/bin/tool --v"):
+    def test_inside_a_word_of_a_plain_value(self):
+        for command in ("npm test -- --shard=${{ env.SHARD }}", "./build.sh --out=${{ env.OUT }}/bin",
+                        "deploy --region=${{ env.REGION }}-${{ env.STAGE }}", "npm test -- --shard=${{ env['SHARD'] }}",
+                        "pytest --k=a${{ env.K }} tests/", "make V=${{ env.V }}", "x@${{ env.H }}:1"):
             with self.subTest(command=command):
                 self.assertEqual(handed(command), [])
 
-    def test_the_same_as_a_workflows_own_step(self):
-        """Each command gives an error in a workflow's own step under the same scope exactly where it gives one
-        handed to `run: ${{ inputs.run }}`."""
-        own = ("on: workflow_dispatch\njobs:\n  a:\n    runs-on: ubuntu-24.04\n    permissions: {contents: read}\n"
-               f"    env: {JOB}\n    steps:\n      - run: |\n          COMMAND\n")
-        for command in ("npm test -- --shard=${{ env.SHARD }}", "${{ env.AGENT }} -p x", "npx ${{ env.AGENT }}",
-                        "make; ${{ env.AGENT }} --yes", "make\n${{ env.AGENT }} --yes", "x & ${{ env.AGENT }} --yes",
-                        "x <(${{ env.AGENT }} --yes)", "${{ env.DIR }}/bin/tool --v", "sudo ${{ env.TOOL }} --v",
-                        "echo ${{ env.A }} -p x", "https://x.test/?a=1&b=${{ env.B }}",
-                        "x ${{ env.A || 'safe' }}", "${{ env.A || 'safe' }} --v"):
-            with self.subTest(command=command):
-                lines = command.split("\n")
-                text = own.replace("COMMAND", "\n          ".join(lines))
-                expected = bool([e for e in result(text, {}).errors if "may set" in e])
-                self.assertEqual(bool(handed(command)), expected)
+    def test_the_input_written_otherwise_and_sh(self):
+        for action_run in ("${{ inputs['run'] }}", "${{ INPUTS.RUN }}", "${{ inputs.run }} --more",
+                           "timeout 60 ${{ inputs.run }}"):
+            with self.subTest(action_run=action_run):
+                self.assertEqual(handed("npm test --shard=${{ env.S }}", action_run=action_run), [])
+        self.assertEqual(handed("npm test --shard=${{ env.S }}", shell="sh"), [])
 
-    def test_where_the_scopes_text_stands_where_a_program_goes(self):
-        for command, where in (("${{ env.AGENT }} -p x", "agent"), ("npx ${{ env.AGENT }}", "program"),
-                               ("cd x && ${{ env.TOOL }} --v", "program"), ("${{ env.P }}claude", "program"),
-                               ("x=1 ${{ env.TOOL }}", "program"), ("echo ok; ${{ env.T }}", "program")):
-            with self.subTest(command=command):
-                (error,) = handed(command)
-                self.assertIn("where an agent's name would be read" if where == "agent"
-                              else "where a command's program goes", error)
+    def test_a_name_the_caller_settles_is_put_in(self):
+        self.assertEqual(handed("npm ${{ env.CMD }} --shard=${{ env.S }}", step="{CMD: test}"), [])
+        self.assertEqual(len(handed("npm ${{ env.CMD }} --shard=${{ env.S }}", step="{CMD: 'test; x'}")), 1)
 
-    def test_where_the_caller_settles_the_name_there_is_no_error(self):
+    def test_an_assignment_before_another_expression(self):
+        """A cleared value is read as its own text, not as one word, so an assignment it writes leaves the program's
+        place to what follows."""
+        self.assertEqual(len(handed("X=${{ env.S }}", action_run="${{ inputs.run }} ${{ env.T }} --v")), 1)
+        self.assertEqual(handed("X=${{ env.S }}", action_run="${{ inputs.run }} make --v"), [])
+
+    def test_where_the_caller_settles_the_name_there_was_no_error_and_is_none(self):
         self.assertEqual(handed("${{ env.AGENT }} -p x", step="{AGENT: echo}"), [])
         self.assertEqual(lane(wf(job=JOB, step="{AGENT: claude}", with_="{run: '${{ env.AGENT }} -p x'}"),
                               files(step("${{ inputs.run }}"), inputs=INPUT)), "agent")
 
 
-class TheStatedWaysPastTest(unittest.TestCase):
-    """D-145's stated ways past, for a value handed in and put in an argument's place, are errors now."""
+class WhatStaysAnErrorTest(unittest.TestCase):
+    """Anything that is not cleared is read as D-145 reads it: the whole value from the scope, so an input run as
+    the command line stays an error. Each case here gave no error with the wider reading first built (the first
+    review of this slice), and bash runs the scope's value as a program in each where the value says so."""
 
-    def test_a_newline_a_single_ampersand_and_a_process_substitution(self):
-        for command in ("make\n${{ env.AGENT }} -p x", "make & ${{ env.AGENT }} -p x", "make &${{ env.T }}",
-                        "x <(${{ env.AGENT }} -p x)", "x >(${{ env.T }} --v)", "make\n${{ env.T }} --v"):
+    def assertError(self, command, **kwargs):
+        self.assertEqual(len(handed(command, **kwargs)), 1, command)
+
+    def test_the_scopes_part_as_a_word_of_its_own(self):
+        for command in ("make ${{ env.TARGET }}", "${{ env.AGENT }} -p x", "npx ${{ env.AGENT }}",
+                        "xvfb-run -a ${{ env.A }} --message hi", "timeout 5 ${{ env.A }} --message hi",
+                        "exec -a x ${{ env.A }} --message hi", "${{ env.DIR }}/bin/tool --v",
+                        "./bin/${{ env.T }} --v", "/usr/bin/${{ env.T }}", "x ${{ env.S }}"):
             with self.subTest(command=command):
-                self.assertEqual(len(handed(command, action_run="echo ${{ inputs.run }}")), 1)
+                self.assertError(command)
 
-    def test_what_the_separator_rule_counted_still_counts(self):
-        for command in ("make; ${{ env.AGENT }} -p review", "make && ${{ env.AGENT }} -p review",
-                        "x $(${{ env.AGENT }} -p review)", "make | ${{ env.AGENT }}", "x `${{ env.T }}`",
-                        "echo ${{ env.A }}; ${{ env.B }} -p review"):
+    def test_characters_the_shell_reads_as_more_than_words(self):
+        for command in ("find . -exec ${{ env.A }} --message hi \\;", "trap '${{ env.A }} --message hi' EXIT",
+                        "A=\"x y\" ${{ env.A }} --message hi", "echo \"x=${{ env.A }} --message hi\" | bash",
+                        "make ^\n${{ env.A }} --message hi", "make `\n${{ env.A }} --message hi`",
+                        "make \\\r\n${{ env.A }} --message hi", "# note \\\n${{ env.A }} --message hi",
+                        "echo x \\\\\n${{ env.A }} --message hi", "x=${{ env.A }}\tz", "x={${{ env.A }},y}",
+                        "x=${{ env.A }};y", "x=a&${{ env.A }}", "x=$(${{ env.A }})", "x=*${{ env.A }}",
+                        "x=~${{ env.A }}", "x='${{ env.A }}'"):
             with self.subTest(command=command):
-                self.assertEqual(len(handed(command, action_run="echo ${{ inputs.run }}")), 1)
+                self.assertError(command)
 
-    def test_an_argument_in_an_arguments_place_is_none(self):
-        for command in ("make ${{ env.TARGET }}", "https://x.test/?a=1&b=${{ env.B }}", "{\"a\": \"${{ env.A }}\"}",
-                        "${{ github.head_ref || env.REF }}", "${{ 'y' || env.X }}"):
+    def test_separators_written_inside_the_callers_expressions(self):
+        for command in ("${{ format('make; {0} -p hi', env.A) }}", "${{ format('make; {0} --message x', env.A) }}",
+                        "${{ format('make && {0} -p x', env.A) }}", "${{ 'x;' }} ${{ env.A }} --message hi",
+                        "${{ 'x;' }} ${{ env.A }} ${{ '-p' }} hi", "${{ github.head_ref || 'x;' }} ${{ env.A }} --message hi",
+                        "${{ fromJSON('\"x;\"') }} ${{ env.A }} --message hi", "x=${{ format('{0}', env.A) }}",
+                        "x=${{ env.A || 'y' }}", "x=${{ toJSON(env.A) }}", "x=${{ matrix.sep }}${{ env.A }}"):
             with self.subTest(command=command):
-                self.assertEqual(handed(command, action_run="echo ${{ inputs.run }}"), [])
+                self.assertError(command)
 
-
-class EveryReadingTest(unittest.TestCase):
-    """Every text the caller's expressions may give is read with every other, so a separator one may give before
-    another's part from the scope counts, as the separator rule read every reading."""
-
-    def test_a_separator_another_expression_may_give(self):
-        for command in ("${{ env.Q == 'a' && 'x;' || 'y' }} ${{ env.T }} --yes",
-                        "${{ env.S || 'x;' }} ${{ env.T }} --yes",
-                        "${{ format('{0}', env.Q == 'a' && 'x &&' || 'y') }} ${{ env.T }} --yes",
-                        "${{ env.Z == 'a' && 'make' || 'make\n' }}${{ env.T }} --yes"):
-            with self.subTest(command=command):
-                self.assertEqual(len(handed(command, action_run="echo ${{ inputs.run }}")), 1)
-
-    def test_two_handed_inputs_on_one_line(self):
-        inputs = "  a: {required: true}\n  b: {required: true}\n"
-        given = files(step("echo ${{ inputs.a }} ${{ inputs.b }} --yes"), inputs=inputs)
-        for a, b, errors in (("x ${{ env.S || 'y;' }}", "${{ env.T }}", 1),
-                             ("x ${{ env.S }}", "${{ env.T }}", 0),
-                             ("x;", "${{ env.T }}", 1),
-                             ("x ${{ env.S }};", "z", 0)):
-            with self.subTest(a=a, b=b):
-                with_ = "{a: " + json.dumps(a) + ", b: " + json.dumps(b) + "}"
-                self.assertEqual(len(scope_errors(wf(job=JOB, with_=with_), given)), errors)
-
-    def test_past_sixteen_readings_it_is_read_as_before(self):
-        many = " ".join(f"${{{{ env.Q{n} == 'a' && 'p{n}' || 'q{n}' }}}}" for n in range(5))
-        # 32 readings of the caller's value: read as giving the scope's value whole, the known false error.
-        self.assertEqual(len(handed("npm test " + many + " --shard=${{ env.S }}")), 1)
-        few = " ".join(f"${{{{ env.Q{n} == 'a' && 'p{n}' || 'q{n}' }}}}" for n in range(1))
-        self.assertEqual(handed("npm test " + few + " --shard=${{ env.S }}"), [])
-
-
-class WhatIsReadAsBeforeTest(unittest.TestCase):
-    """Where the value cannot be read as the caller wrote it, the expression is read as giving the scope's value
-    whole, as before (the known false error stays there, and nothing is quieter)."""
+    def test_other_shells_and_other_command_lines(self):
+        for shell in ("pwsh", "cmd", "python", "Bash"):
+            with self.subTest(shell=shell):
+                self.assertError("npm test --shard=${{ env.S }}", shell=shell)
+        for body in ("    - uses: actions/github-script@1111111111111111111111111111111111111111\n"
+                     "      with:\n        script: |\n          exec('${{ inputs.run }}')\n",
+                     "    - uses: Obaaf/OBAAF/actions/egress@1111111111111111111111111111111111111111\n"
+                     "      with:\n        allow: api.anthropic.com\n        run: ${{ inputs.run }}\n"):
+            given = {".github/actions/run-agent/action.yml":
+                     "name: x\ninputs:\n" + INPUT + "runs:\n  using: composite\n  steps:\n" + body}
+            with self.subTest(body=body.split("@")[0]):
+                self.assertEqual(len(scope_errors(wf(job=JOB, with_="{run: 'npm test --shard=${{ env.S }}'}"),
+                                                  given)), 1)
 
     def test_an_actions_own_expression_that_is_not_one_plain_reference(self):
         for action_run in ("${{ format('{0}', inputs.run) }}", "${{ inputs.run || 'x' }}",
                            "${{ inputs.z == '' && inputs.run || inputs.run }}"):
             with self.subTest(action_run=action_run):
-                self.assertEqual(len(handed("npm test -- --shard=${{ env.SHARD }}", action_run=action_run)), 1)
+                self.assertError("npm test -- --shard=${{ env.SHARD }}", action_run=action_run)
 
     def test_a_value_handed_on_through_a_further_local_action(self):
         inner = ("name: i\ninputs:\n  run: {required: true}\nruns:\n  using: composite\n  steps:\n"
@@ -153,63 +139,50 @@ class WhatIsReadAsBeforeTest(unittest.TestCase):
         self.assertEqual(len(scope_errors(wf(job=JOB, with_="{run: 'npm test -- --shard=${{ env.SHARD }}'}"),
                                           given)), 1)
 
-    def test_the_fifth_reviews_ways_past_hold(self):
+    def test_past_what_the_reader_makes(self):
+        self.assertError("npm test --shard=${{ env.S }} " + "a" * 200_001)
+        deep = "${{ " + "(env.Z == 'q' || " * 10 + "env.S" + ")" * 10 + " }}"
+        self.assertError("npm test --shard=" + deep)
+
+    def test_the_fifth_reviews_ways_past_of_2d19e_hold(self):
         forged = files(step("# ${{ inputs.d }}{{ '\n${{ env.AGENT }} -p x\n# ' }}"), inputs="  d: {default: $}\n")
         self.assertEqual(len(scope_errors(wf(job=JOB), forged)), 1)
         paired = ("${{ env.Q1 == 'a' && format('echo {0};', env.X) || format('echo {0}', env.X) }} "
                   "${{ env.Q2 == 'a' && format('x {0}', env.Y) || env.Y }} --yes")
         self.assertEqual(len(scope_errors(wf(job=JOB), files(step(paired)))), 1)
 
-    def test_a_value_that_would_open_an_expression_with_the_actions_own_text(self):
-        """A handed value ending in `$` beside the action's own `{{ ... }}`: the line is read as the runner gives it,
-        and the action's own expression after it still counts."""
-        given = files(step("${{ inputs.run }}{{ x }}\n${{ env.AGENT }} -p x"), inputs=INPUT)
-        self.assertEqual(len(scope_errors(wf(job=JOB, with_="{run: 'echo ${{ env.S }} $'}"), given)), 1)
-        given = files(step("echo ${{ inputs.run }}{{ ' ${{ env.AGENT }} -p x ' }}"), inputs=INPUT)
-        self.assertEqual(len(scope_errors(wf(job=JOB, with_="{run: 'a ${{ env.S }} $'}"), given)), 1)
 
-    def test_a_caller_expression_nested_more_deeply_than_the_reader_follows(self):
-        deep = "${{ " + "(env.Z == 'q' || " * 10 + "env.S" + ")" * 10 + " }}"
-        self.assertEqual(len(handed("npm test --shard=" + deep)), 1)
+class ANewlineBeforeTheScopesPartTest(unittest.TestCase):
+    """A newline before the scope's part in a handed value starts a command there, wherever the value is put."""
 
+    def test_put_after_echo(self):
+        for command in ("make\n${{ env.AGENT }} -p x", "make\n${{ env.T }} --v", "make ^\n${{ env.A }} --message hi",
+                        "make \\\r\n${{ env.A }} --message hi", "echo a\n\n  ${{ env.T }}",
+                        "${{ env.Z == 'a' && 'make' || 'make\n' }}${{ env.T }} --yes"):
+            with self.subTest(command=command):
+                (error,) = handed(command, action_run="echo ${{ inputs.run }}")
+                self.assertIn("where a command's program goes", error)
 
-class TheActionsOwnTextTest(unittest.TestCase):
-    """The text a handed value makes beside the action's own expressions hides none of them."""
-
-    def test_an_actions_own_expression_after_a_handed_value(self):
-        for action_run in ("${{ inputs.run }} ${{ env.AGENT }} -p x", "${{ inputs.run }}; ${{ env.T }} --v",
-                           "${{ inputs.run }}\n${{ env.T }} --v", "${{ inputs.run }} && ${{ env.T }}"):
-            for command in ("npm test --shard=${{ env.S }}", "echo #${{ env.S }}", "echo '${{ env.S }}"):
-                with self.subTest(action_run=action_run, command=command):
-                    self.assertEqual(len(handed(command, action_run=action_run)), 1)
-
-    def test_a_github_script_script_and_the_egress_actions_command(self):
-        for body, bad in (("    - uses: actions/github-script@1111111111111111111111111111111111111111\n"
-                           "      with:\n        script: |\n          exec('${{ inputs.run }}')\n", None),
-                          ("    - uses: Obaaf/OBAAF/actions/egress@1111111111111111111111111111111111111111\n"
-                           "      with:\n        allow: api.anthropic.com\n        run: ${{ inputs.run }}\n", None)):
-            given = {".github/actions/run-agent/action.yml":
-                     "name: x\ninputs:\n" + INPUT + "runs:\n  using: composite\n  steps:\n" + body}
-            with self.subTest(body=body.split("@")[0]):
-                self.assertEqual(len(scope_errors(wf(job=JOB, with_="{run: '${{ env.AGENT }} -p x'}"), given)), 1)
-                self.assertEqual(scope_errors(wf(job=JOB, with_="{run: 'npm test --shard=${{ env.S }}'}"),
-                                              given), [])
+    def test_a_newline_after_it_is_no_error_in_an_arguments_place(self):
+        for command in ("echo ${{ env.T }}\nmake", "${{ github.head_ref || env.REF }}", "${{ 'y' || env.X }}"):
+            with self.subTest(command=command):
+                self.assertEqual(handed(command, action_run="echo ${{ inputs.run }}"), [])
 
     def test_the_inputs_default(self):
-        given = files(step("${{ inputs.run }}"), inputs="  run: {default: 'npm test --shard=${{ env.S }}'}\n")
-        self.assertEqual(scope_errors(wf(job=JOB), given), [])
-        given = files(step("${{ inputs.run }}"), inputs="  run: {default: '${{ env.T }} --v'}\n")
+        given = files(step("echo ${{ inputs.run }}"), inputs="  run: {default: \"make\\n${{ env.T }} --v\"}\n")
         self.assertEqual(len(scope_errors(wf(job=JOB), given)), 1)
 
 
 class TheCostTest(unittest.TestCase):
 
-    def test_a_large_value_read_in_many_lines(self):
-        big = "npm test " + " ".join(f"--x{n}=${{{{ env.S{n} }}}}" for n in range(3000))
-        run = "\n".join(f"echo {n} ${{{{ inputs.run }}}}" for n in range(300))
-        given = files(step(run), inputs=INPUT)
+    def test_a_long_action_and_a_value_of_many_readings(self):
+        """The first review's worst case: a long step and a handed value of 16 readings, 12 times the base with the
+        wider reading. Each line is read once now."""
+        lines = "\n".join(f"e ${{{{env.X}}}} {n}" for n in range(8000))
+        given = files(step(lines + "\necho ${{ inputs.run }}"), inputs=INPUT)
+        value = "${{ env.Q0 == 'a' && 'p0' || 'q0' }} ${{ env.Q1 == 'a' && 'p1' || 'q1' }} --s=${{ env.S }}"
         started = time.monotonic()
-        self.assertEqual(scope_errors(wf(job=JOB, with_="{run: '" + big + "'}"), given), [])
+        self.assertEqual(scope_errors(wf(job=JOB, with_="{run: " + json.dumps(value) + "}"), given), [])
         self.assertLess(time.monotonic() - started, 20)
 
 

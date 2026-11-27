@@ -4,14 +4,14 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
-### A value handed to a local action is read where the scope's part stands in it
+### A value handed to a local action: the scope's part inside a word, and a newline before it
 
 Slice 2d.22, from #399; decision D-150. Under an `env` written as one expression (`env: ${{ fromJSON(vars.E) }}`), D-145 read a value the caller hands a local composite action as giving the scope's value whole, wherever in the value the scope's part stood. So an input run as the command line (`run: ${{ inputs.run }}` in the action) given `npm test -- --shard=${{ env.SHARD }}` was an error of the file, where the same line in a workflow's own step is none.
 
-- **Now a plain reference to such an input** (`${{ inputs.run }}`) is read as each text the caller's value can make, with the scope's part where the caller's expression stands, and the line is read as D-144 reads a workflow's own step. `npm test -- --shard=${{ env.SHARD }}`, `make ${{ env.TARGET }}` and `${{ env.DIR }}/bin/tool` there are no longer errors.
-- **Can fail a check that passed.** A newline, a single `&`, a process substitution or a `(` before the scope's part in such a value now counts as the shell reader counts it: `make` then a new line then `${{ env.AGENT }} -p x`, put after `echo`, is an error, as it is in a workflow's own step. D-145 stated the first three as ways past.
-- **Read as before:** an action's expression that is anything but one plain reference to an input; a value handed on through a further local action; more than 16 readings or combinations, or 200,000 characters, for a line. On this repository and on the first adopter the reports are byte-identical with `flagship` `a4ef5a2`.
-- **Opened:** #407, the same kind of reading for a workflow's own step, where D-144 reads a word from the scope without the other texts its expression may give.
+- **No longer an error,** in a bash or sh step's `run`: a plain reference to such an input whose value is plain text (letters, digits, spaces and `_.,:=@%+-/`) and plain `${{ env.NAME }}` references, each standing inside a word after a character other than a space or `/` (`--shard=${{ env.SHARD }}`).
+- **Can fail a check that passed.** A newline before the scope's part in a handed value is a program's place wherever the value is put: `make`, a new line, then `${{ env.AGENT }} -p x`, put after `echo`, is an error, as it is in a workflow's own step. This includes a newline inside the action's own quotes.
+- **Read as before:** everything else, including `make ${{ env.TARGET }}` (the known false error stays there), other shells, a github-script script, the egress action's command, and a value handed on through a further local action. On this repository and on the first adopter the reports are byte-identical with `flagship` `a4ef5a2`.
+- **Opened:** #407, for the reader of a workflow's own step: a word from the scope is read without the other texts its expression may give.
 
 ### The release policy is read field by field, with each field's type checked
 
