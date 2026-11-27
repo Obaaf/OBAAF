@@ -7,9 +7,10 @@ the first reading already said "cannot tell" (an unclosed quote). A value a loca
 quote (`claude ${{ inputs.a }}${{ env.F }} -p hi` given `'`), and so can a typing slip in a workflow's own step.
 
 Now a warned option found only from the command that holds the unclosed quote on is "cannot tell". The commands
-before it are read again on their own and keep their matches, and a text that holds a `${{ }}` expression is read as
+before it are read again on their own and keep their matches. A text that holds a `${{ }}` expression is read as
 before: GitHub puts the expression's text in before bash reads the script, and it may hold the quote that closes
-this one.
+this one. So is a text with a command or process substitution or backticks (or `${` beside `$'`), whose reader may
+take a closed quote for an unclosed one.
 """
 
 import unittest
@@ -71,6 +72,22 @@ class AnUnclosedQuoteTest(unittest.TestCase):
                        f"echo \"it's\"\nclaude {SKIP} -p hi"):
             with self.subTest(script):
                 self.assertEqual(step_findings(script), ([HIGH], []))
+
+    def test_a_quote_the_reader_of_substitutions_may_misread(self):
+        # The review: `_balanced` reads `$( )`, `${ }` and `<( )` without skipping a comment or reading `$'..\\'..'`
+        # as bash does, so it may take a closed quote for an unclosed one. Bash runs the warned option in each; the
+        # match stays (with the medium the lexer's misreading already gave on the base).
+        line = f"claude {SKIP} -p hi"
+        for script in (f'OUT="$(\n  # run claude, it\'s fine\n  {line}\n)"',
+                       f'V="$(\n  # don\'t use the cache\n  echo 1.2.3\n)"\n{line}',
+                       f'MODEL="${{MODEL:-$(\n  # pick the model that\'s cheapest\n  echo sonnet\n)}}"\n{line}',
+                       f'V="$(\n  echo 1 # (one\n)"\n{line}',
+                       f"X=$(\n  # step 1) don't cache\n  echo hi\n)\n{line}",
+                       f'V="$(echo $\'it\\\'s\')"\n{line}',
+                       f"V=`echo x`\necho 'oops\n{line}",
+                       f"A=${{B:-$'it\\'s'}}\necho 'oops\n{line}"):
+            with self.subTest(script):
+                self.assertIn(HIGH, step_findings(script)[0])
 
     def test_an_expression_may_close_the_quote(self):
         # GitHub puts the expression's text in before bash reads the script: `'` there closes the quote, and claude runs.
