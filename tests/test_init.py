@@ -9,7 +9,7 @@ from unittest.mock import patch
 import yaml
 
 from obaaf import cli
-from obaaf.checker import Config
+from obaaf.checker import Config, ConfigError
 from obaaf.init import WORKFLOW
 
 
@@ -239,6 +239,34 @@ jobs:
                 self.assertEqual(target.read_text(), "custom\n")
                 self.assertFalse(other.exists())
                 target.unlink()
+
+    def test_lookalikes_report_the_default_checker_error_without_writing(self):
+        self.config.parent.mkdir()
+        for rel in ("obaaf.yaml", ".Obaaf.YML", ".github/.OBAAF.yaml"):
+            with self.subTest(rel=rel):
+                path = self.root / rel
+                path.write_text("lanes: {}\n")
+                with self.assertRaises(ConfigError) as error:
+                    Config.load(self.root)
+                for options in ((), ("--apply",)):
+                    status, text = self.invoke(*options)
+                    self.assertEqual(status, 1, text)
+                    self.assertIn(str(error.exception), text)
+                    self.assertEqual(path.read_text(), "lanes: {}\n")
+                    self.assertFalse(self.config.exists())
+                    self.assertFalse(self.workflow.exists())
+                path.unlink()
+
+    def test_alias_of_supported_config_is_accepted(self):
+        self.assertEqual(self.invoke("--apply")[0], 0)
+        alias = self.config.with_name("OBAAF.YML")
+        self.config.rename(alias)
+        if not self.config.exists():
+            os.link(alias, self.config)
+        self.workflow.unlink()
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertTrue(self.workflow.is_file())
 
     def test_alternate_config_and_linked_parent(self):
         alt = self.root / "obaaf.yml"

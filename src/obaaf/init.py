@@ -407,7 +407,10 @@ def run(args) -> int:
         for note in notes:
             print(one_line(note))
         missing = {}
-        conflict = False
+        lookalike = checker.config_lookalike_error(root)
+        conflict = lookalike is not None
+        if lookalike:
+            print(f"Conflict: {one_line(lookalike)}")
         for alternate in CONFIG_LOCATIONS[1:]:
             existing = _read(root / alternate)
             if existing is None:

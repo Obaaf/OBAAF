@@ -60,6 +60,22 @@ _AGENT_HINT = re.compile(r"agent|copilot|claude|gemini|codex|aider|opencode|clin
                          re.I)
 
 
+def config_lookalike_error(root: Path) -> str | None:
+    """Describe the first config-like file that default discovery would ignore."""
+    for folder in ("", ".github"):
+        try:
+            names = os.listdir(root / folder) if (root / folder).is_dir() else []
+        except OSError:
+            names = []
+        for name in names:
+            rel = f"{folder}/{name}" if folder else name
+            if name.lower() in _CONFIG_LOOKALIKES and rel not in CONFIG_LOCATIONS and (root / rel).is_file() \
+                    and not _same_as_read(root, rel):
+                return (f"{root}: {rel} looks like a checker configuration, and the checker does not "
+                        f"read it (it reads {', '.join(CONFIG_LOCATIONS)}); rename or remove it")
+    return None
+
+
 def parse_fail_on(spec: str) -> tuple[str | None, str]:
     """Parse a --fail-on value into (category, severity).
 
@@ -3146,19 +3162,9 @@ class Config:
             if len(present) > 1:
                 raise ConfigError(f"{root}: more than one checker configuration ({', '.join(present)}); the checker "
                                   f"reads one, so keep one of them")
-            # A file named like a configuration where the checker does not look would be ignored without a
-            # word, its lanes and protected secrets with it.
-            for folder in ("", ".github"):
-                try:
-                    names = os.listdir(root / folder) if (root / folder).is_dir() else []
-                except OSError:
-                    names = []
-                for name in names:
-                    rel = f"{folder}/{name}" if folder else name
-                    if name.lower() in _CONFIG_LOOKALIKES and rel not in CONFIG_LOCATIONS and (root / rel).is_file() \
-                            and not _same_as_read(root, rel):
-                        raise ConfigError(f"{root}: {rel} looks like a checker configuration, and the checker does not "
-                                          f"read it (it reads {', '.join(CONFIG_LOCATIONS)}); rename or remove it")
+            lookalike = config_lookalike_error(root)
+            if lookalike:
+                raise ConfigError(lookalike)
         for path in candidates:
             if path.is_file():
                 try:
