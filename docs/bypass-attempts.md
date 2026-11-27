@@ -3228,11 +3228,11 @@ Also a cost: 20 steps of ten two-valued expressions took 51 s against 3.6 s. **F
 
 ## 2d.19d: an `env` written as one expression, in the lanes
 
-Slice 2d.19d (#382, part (a) of what F-418 left in 2d.19; D-144). One Opus 5.5 sub-agent that wrote none of it reviewed it in three passes. It tried about 213 workflow forms, each against the base (`flagship` `03b3c9b`) and the change, with controls that have the agent's name written out. It also fuzzed 500,000 random lines against the one-try-per-piece search, and timed 23 cost cases. What GitHub does was read from its pages and #387, not run. The cases and scripts were in the review's scratch directory and are not kept; every finding below is a test in `tests/test_env_scope_expression.py`.
+Slice 2d.19d (#382, part (a) of what F-418 left in 2d.19; D-144). One Opus 5.5 sub-agent that wrote none of it reviewed it in three passes. It tried about 213 workflow forms, each against the base (`flagship` `03b3c9b`) and the change, with controls that have the agent's name written out. It also fuzzed 500,000 random lines against the one-try-per-piece search, and timed 23 cost cases. What GitHub does was read from its pages and #387, not run. The cases and scripts were in the review's scratch directory and are not kept; each fixed finding below is a test in `tests/test_env_scope_expression.py`, and the stated limits and known false errors are not all tests.
 
 **First pass (8f336cd: an error for every such expression anywhere in a line, and `env: ${{ matrix.KEY }}` read through a written matrix, one table for each choice of mapping): 2 blocking, 103 forms, 11 cost cases.**
 
-- **Cost.** Each table rebuilt the outer scopes on every reading. 4,000 workflow `env` entries under 256 matrix mappings over 300 steps took 121.9 s against 13.7 s; 60,000 entries over 5 steps took 1.73 GB against 127 MB. A cache capped at 64 scopes gave 336 s and 300 false ledger errors.
+- **Cost.** Each table rebuilt the outer scopes on every reading. 4,000 workflow `env` entries under 256 matrix mappings over 300 steps took 121.9 s against 13.7 s; 60,000 entries over 5 steps took 1.73 GB against 127 MB. Past a cache capped at 64 scopes, an 88 KB file took 336 s against 17 s, and a 42 KB one gave 300 false ledger errors where the base gave none.
 - **Ways past.** A local composite action under such a scope (stated, F-421); `$AGENT` (D-139's limit); a key YAML 1.2 reads otherwise (`0o7`) taken as settling a name.
 - **False errors.** Readings multiplied across mappings (two references over 33 mappings past 1,024 readings); an agent lane no combination runs; one expression in one matrix value making the whole scope unread; every `echo`/`mkdir` line under such a scope (an existing OBAAF-GHA-010 test failed).
 
@@ -3277,6 +3277,8 @@ Slice 2d.19d (#382, part (a) of what F-418 left in 2d.19; D-144). One Opus 5.5 s
 - Backtick and caret continuations are joined.
 - The error says which place it found.
 
+**Fourth pass (a067faf and the documents): 0 blocking, 9 forms, 300,000 random lines against the third pass's regex (no disagreement), 4 cost cases.** A copy of the rest of the piece for each probe grew with the square of probes side by side (40,000 in 1.15 s; a 960 KB line 15.5 s against 6.4 s); a bash line ending in a backtick hid the next line's Cline or Aider name; only the first known value of another expression is put in (stated); document corrections. **Fixed (the commit after 34de9c9):** what is before a probe is checked first and the rest is searched where it stands (960 KB, 6.5 s against 6.2 s); a joined line's next lines are read again on their own, at most 32 lines joined; the documents corrected.
+
 **Held:**
 - The fast path: JSON and `--lanes` byte-identical with the base on the 42 fixture workflows and on this repository.
 - OBAAF-GHA-026: findings identical in all 236 case folders.
@@ -3291,5 +3293,6 @@ Slice 2d.19d (#382, part (a) of what F-418 left in 2d.19; D-144). One Opus 5.5 s
 - A repository's own `agents.commands`.
 - `$AGENT` (D-139).
 - A local composite action's steps (left in 2d.19 with its item (b)).
-- **Known false errors:** quoted brackets and separators, a heredoc line, and any word from such a scope followed by an agent's keyword.
+- Another expression on the line read as its first known value only.
+- **Known false errors:** quoted brackets and separators, a heredoc line, `command -v ${{ env.TOOL }}`, and any word from such a scope followed by an agent's keyword.
 

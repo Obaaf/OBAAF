@@ -2041,6 +2041,8 @@ _RUNS_NEXT = frozenset({"eval", "call", "start", "iex", "invoke-expression", "st
                         "elif", "if", "while", "until", "!", "time"})
 _REDIRECTION = re.compile(r"\d*(?:[<>]{1,2}|&>{1,2}|>&|<&)(.*)")
 _SCOPE_PATTERNS: list = []
+# Lines a PowerShell backtick or a cmd caret continues that `_scope_at_program` joins to a line.
+_SCOPE_JOINED = 32
 # The shape of the catalog's pattern for an agent's command line, `(^|[\s;&|(/"'`])NAME["'`]?\s+([^\n;&|]*\s)?TAIL`:
 # what may stand before the name, and the keyword it needs later in the same piece (`(-p|--print)\b`, `exec\b`).
 _SCOPE_PATTERN_HEAD = '(^|[\\s;&|(/"\'`])'
@@ -2086,13 +2088,16 @@ def _scope_pattern_matches(line: str) -> bool:
             at = piece.find(_SCOPE_PROBE)
             while at != -1:
                 before = piece[at - 1] if at else ""
-                rest = piece[at + len(_SCOPE_PROBE):]
-                if rest[:1] in ("\"", "'", "`"):
-                    rest = rest[1:]
-                if (not before or before.isspace() or before in "(/\"'`") and rest[:1].isspace():
-                    if tail.search(rest) is not None:
-                        return True
-                    break
+                # What is before it first, and the rest of the piece is searched where it stands, not copied (the
+                # fourth review: a copy for each of 40,000 probes side by side grew with their square).
+                if not before or before.isspace() or before in "(/\"'`":
+                    pos = at + len(_SCOPE_PROBE)
+                    if piece[pos:pos + 1] in ("\"", "'", "`"):
+                        pos += 1
+                    if piece[pos:pos + 1].isspace():
+                        if tail.search(piece, pos) is not None:
+                            return True
+                        break
                 at = piece.find(_SCOPE_PROBE, at + 1)
     return False
 
@@ -2123,10 +2128,14 @@ def _scope_at_program(text: str, scoped: tuple, known: dict | None = None) -> tu
     wanted = set(scoped)
     w = 0
     for u_start, u_end in env_expr._units(text, list(scoped)):
-        # A line a PowerShell backtick or a cmd caret continues is read with the next (found by the third review).
-        while u_end < len(text) and text[u_end - 1:u_end] in ("`", "^"):
+        # A line a PowerShell backtick or a cmd caret continues is read with the next, up to `_SCOPE_JOINED` lines
+        # (found by the third review); the next lines' expressions are read again in their own unit, since in bash a
+        # backtick at a line's end opens a substitution instead (found by the fourth review).
+        own_end, joined, w_start = u_end, 0, w
+        while u_end < len(text) and text[u_end - 1:u_end] in ("`", "^") and joined < _SCOPE_JOINED:
             nxt = text.find("\n", u_end + 1)
             u_end = len(text) if nxt == -1 else nxt
+            joined += 1
         pieces: list = []
         at = u_start
         first = None
@@ -2144,6 +2153,10 @@ def _scope_at_program(text: str, scoped: tuple, known: dict | None = None) -> tu
                 pieces.append(value if isinstance(value, str) and expr_mod.OPEN not in value else "x")
             at = end
         pieces.append(text[at:u_end])
+        if u_end != own_end:
+            w = w_start
+            while w < len(every) and every[w][0] < own_end:
+                w += 1
         if first is None:
             continue
         line = "".join(pieces)

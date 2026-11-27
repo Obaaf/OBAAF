@@ -148,6 +148,18 @@ class WhereACommandsProgramGoesTest(unittest.TestCase):
         self.assertEqual(len(scope_errors(wf("xvfb-run ${{ env.AGENT }} ^\n  -p x", job=JOB, shell="cmd",
                                              runs_on="windows-latest"))), 1)
 
+    def test_a_bash_backtick_at_a_lines_end_does_not_hide_the_next_line(self):
+        # The fourth review: in bash a backtick at a line's end opens a substitution; the next line is still read.
+        text = wf("echo ${{ env.X }} `date`\n${{ env.T }} task", job=JOB)
+        self.assertEqual(len(scope_errors(text)), 1)
+
+    def test_many_probes_side_by_side(self):
+        # The fourth review: 40,000 such expressions side by side grew with their square.
+        text = wf("echo x" + "${{ env.X }}" * 20000, job=JOB)
+        start = time.monotonic()
+        self.assertEqual(problems(text), [])
+        self.assertLess(time.monotonic() - start, 30)
+
     def test_every_strict_pattern_has_the_shape_the_search_rests_on(self):
         # The third review: one try per piece holds because every such pattern is the name, an optional quote, a
         # space, anything, then its keyword; a pattern of another shape would be left out without this test.
