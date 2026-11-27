@@ -27,6 +27,7 @@ from obaaf import yamlutil
 from obaaf.catalog import Catalog, load
 from obaaf.checker import acceptance as acceptance_mod
 from obaaf.checker import egress as egress_mod
+from obaaf.checker import env_expr
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import jenkins as jenkins_mod
 from obaaf.checker import repo as repo_checks
@@ -1259,22 +1260,24 @@ def _capped(values: list, cut: list) -> list:
 
 class _ActionEnv:
     """The `env` context the expressions of a local action's step see, as 2d.4a's reader works them out (flagship
-    slice 2d.19e). `values`: the step's `env` with its caller's under it, every mapping of the chain; the runner is
-    not known here, so a name gives the value spelled as written and the value of the last name that folds to it
-    (before, only the latter, so `env.AGENT` with `AGENT: claude` in the job's `env` and `agent: echo` in the using
-    step's gave `echo`, where a Linux runner gives `claude`). `settled`: None where no scope of the chain is written
-    as one expression; else the names a mapping nearer the step than the nearest such scope sets (`_env_scope`), and
-    `where`, that scope as an error names it. A name that is not settled may then be any text (`_FROM_SCOPE_TEXT`),
-    and only the values of settled names are given, as `env_expr.Env` reads a workflow's own step (D-144). The
-    index by folded name is built on the first lookup."""
+    slice 2d.19e). `values`: the step's `env` with its caller's under it, every mapping of the chain. Where no scope
+    of the chain is written as one expression (`settled` None), a name gives the value of the last name that folds to
+    it, as before. Under such a scope, `settled` holds the names a mapping nearer the step than the nearest such scope
+    sets (`_env_scope`), `where` names that scope for the error, and `case` is how the runner compares names
+    (`env_expr.env_case`); as `env_expr.Env` reads a workflow's own step (D-144), only the values of settled names are
+    given, a name that is not settled may also be any text (`_FROM_SCOPE_TEXT`), and so may a read of `env` not
+    pinned to one name. The index by folded name is built on the first lookup."""
 
-    __slots__ = ("values", "settled", "where", "_index")
+    __slots__ = ("values", "settled", "where", "case", "_index", "_folded_settled")
 
-    def __init__(self, values: dict | None, settled: frozenset | None = None, where: str | None = None) -> None:
+    def __init__(self, values: dict | None, settled: frozenset | None = None, where: str | None = None,
+                 case: str = "both") -> None:
         self.values = values if isinstance(values, dict) else {}
         self.settled = settled
         self.where = where if settled is not None else None
+        self.case = case
         self._index = None
+        self._folded_settled = None
 
     def _folded(self) -> dict:
         if self._index is None:
@@ -1285,23 +1288,31 @@ class _ActionEnv:
             self._index = index
         return self._index
 
-    def lookup(self, name: str) -> list:
-        """The texts `env.NAME` can give: the value of NAME as written, as a Linux or macOS runner compares names,
-        and the value the last name that folds to it gives, as before (a Windows runner compares them without
-        regard to case), or empty; under a scope written as one expression, also any text where NAME itself is not
-        settled."""
-        found = self._folded().get(name.upper(), [])
-        values = [value for spelled, value in found if spelled == name] + ([found[-1][1]] if found else [])
-        if self.settled is not None and name not in self.settled:
-            return list(dict.fromkeys([_FROM_SCOPE_TEXT, *values]))
-        return list(dict.fromkeys(values)) or [""]
+    def is_settled(self, name: str) -> bool:
+        """Whether a mapping nearer the step than the scope written as one expression sets NAME, under the runner's
+        comparison: as written on a known Linux or macOS runner, without regard to case on a known Windows runner
+        (never for a name outside ASCII, which .NET may fold otherwise), and both where the runner is not known."""
+        if self.settled is None:
+            return True
+        if self._folded_settled is None:
+            self._folded_settled = frozenset(name.upper() for name in self.settled if name.isascii())
+        exact = name in self.settled
+        folded = name.isascii() and name.upper() in self._folded_settled
+        return exact if self.case == "exact" else folded if self.case == "folded" else exact and folded
 
-    def every(self) -> list:
-        """What `env` read in a way not pinned to one name can give (`toJSON(env)`, `env[inputs.k]`, `env.*`):
-        every value, and empty; under a scope written as one expression, any text too."""
-        values = [value for found in self._folded().values() for _spelled, value in found]
-        head = [_FROM_SCOPE_TEXT] if self.settled is not None else []
-        return list(dict.fromkeys([*head, *values, ""]))
+    def lookup(self, name: str) -> list:
+        """The texts `env.NAME` can give."""
+        found = self._folded().get(name.upper(), [])
+        if self.settled is None:
+            return [found[-1][1]] if found else [""]
+        values = []
+        if self.case != "folded":
+            values.extend(value for spelled, value in found if spelled == name)
+        if self.case != "exact" and found:
+            values.append(found[-1][1])
+        if not self.is_settled(name):
+            values.insert(0, _FROM_SCOPE_TEXT)
+        return list(dict.fromkeys(values)) or [""]
 
 
 def _as_action_env(env) -> _ActionEnv:
@@ -1326,7 +1337,6 @@ def _settle(settled: frozenset, scope) -> frozenset:
     """`settled` with the names the mapping `scope` sets to a text added, and those it sets to anything else (a
     mapping, a list) taken out; a key YAML 1.2 may read as another scalar, or one that is not text, settles nothing
     (as `env_expr.Env` reads them). A scope that is not a mapping changes nothing here (`_env_scope` finds it)."""
-    from obaaf.checker import env_expr
     if not isinstance(scope, dict) or not scope:
         return settled
     out = set(settled)
@@ -1427,6 +1437,9 @@ def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0, env: di
     if head[0] == "id" and head[1].lower() == "format" and _wraps(toks[1:]):
         args = [_token_values(arg, inputs, folder, depth + 1, env, cut) for arg in _split_top(toks[2:-1], ",")]
         if args and all(values for values in args):
+            # What a scope written as one expression may give is combined first, so a cut never leaves it out
+            # (flagship slice 2d.19e, from its review: `env.Z == 'x' || env.AGENT` beside sixteen literals).
+            args = [sorted(values, key=lambda value: _FROM_SCOPE_TEXT not in value) for values in args]
             out: list = []
             distinct: set = set()
             for count, choice in enumerate(itertools.product(*args)):
@@ -1445,13 +1458,16 @@ def _token_values(toks: list, inputs: dict, folder: str, depth: int = 0, env: di
         return ["true", "false"]
     names = _input_names(toks)
     values = list(inputs.values()) if "*" in names else [inputs.get(name, "") for name in names]
-    # What it reads from `env` too (flagship slice 2d.19e; before, nothing: `toJSON(env)`, `env[inputs.k]` and
-    # `fromJSON(toJSON(env)).AGENT` were read as empty), first, so a cut keeps it.
-    env_names = _env_names(toks)
-    if env_names:
-        view = _as_action_env(env)
-        values = (view.every() if "*" in env_names else
-                  [value for name in env_names for value in view.lookup(name)]) + values
+    # Under a scope written as one expression, what it reads from `env` may be any text (flagship slice 2d.19e), as
+    # `env_expr` reads a workflow's own step: `toJSON(env.AGENT)`, `fromJSON(toJSON(env)).AGENT`, `env[inputs.k]`;
+    # `hashFiles` gives a hash. Elsewhere it is read as empty, as before (giving every value there multiplied whole
+    # texts past what the reader reads, found by the review).
+    view = _as_action_env(env)
+    if view.settled is not None and not (head[0] == "id" and head[1].lower() == "hashfiles"):
+        env_names = _env_names(toks)
+        if env_names:
+            values = ([_FROM_SCOPE_TEXT] if "*" in env_names else
+                      [value for name in env_names for value in view.lookup(name)]) + values
     return _capped(values + [""], cut if cut is not None else [])
 
 
@@ -1472,12 +1488,14 @@ def _action_inputs(raw: dict, given: dict) -> dict:
 
 
 def _put_in(text: str, inputs: dict, folder: str, problems: list, env: dict | None = None,
-            counts: list | None = None) -> str:
+            counts: list | None = None, keep_scope: bool = False) -> str:
     """`text` with what the checker can work out put in: each expression that reads the action's
     inputs (every value it can give, one reading per line, when there are several) and the action's
     own folder for `github.action_path`. An expression that reads an input in a way the checker does
     not work out is added to `problems`. How many readings the text was made of is added to `counts`
-    (flagship slice 2d.18), where there are several."""
+    (flagship slice 2d.18), where there are several. What an `env` written as one expression may give is read as
+    empty, unless `keep_scope` (an input handed to a further local action, which reads where it stands: flagship slice
+    2d.19e)."""
     text = _ACTION_PATH_EXPR_RE.sub(lambda _m: f"./{folder}", text)
     if "${{" not in text:
         return text
@@ -1494,8 +1512,8 @@ def _put_in(text: str, inputs: dict, folder: str, problems: list, env: dict | No
             continue
         # What an `env` written as one expression may give is read as empty here, as another context's value is;
         # `_action_scope_place` reads where it stands (flagship slice 2d.19e).
-        readings = _capped([r.replace(whole, value.replace(_FROM_SCOPE_TEXT, "")) for r in readings
-                            for value in values], cut)
+        readings = _capped([r.replace(whole, value if keep_scope else value.replace(_FROM_SCOPE_TEXT, ""))
+                            for r in readings for value in values], cut)
         if cut:
             problems.append(f"an expression that reads an input or the environment can give more than "
                             f"{_VALUE_LIMIT} texts, and the checker reads only {_VALUE_LIMIT} "
@@ -1568,7 +1586,6 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -
     (flagship slice 2d.19e, after D-144); None where none does, or where no scope of the chain is written so. Each
     other expression that reads an input or `env` is read as its first value, any other as a plain word. Only the
     expressions are worked out again, and only under such a scope."""
-    from obaaf.checker import env_expr
     if env.where is None or not isinstance(text, str):
         return None
     text = _ACTION_PATH_EXPR_RE.sub(lambda _m: f"./{folder}", text)
@@ -1585,10 +1602,15 @@ def _action_scope_place(text: str, inputs: dict, folder: str, env: _ActionEnv) -
         if not re.search(r"\binputs\b|\benv\b|action_path", body, re.I):
             continue
         if body not in memo:
-            memo[body] = _token_values(expr_mod.tokens(body), inputs, folder, env=env, cut=[])
-        values = memo[body]
+            toks = expr_mod.tokens(body)
+            memo[body] = (_token_values(toks, inputs, folder, env=env, cut=[]), bool(_env_names(toks)))
+        values, reads_env = memo[body]
         if values is None:
-            continue        # nested too deeply: named as not read where it is put in
+            # Nested more deeply than the reader follows: where it reads `env`, it may give what the scope sets, as a
+            # workflow's own step refuses it (found by the review); else it is named as not read where it is put in.
+            if reads_env:
+                scoped.append((start, end))
+            continue
         if any(_FROM_SCOPE_TEXT in value for value in values):
             scoped.append((start, end))
         elif values:
@@ -1655,7 +1677,8 @@ def _action_folder_script(root: Path, folder: str, run: str, workdir, commands: 
 def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions", commands: list, depth: int = 0,
                            seen: frozenset = frozenset(), cache: dict | None = None,
                            given: dict | None = None, given_env: dict | None = None,
-                           inherited_env: dict | None = None, env_scope: tuple | None = None) -> _ActionReading:
+                           inherited_env: dict | None = None, env_scope: tuple | None = None,
+                           env_case: str = "both") -> _ActionReading:
     """Whether the local action `uses` (`./path`, `$/path` or `.\\path`) runs an agent (flagship slice
     2d.4a). A composite action's steps are read for an agent as a job's steps are, with more put in: an
     agent action; an agent CLI in any command line `Step.agent_text` reads, with each expression that
@@ -1670,7 +1693,8 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
     there is not. A reading nothing cut short is kept in `cache` for every other use of the folder with
     the same inputs and environment. `env_scope` (flagship slice 2d.19e) is `_env_scope`'s (where, settled)
     for the scopes outside the action, where one is written as one expression (`env: ${{ fromJSON(vars.E) }}`);
-    a step's own `env` written so is the nearest. Under such a scope a name no nearer mapping sets may be any
+    a step's own `env` written so is the nearest; `env_case` is how the job's runner compares the names of `env`
+    (`env_expr.env_case`). Under such a scope a name no nearer mapping sets may be any
     text, and an expression that may give it where an agent's name would be read as its command line or where a
     command's program goes makes the step an error of its file (`_action_scope_place`), as in a workflow's own
     step (D-144). Before, such a scope was dropped and the name read as empty, so the job was in no agent lane
@@ -1727,7 +1751,7 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
     # kept for every use that gives those the same values. The environment is kept whole: a further
     # local action may read any of it.
     key = (tuple(folders), fixed(given, None if "*" in read_names else read_names), fixed(given_env),
-           None if env_scope is None else (env_scope[0], tuple(sorted(env_scope[1]))))
+           None if env_scope is None else (env_scope[0], tuple(sorted(env_scope[1]))), env_case)
     context = (key, frozenset(seen), depth)
     for known in (key, context):
         if known in cache:
@@ -1784,8 +1808,9 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             # gives it (`T: ${{ inputs.tool }}`).
             step_env = merged.get("env") if isinstance(merged.get("env"), dict) else {}
             if step_env:
-                step_env = _put_inputs(step_env, inputs, folder, problems, {}, _ActionEnv(step_env, settled, scope_where))
-            view = _ActionEnv(step_env, settled, scope_where)
+                step_env = _put_inputs(step_env, inputs, folder, problems, {},
+                                       _ActionEnv(step_env, settled, scope_where, env_case))
+            view = _ActionEnv(step_env, settled, scope_where, env_case)
             for key_name, value in merged.items():
                 if key_name == "env":
                     put[key_name] = step_env
@@ -1842,8 +1867,15 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
                 # What a scope written as one expression may give, where an agent's name would be read or a
                 # command's program goes, may name an agent the checker cannot see (flagship slice 2d.19e): the
                 # step is an error of its file, as a workflow's own step is (D-144).
-                for text in _action_command_texts(merged, step):
-                    place = _action_scope_place(text, inputs, folder, view)
+                # The lines as the action writes them, read with this step's `env`; and the lines with the inputs put
+                # in, for an expression a value handed in holds (a workflow's `with:` or an input's default that reads
+                # `env`, found by the review), read with the caller's (GitHub works the caller's `with:` out there).
+                caller = _ActionEnv(given_env, env_scope[1], env_scope[0], env_case) if env_scope is not None else None
+                checks = [(text, inputs, view) for text in _action_command_texts(merged, step)]
+                if caller is not None:
+                    checks.extend((text, {}, caller) for text in _action_command_texts(put, step))
+                for text, given_inputs, seen_env in checks:
+                    place = _action_scope_place(text, given_inputs, folder, seen_env)
                     if place is not None:
                         where_read = ("where a command's program goes" if place[1] == "program" else
                                       "where an agent's name would be read as its command line")
@@ -1856,9 +1888,17 @@ def _agent_in_local_action(root: Path, uses: str, actions: "wf_mod.AgentActions"
             if _is_local_like(raw_uses) and "${{" in raw_uses:
                 out.unread.append((wf_mod.one_line(raw_uses, 120), "its path holds an expression"))
             elif _is_local_like(step.uses):
+                handed = step.with_
+                if view.where is not None and isinstance(merged.get("with"), dict):
+                    # The inputs it hands on keep what the scope may give, so the further action reads where it
+                    # stands (found by the review: `tool: ${{ env.AGENT }}` was handed on as empty).
+                    handed = wf_mod.Step(index=0, raw={"with": {
+                        name: _put_in(value, inputs, folder, [], view, keep_scope=True) if isinstance(value, str)
+                        else value for name, value in merged["with"].items()}}, line=0).with_
                 inner = _agent_in_local_action(root, step.uses, actions, commands, depth + 1,
-                                               seen | set(folders), cache, step.with_, step.env,
-                                               env_scope=None if view.where is None else (view.where, settled))
+                                               seen | set(folders), cache, handed, step.env,
+                                               env_scope=None if view.where is None else (view.where, settled),
+                                               env_case=env_case)
                 out.unread.extend(inner.unread)
                 out.cut = out.cut or inner.cut
                 out.agent = out.agent or inner.agent
@@ -1946,7 +1986,7 @@ def _apply_local_action_detection(workflow, root: Path | None, actions: "wf_mod.
                 labels.append(f"the `env` of the step that uses {shown}")
                 reading = _agent_in_local_action(root, step.uses, actions, commands, cache=cache, given=step.with_,
                                                  given_env=step.env, inherited_env=inherited,
-                                                 env_scope=_env_scope(scopes, labels))
+                                                 env_scope=_env_scope(scopes, labels), env_case=env_expr.env_case(job))
             except _ActionFileError as exc:
                 errors.append(f"{where} {wf_mod.one_line(str(exc), 500)}, so the checker cannot tell whether an "
                               "agent runs in it")

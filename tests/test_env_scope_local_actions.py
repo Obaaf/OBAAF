@@ -10,8 +10,7 @@ finding. Now a name no mapping nearer the step sets may be any text there too, a
 it stands where an agent's name would be read as its command line or where a command's program goes, the step is an
 error of its file, as D-144 draws the line. Elsewhere in a line it is read as empty, as before.
 
-The same reader also read `env` too narrowly where no scope is written so: a read not pinned to one name
-(`toJSON(env)`, `env[inputs.k]`) was empty, and a name gave only the last value of the names that fold to it.
+Where no scope of the chain is written as one expression, the reader reads `env` as before.
 """
 
 import unittest
@@ -71,10 +70,6 @@ def lanes(text, given):
 
 def lane(text, given):
     return lanes(text, given)[0]
-
-
-# The reason 2d.4a's reader (the first pass) gives; the second pass (2d.4b2) says "in a local action it uses".
-FIRST_PASS = f"runs an agent CLI in step 'step 1' of the local action {USES}"
 
 
 def scope_errors(text, given):
@@ -194,23 +189,94 @@ class ElsewhereInALineTest(unittest.TestCase):
 
 
 class WithoutAScopeWrittenSoTest(unittest.TestCase):
-    """2d.4a's reader read `env` more narrowly than GitHub where no scope is written as one expression. On the base
-    the second pass (2d.4b2, whose steps env_expr reads) put the job in the agent lane for all of these but
-    `env[inputs.k]`, which neither pass read; now the first pass reads each, and its reason is the one given."""
+    """Where no scope is written as one expression the reader reads `env` as before. A first version gave every value
+    for a read not pinned to one name, and a name's own value beside the last that folds to it; the review found that
+    this multiplied whole texts past what the reader reads (an agent script lost, with OBAAF-GHA-005 and 020), new
+    notes on ordinary workflows, a false agent lane through `hashFiles(env.AGENT)` and a cost 23 times the base's."""
 
-    def test_a_read_not_pinned_to_one_name_gives_every_value(self):
-        for run in ("${{ fromJSON(toJSON(env)).AGENT }} -p x", "${{ env[inputs.k] }} -p x",
-                    "${{ toJSON(env.AGENT) }} -p x"):
+    def test_ordinary_reads_of_env_are_as_on_the_base(self):
+        many = "{" + ", ".join(f"V{n}: a{n}" for n in range(20)) + "}"
+        for job, run, expected in ((many, "echo '${{ toJSON(env) }}' > env.json", "trusted"),
+                                   (many, "echo ${{ env[inputs.k] }}", "trusted"),
+                                   ("{AGENT: claude}", "${{ hashFiles(env.AGENT) }} -p x", "trusted"),
+                                   ("{AGENT: claude}", "${{ env.AGENT }} -p x", "agent")):
             with self.subTest(run=run):
-                self.assertEqual(lanes(wf(job="{AGENT: claude}"), files(step(run))), ("agent", FIRST_PASS))
+                text, given = wf(job=job), files(step(run))
+                with TempDir() as tmp:
+                    notes: list = []
+                    rows = checker.lanes(build(tmp, text, given), notes=notes, errors=[], seen=[])
+                self.assertEqual({j: l for _, j, l, _r in rows}.get("a"), expected)
+                self.assertEqual(notes, [])
 
-    def test_a_name_gives_its_own_value_as_well_as_the_last_that_folds_to_it(self):
-        """Before, `env.AGENT` gave `echo`, the last value of a name that folds to it; a Linux runner gives
-        `claude`."""
-        text, given = wf(job="{AGENT: claude}", step="{agent: echo}"), files(step("${{ env.AGENT }} -p x"))
-        self.assertEqual(lanes(text, given), ("agent", FIRST_PASS))
-        # And `env.agent` gives `echo` on any runner: not an agent.
-        self.assertEqual(lane(text, files(step("${{ env.agent }} -p x"))), "trusted")
+    def test_a_long_script_beside_toJSON_env_keeps_its_input(self):
+        """The review's case: 16 entries in the job's `env` and `toJSON(env)` in a 15 KB `run` that also names the
+        agent's script through an input."""
+        lines = [f"echo 'step {n}: doing the usual build bookkeeping here {n:04d}'" for n in range(260)]
+        run = "\n".join([*lines, "bash ./scripts/${{ inputs.script }}", "echo '${{ toJSON(env) }}' > env.json"])
+        given = {**files(step(run), inputs="  script: {default: agent.sh}\n"),
+                 "scripts/agent.sh": "#!/bin/bash\nclaude -p 'review'\n"}
+        job = "{" + ", ".join(f"V{n}: a{n}" for n in range(16)) + "}"
+        self.assertEqual(lane(wf(job=job), given), "agent")
+
+
+class TheReviewersFindingsTest(unittest.TestCase):
+    """What the first review of 2d.19e found under a scope written as one expression (2026-11-27)."""
+
+    def test_a_with_value_that_reads_env_handed_to_a_further_action(self):
+        inner = {".github/actions/inner/action.yml":
+                 "name: i\ninputs:\n  tool: {default: echo}\nruns:\n  using: composite\n  steps:\n"
+                 "    - run: ${{ inputs.tool }} -p x\n      shell: bash\n"}
+        for handed, own in (("${{ env.AGENT }}", ""), ("${{ format('{0}', env.AGENT) }}", ""),
+                            ("${{ env.AGENT }}", f"\n      env: {JOB}")):
+            with self.subTest(handed=handed, own=own):
+                given = {f"{ACTION_DIR}/action.yml": composite(
+                    f"    - uses: ./.github/actions/inner\n      with:\n        tool: {handed}{own}\n"), **inner}
+                (error,) = scope_errors(wf(job=JOB), given)
+                self.assertIn("in step 1 of the local action ./.github/actions/inner", error)
+
+    def test_a_workflows_with_value_that_reads_env(self):
+        command = files(step("${{ inputs.command }}"), inputs="  command: {required: true}\n")
+        tool = files(step("${{ inputs.tool }} -p x"), inputs="  tool: {default: echo}\n")
+        for scopes, with_, given in (({"job": JOB}, "{command: '${{ env.AGENT }} -p review'}", command),
+                                     ({"job": JOB}, "{tool: '${{ env.AGENT }}'}", tool),
+                                     ({"step": JOB}, "{tool: '${{ env.AGENT }}'}", tool)):
+            with self.subTest(scopes=scopes, with_=with_):
+                self.assertEqual(len(scope_errors(wf(with_=with_, **scopes), given)), 1)
+        # Without a scope the value is read from the job's `env`, as before.
+        self.assertEqual(lane(wf(job="{AGENT: claude}", with_="{command: '${{ env.AGENT }} -p review'}"), command),
+                         "agent")
+
+    def test_an_inputs_default_that_reads_env(self):
+        given = files(step("${{ inputs.tool }} -p x"), inputs="  tool: {default: '${{ env.AGENT }}'}\n")
+        self.assertEqual(len(scope_errors(wf(job=JOB), given)), 1)
+
+    def test_format_combines_what_the_scope_may_give_first(self):
+        literals = " || ".join(["'-p'"] + [f"'b{n}'" for n in range(2, 17)])
+        run = f"${{{{ format('{{0}} {{1}}', env.Z == 'x' || env.AGENT, {literals}) }}}} review"
+        self.assertEqual(len(scope_errors(wf(job=JOB), files(step(run)))), 1)
+
+    def test_nested_more_deeply_than_the_reader_follows(self):
+        run = "${{ " + "(env.Z == 'q' || " * 10 + "env.AGENT" + ")" * 10 + " }} -p x"
+        self.assertEqual(len(scope_errors(wf(job=JOB), files(step(run)))), 1)
+        # Not reading `env`, it is named as not read, as before.
+        run = "${{ " + "(inputs.z == 'q' || " * 10 + "inputs.a" + ")" * 10 + " }} -p x"
+        self.assertEqual(scope_errors(wf(job=JOB), files(step(run))), [])
+
+    def test_the_runners_comparison_of_names(self):
+        """On a known Windows runner a name in another letter case settles it; a name outside ASCII never does
+        there, as `env_expr.Env` reads a workflow's own step."""
+        def text(runs_on, step_env):
+            return wf(job=JOB, step=step_env).replace("runs-on: ubuntu-24.04", f"runs-on: {runs_on}")
+        for runs_on, step_env, run, errors in (("windows-latest", "{Agent: echo}", "${{ env.AGENT }} -p x", 0),
+                                               ("ubuntu-24.04", "{Agent: echo}", "${{ env.AGENT }} -p x", 1),
+                                               ("windows-latest", "{ÄGENT: echo}", "${{ env['ÄGENT'] }} -p x", 1),
+                                               ("ubuntu-24.04", "{ÄGENT: echo}", "${{ env['ÄGENT'] }} -p x", 0)):
+            with self.subTest(runs_on=runs_on, step_env=step_env):
+                self.assertEqual(len(scope_errors(text(runs_on, step_env), files(step(run)))), errors)
+
+    def test_hashFiles_gives_a_hash(self):
+        run = "docker run --name ${{ hashFiles(env.F) }} -p 8080:80 img"
+        self.assertEqual(scope_errors(wf(job=JOB), files(step(run))), [])
 
 
 if __name__ == "__main__":
