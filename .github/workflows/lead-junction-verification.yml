@@ -1,0 +1,44 @@
+name: Verify init aliases and patch export on Windows
+on:
+  push:
+    branches: [lead/verify-321-d36f4fd]
+permissions:
+  contents: read
+jobs:
+  native-windows:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: d36f4fda24195506fca1302f5300c1f5758e88e7
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Install the checker and run the Windows regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse 'HEAD^{tree}') -ne '31c0f6c42219cadc3f904f2ac3a54c4421e53b27') { throw 'Unexpected source tree' }
+          $scratch = Join-Path $env:RUNNER_TEMP 'obaaf-junction'
+          New-Item -Type Directory -Path $scratch | Out-Null
+          $env:TMPDIR = $scratch
+          $env:TEMP = $scratch
+          $env:TMP = $scratch
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+          if ($LASTEXITCODE -ne 0) { throw 'Installation failed' }
+          @'
+          import os, sys, tempfile, unittest
+          from pathlib import Path
+
+          root = Path(tempfile.gettempdir()).resolve()
+          assert root == Path(os.environ['TMPDIR']).resolve()
+          assert not any((p / '.git').exists() for p in (root, *root.parents))
+          assert os.name == 'nt'
+          sys.path.insert(0, 'tests')
+          case = 'test_fix_patch.FixPatchTest.test_windows_refuses_reparse_before_creating_patch'
+          result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames([case, 'test_init.InitTests.test_alias_of_supported_config_is_accepted', 'test_init.InitTests.test_lookalikes_report_the_default_checker_error_without_writing']))
+          sys.exit(0 if result.testsRun == 3 and result.wasSuccessful() and not result.skipped else 1)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Native junction verification failed or skipped' }
