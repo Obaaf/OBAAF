@@ -2501,8 +2501,10 @@ def _caller_inputs(outer: dict, given: dict, inputs: dict, top: "wf_mod.Step", n
             key = (value, case, tuple(id(scope) for scope in scopes))
             if key not in worked:
                 if table is None:
+                    # One table, and one look at the names, for the step (found by the second review).
                     table = env_expr.Env(scopes, case) if not any(
-                        scope is not None and not isinstance(scope, dict) for scope in scopes) else False
+                        scope is not None and not isinstance(scope, dict) for scope in scopes) and not \
+                        rules_mod.expression_keys(scopes, state["check"].setdefault("expression_keys", {})) else False
                 made = _worked_by_caller(value, scopes, case, table) if table is not False else None
                 worked[key] = (made, scopes)
             made = worked[key][0]

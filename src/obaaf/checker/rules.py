@@ -281,17 +281,36 @@ def env_expressions_only_env(text: str) -> bool:
     return True
 
 
-def env_values_known(scopes: list, case: str, names, env: "env_expr.Env | None" = None) -> bool:
+def expression_keys(scopes: list, seen: dict | None = None) -> bool:
+    """Whether a name of one of the `env` mappings `scopes` holds `${{` (flagship slice 2d.19f, from its review: the
+    runner may work out an expression in an `env` key, which may then name any variable). Each mapping is read once
+    for `seen`, by its identity, which keeps it (found by the second review: read again for every input of every
+    step that uses an action, the names of a 3,000-entry `env` took 3.3 times the base)."""
+    found = False
+    for scope in scopes:
+        if not isinstance(scope, dict):
+            continue
+        if seen is not None and id(scope) in seen:
+            holds = seen[id(scope)][0]
+        else:
+            holds = any(isinstance(key, str) and expr_mod.OPEN in key for key in scope)
+            if seen is not None:
+                seen[id(scope)] = (holds, scope)
+        found = found or holds
+    return found
+
+
+def env_values_known(scopes: list, case: str, names, env: "env_expr.Env | None" = None,
+                     seen: dict | None = None) -> bool:
     """Whether each of `names` (`env_expr.names_read`) is set, to text holding no `${{`, in the `env` mappings
     `scopes` (outermost first) under the runner's comparison of names `case` (#387), none of them is written as
     one expression (D-143; since slice 2d.19d a name a nearer mapping sets is known to the lanes beside such a scope,
-    but here the rule stays as D-143 wrote it), and no name of theirs holds `${{` (flagship slice 2d.19f, from its
-    review: the runner may work out an expression in an `env` key, which may then name any variable). `env` is the
-    table of `scopes`, where the caller has made it."""
+    but here the rule stays as D-143 wrote it), and no name of theirs holds `${{` (`expression_keys`, flagship slice
+    2d.19f). `env` is the table of `scopes` where the caller has made it, and then has also found that no name holds
+    `${{`; `seen` is `expression_keys`'s record."""
     if not names or any(scope is not None and not isinstance(scope, dict) for scope in scopes):
         return False
-    if any(isinstance(key, str) and expr_mod.OPEN in key for scope in scopes if isinstance(scope, dict)
-           for key in scope):
+    if env is None and expression_keys(scopes, seen):
         return False
     env = env_expr.Env(scopes, case) if env is None else env
     for name in names:
@@ -2497,8 +2516,9 @@ class WorkflowRules:
         if not self._no_env_writer_before(job, step):
             return False
         try:
-            return env_expressions_only_env(text) and env_values_known(step._env_scopes(), env_expr.env_case(step.job),
-                                                                       env_expr.names_read(text))
+            return env_expressions_only_env(text) and env_values_known(
+                step._env_scopes(), env_expr.env_case(step.job), env_expr.names_read(text),
+                seen=self.__dict__.setdefault("_expression_keys", {}))
         except (RecursionError, ValueError, env_expr.Unread, expr_mod.TooComplex):
             return False
 
