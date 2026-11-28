@@ -1,130 +1,64 @@
-name: Check isolated native Git patch fixtures
+name: Measure the existing local-action performance test for issue 227
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
 permissions:
   contents: read
 jobs:
-  acceptance:
+  compare:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 5554d5cb1d16ad98c8d66c02ed373fa04e559e37
+          ref: d297c7bbdf43e8e9e7459c835586d761b66381ba
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
-          python-version: '3.13'
-      - name: Check that only the patch test changed
-        id: resolve
+          python-version: '3.10'
+      - name: Compare the same test and its local-action pass on one runner
         run: |
-          test "$(git diff --name-only 67f84e5231146b2ff312b64f0c8021d7e2f544ec HEAD)" = tests/test_fix_patch.py
-          git diff --check 67f84e5231146b2ff312b64f0c8021d7e2f544ec HEAD
-      - name: Compare four report formats on both adopters
-        run: |
-          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          export TMPDIR="$RUNNER_TEMP" PYTHONDONTWRITEBYTECODE=1
           if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          git worktree add -q --detach "$RUNNER_TEMP/flagship" 67f84e5231146b2ff312b64f0c8021d7e2f544ec
-          git worktree add -q --detach "$RUNNER_TEMP/previous-adoption" 67f84e5231146b2ff312b64f0c8021d7e2f544ec
-          git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
-          git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
           python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
-          python - <<'PY'
-          import os, subprocess, sys
-          from pathlib import Path
-          root = Path(os.environ["RUNNER_TEMP"])
-          settings = root / "flagship"
-          sites = [
-              ("OBAAF", settings, settings / ".github/obaaf-settings.json", "medium", 0),
-              ("Expectrail", root / "expectrail", settings / "tests/fixtures/settings/live-expectrail-2026-11-13/snapshot.json", "low", 1),
-          ]
-          for label, before, after in [("Combined checker", root / "previous-adoption", Path.cwd())]:
-              for name, site, snapshot, threshold, expected in sites:
-                  for mode in ("text", "json", "sarif", "summary"):
-                      command = [sys.executable, "-m", "obaaf", "check", ".", "--settings", str(snapshot),
-                                 "--baseline", ".github/obaaf-baseline.json", "--fail-on", threshold]
-                      command.extend(["--summary"] if mode=="summary" else ["--format", mode])
-                      if name=="Expectrail":
-                          command.append("--no-fixes")
-                      outputs = []
-                      for source in (before, after):
-                          env = dict(os.environ, PYTHONPATH=str(source/"src"), PYTHONDONTWRITEBYTECODE="1")
-                          result = subprocess.run(command, cwd=site, env=env, capture_output=True)
-                          assert result.returncode==expected, (name, mode, result.stderr[-300:])
-                          assert b"git did not list the tracked files" not in result.stdout
-                          outputs.append((result.stdout, result.stderr, result.returncode))
-                      assert outputs[0]==outputs[1], (label,name,mode)
-                      print(label, name, mode, "matched", expected, flush=True)
-          PY
-      - name: Run the full acceptance suite
-        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
-        run: |
-          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
-          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          python -m unittest discover -s tests -v
-
-  replay:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 5554d5cb1d16ad98c8d66c02ed373fa04e559e37
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
-        with:
-          python-version: '3.13'
-      - name: Exercise user Git settings and independent line-ending subtests
-        shell: python
-        run: |
-          import os
-          from pathlib import Path
-          import subprocess
+          git worktree add -q --detach "$TMPDIR/prior" 55661337e24248ac7d2346e6ab9cb0069261dffa
+          git worktree add -q --detach "$TMPDIR/draft" 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e
+          git diff --exit-code 55661337e24248ac7d2346e6ab9cb0069261dffa d297c7bbdf43e8e9e7459c835586d761b66381ba -- src tests
+          cat > "$TMPDIR/measure.py" <<'PY'
           import sys
-          import tempfile
+          import time
           import unittest
+          from pathlib import Path
+          from unittest.mock import patch
 
           root = Path.cwd()
-          scratch = Path(os.environ["RUNNER_TEMP"])
-          assert subprocess.run(["git", "-C", str(scratch), "rev-parse", "--git-dir"], capture_output=True).returncode != 0
-          os.environ["TMPDIR"] = os.environ["TEMP"] = os.environ["TMP"] = str(scratch)
-          assert Path(tempfile.gettempdir()).resolve() == scratch.resolve()
-          os.environ["PYTHONPATH"] = os.pathsep.join(str(root / folder) for folder in ["src", "tests"])
-          subprocess.run([sys.executable, "-m", "pip", "install", "--constraint",
-                          "actions/setup-obaaf/constraints.txt", "-e", ".[keys]"], check=True)
-          with tempfile.TemporaryDirectory() as fixture:
-              config = Path(fixture) / "developer.gitconfig"
-              attrs = Path(fixture) / "developer.attributes"
-              subprocess.run(["git", "config", "--file", str(config), "core.attributesFile", attrs.as_posix()], check=True)
-              os.environ.update(GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_COUNT="1",
-                                GIT_CONFIG_KEY_0="core.autocrlf", GIT_CONFIG_VALUE_0="true")
-              for setting in ["* text eol=crlf", "* text=auto"]:
-                  attrs.write_text(setting + "\n", encoding="utf-8")
-                  subprocess.run(["git", "config", "--file", str(config), "core.eol", "crlf"], check=True)
-                  subprocess.run([sys.executable, "-m", "unittest", "test_fix_patch", "-v"], check=True)
-              sys.path[:0] = [str(root / "src"), str(root / "tests")]
-              from test_fix_patch import FixPatchTest
-              class OneFailure(FixPatchTest):
-                  checks = 0
-                  def assertIn(self, member, container, msg=None):
-                      if member == "You are accepting risk (1 finding)":
-                          self.checks += 1
-                          if self.checks == 1:
-                              self.fail("intentional first-case failure")
-                      super().assertIn(member, container, msg)
-              case = OneFailure("test_git_checks_and_applies_exact_bytes")
-              result = unittest.TestResult()
-              case.run(result)
-              assert case.checks == 4, case.checks
-              assert len(result.failures) == 1 and not result.errors, (result.failures, result.errors)
-              assert "intentional first-case failure" in result.failures[0][1]
-              assert os.environ["GIT_CONFIG_GLOBAL"] == str(config)
-              assert os.environ["GIT_CONFIG_COUNT"] == "1"
-              print("Four cases ran, with only the injected failure. Developer environment restored.")
+          sys.path[:0] = [str(root / "src"), str(root / "tests")]
+          from obaaf.checker.rules import WorkflowRules
+          from test_local_composite_actions import TheReviewersSixthPassTest
+
+          second_pass = 0.0
+          original_pass = WorkflowRules.through_local_actions
+          def timed_pass(self):
+              global second_pass
+              start = time.monotonic()
+              try:
+                  return original_pass(self)
+              finally:
+                  second_pass += time.monotonic() - start
+
+          class MeasuredCase(TheReviewersSixthPassTest):
+              def assertLess(self, first, second, msg=None):
+                  print(f"MEASURE {sys.argv[1]} total={first:.3f} local_action_pass={second_pass:.3f} limit={second}", flush=True)
+                  super().assertLess(first, second, msg)
+
+          with patch.object(WorkflowRules, "through_local_actions", timed_pass):
+              case = MeasuredCase("test_a_large_repository_with_realistic_actions_passes")
+              result = unittest.TextTestRunner(verbosity=2).run(case)
+          sys.exit(int(not result.wasSuccessful()))
+          PY
+          failed=0
+          for source in "$TMPDIR/prior" "$GITHUB_WORKSPACE" "$TMPDIR/draft" "$TMPDIR/draft" "$GITHUB_WORKSPACE" "$TMPDIR/prior"; do
+            (cd "$source" && python "$TMPDIR/measure.py" "$(git rev-parse --short HEAD)") || failed=1
+          done
+          exit "$failed"
