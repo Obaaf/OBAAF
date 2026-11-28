@@ -1,4 +1,4 @@
-name: Verify the corrected performance draft with the launch walkthrough
+name: Check the revised draft and walkthrough after the second review
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
@@ -32,7 +32,7 @@ jobs:
           git worktree add -q --detach "$RUNNER_TEMP/previous-adoption" 21d730dba5ac5fbe83199b1f444ad4eb4bdb250e
           git -C "$RUNNER_TEMP/previous-adoption" apply --3way --index "$RUNNER_TEMP/walkthrough.patch"
           test "$(git -C "$RUNNER_TEMP/previous-adoption" write-tree)" = 97829a0dd3fbf9c66c50c928b58efe2482c11c96
-          git merge --no-ff --no-commit 43990e6c068d6638d98e02ae6d8c36a2ce1cb481
+          git merge --no-ff --no-commit 8ce906ba9138c9f2162b5cf9adac08b36d86de85
           git diff --cached --check
           echo "Adoption tree $(git write-tree)"
           git commit --no-edit
