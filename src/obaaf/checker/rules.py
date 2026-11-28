@@ -31,7 +31,7 @@ from obaaf.checker import shell_env
 from obaaf.checker.workflow import (
     COMMIT_SHA_RE, FULL_SHA_RE, IMAGE_DIGEST_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION, AgentActions, leaves_repository,
-    UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup, image_outputs_push, through_matrix,
+    UNTRUSTED_FIELDS_RE, UNTRUSTED_PATHS, UNTRUSTED_TRIGGERS, Job, PrCode, Step, Workflow, as_text, env_lookup, printed, image_outputs_push, through_matrix,
     bounded, digest_of, environment_match, expressions, input_name, matches_any, one_line, pr_code, pr_fetch, runs_after_failure,
     LANE_ORDER, TRUSTED_NOTE, UNKNOWN_EXPRESSION, PutInBudget, _inferred_lanes, _script_tokens, _sub_expressions, binding_commands, is_hosted_label, is_local_reference, scalar_environment_match, shown_value, upload_readings, value_identity,
 )
@@ -186,9 +186,9 @@ def compose(rule: str, kind: str, template: str, job: str | None, step: str | No
             items = [str(v) for v in value]
             facts[name], shown[name] = items, ", ".join(items)
         elif isinstance(value, (bool, int)):
-            facts[name], shown[name] = value, str(value)
+            facts[name], shown[name] = value, as_text(value)
         else:
-            facts[name] = shown[name] = str(value)
+            facts[name] = shown[name] = printed(value)
     return template.format(**shown), facts
 
 
@@ -1386,8 +1386,8 @@ class WorkflowRules:
         message, facts = compose(rule, kind, template, job_id, step_name, values)
         if legacy:
             legacy = legacy.format(job=job_id or "", step=step_name or "", **{
-                name: (value.shown if isinstance(value, Fact) else ", ".join(str(v) for v in value)
-                       if isinstance(value, (list, tuple, set, frozenset)) else str(value))
+                name: (value.shown if isinstance(value, Fact) else ", ".join(printed(v) for v in value)
+                       if isinstance(value, (list, tuple, set, frozenset)) else printed(value))
                 for name, value in values.items()})
         self.findings.append(Finding(
             rule=rule,
@@ -2123,7 +2123,7 @@ class WorkflowRules:
                 for name in names:
                     given = step.with_.get(str(name).lower())     # `with_` folds input names to lower case
                     if given is not None:
-                        texts.append(str(given))
+                        texts.append(as_text(given))
         if not step.confines and self._spelled_egress(step) and step.with_.get("run") is not None:
             texts.append(str(step.with_.get("run")))
         if step.run:
@@ -2132,7 +2132,7 @@ class WorkflowRules:
                     raw.get("run", {}).get("shell") if isinstance(raw, dict) and isinstance(raw.get("run"), dict)
                     else None)
                 if shell is not None:
-                    texts.append(str(shell))
+                    texts.append(as_text(shell))
                     break
         return [text for text in texts if text]
 
@@ -2860,9 +2860,9 @@ class WorkflowRules:
                 for key in ("entrypoint", "args"):
                     given = step.with_.get(key)
                     if isinstance(given, list):
-                        parts += [str(x) for x in given if isinstance(x, (str, int, float))]
+                        parts += [as_text(x) for x in given if isinstance(x, (str, int, float))]
                     elif isinstance(given, (str, int, float)) and given != "":
-                        parts.append(str(given))
+                        parts.append(as_text(given))
                 texts.append(" ".join(parts))
             texts = [t for t in texts if t]
             if not texts:
@@ -4221,7 +4221,7 @@ class WorkflowRules:
                 for n, sub in enumerate(value):
                     walk(f"{label}[{n}]", sub)
             elif value is not None:
-                if refers(str(value)):
+                if refers(as_text(value)):
                     where.append(label)
         walk("", step.raw)
         return where
@@ -4615,7 +4615,7 @@ class WorkflowRules:
         # load what the command wrote, and the checker cannot tell reading from running. Steps before it are read for what their post
         # steps or the processes they leave running could reach: the outputs, the scratch directory by
         # its name, or /tmp.
-        ids = {str(step.raw.get("id")).lower() for step in confined if step.raw.get("id") is not None}
+        ids = {as_text(step.raw.get("id")).lower() for step in confined if step.raw.get("id") is not None}
         defaults = job.raw.get("defaults")
         if defaults is not None and self._reads_output(Step(index=-1, raw={"defaults": defaults}, line=0), ids):
             unsure.append("the job's defaults name /tmp or the confined command's output, and the checker cannot "
@@ -4741,10 +4741,10 @@ class WorkflowRules:
                                   "(src/setup.ts at v2.16.0 returns at once)")
             store = given.get("policy")
             if (isinstance(store, str) and store.strip()) or (store is not None and not isinstance(store, str)) \
-                    or str(given.get("use-policy-store", "")).strip().lower() not in ("", "false"):
+                    or as_text(given.get("use-policy-store", "")).strip().lower() not in ("", "false"):
                 unsure.append("its policy comes from StepSecurity's policy store, which the checker cannot read, and "
                               "it falls back to audit mode on some errors in fetching it")
-            if str(given.get("deploy-on-self-hosted-vm", "")).strip().lower() not in ("", "false") \
+            if as_text(given.get("deploy-on-self-hosted-vm", "")).strip().lower() not in ("", "false") \
                     or job.runner_kind != "github-hosted":
                 unsure.append(f"the job runs on a {job.runner_kind} runner, where how it works was not read")
             unsure.append("whether the repository is public, or covered by a paid tier (the free tier does not "
@@ -5227,8 +5227,8 @@ class WorkflowRules:
                               "ACTIONS_ALLOW_UNSECURE_COMMANDS, and "
                               "ACTIONS_ALLOW_UNSECURE_COMMANDS lets any line it prints set a variable for the steps "
                               "after it")
-            if self._SETS_FOR_LATER_RE.search(text + " " + str(step.raw.get("env", "")) + " "
-                                              + str(step.raw.get("with", ""))):
+            if self._SETS_FOR_LATER_RE.search(text + " " + printed(step.raw.get("env", "")) + " "
+                                              + printed(step.raw.get("with", ""))):
                 unsure.append(f"{where}, before or beside the step that holds the key, writes to GITHUB_ENV, which "
                               "can set variables for the steps after it, the action's own included, and the "
                               "checker does not read which: one may be ACTIONS_ALLOW_UNSECURE_COMMANDS, which lets "
@@ -5892,12 +5892,12 @@ class WorkflowRules:
                 seen.add(id(node))
                 if isinstance(node, dict):
                     for key, item in node.items():
-                        out.append(str(key))
+                        out.append(as_text(key))
                         stack.append(item)
                 else:
                     stack.extend(node)
             elif node is not None:
-                out.append(str(node))
+                out.append(as_text(node))
         return "\n".join(out)
 
     def _job_sets_later_steps(self, job: Job) -> bool:

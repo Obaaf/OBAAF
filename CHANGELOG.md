@@ -4,6 +4,21 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### A number too long for Python to print no longer ends a check in a traceback
+
+Slice 2d.29, #425. YAML reads `0x` and thousands of hex digits as one integer, and Python refuses to print an integer of more than 4,300 decimal digits. `obaaf check` and `--lanes` ended in a `ValueError` traceback where such a number stood in these places:
+
+- a github-script `script:`;
+- a step's `shell:` or a default one;
+- a job's `if:` or `needs:`;
+- an action input read as code, or a `docker://` step's arguments;
+- the egress action's step `id`;
+- a harden-runner input;
+- the `env` or `with` of a step before a key the egress action holds;
+- an `env` value that a `${{ env.N }}` expression reads.
+
+Each place now reads the number as `as_text` already gave it elsewhere, in hexadecimal. A value that holds one (`printed`) prints the same way. Readers that already treat such a number as a value they do not know are unchanged. Every other value reads as before, so nothing else a check reports changes; on this repository and on the first adopter the reports are byte-identical with `flagship` `1115f20`.
+
 ### A check of many jobs that share a local action is about three times faster
 
 Slice 2d.28, #227. Nothing a check reports changes: no finding, note, error or exit status. The second pass over local composite actions (slice 2d.4b2) reads an action's steps again for every job that uses it, and several readers asked the same question of the same text each time:
