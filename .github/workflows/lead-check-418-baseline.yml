@@ -1,42 +1,83 @@
-name: Verify the portable patch on current flagship
+name: Verify the patch replay guide for adopters
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
 permissions:
   contents: read
 jobs:
-  windows-patch:
-    runs-on: windows-latest
-    timeout-minutes: 10
+  full-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
           fetch-depth: 0
-          ref: 155a0020bfd8ce1c0580692887c0fb393f7c2cbd
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.13'
-      - name: Check the merge and inherited line-ending settings
-        shell: bash
+      - name: Run acceptance on the submitted documentation head
         run: |
-          export TMPDIR="$RUNNER_TEMP" TMP="$RUNNER_TEMP" TEMP="$RUNNER_TEMP" PYTHONPATH=tests PYTHONDONTWRITEBYTECODE=1
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
           if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
-          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.autocrlf GIT_CONFIG_VALUE_0=true
-          case_name=test_fix_patch.FixPatchReviewTest.test_outside_a_work_tree_the_patch_is_written
-          if python -m unittest "$case_name" > "$TMPDIR/before.log" 2>&1; then exit 1; fi
-          grep -F "AssertionError: b'b\r\n' != b'b\n'" "$TMPDIR/before.log"
-          unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+          python -m unittest discover -s tests -v
+  adopter-and-guide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Compare the submitted change on OBAAF and read-only Expectrail
+        run: |
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          git worktree add -q --detach "$RUNNER_TEMP/flagship" b4985c76b8305b9463a61177a6a8904e62f1a486
+          git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+          python - <<'PY'
+          import os, subprocess, sys
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"])
+          settings = root / "flagship"
+          sites = [
+              ("OBAAF", settings, settings / ".github/obaaf-settings.json", "medium", 0),
+              ("Expectrail", root / "expectrail", settings / "tests/fixtures/settings/live-expectrail-2026-11-13/snapshot.json", "low", 1),
+          ]
+          for label, before, after in [("#422", settings, Path.cwd())]:
+              for name, site, snapshot, threshold, expected in sites:
+                  for mode in ("text", "json", "sarif", "summary"):
+                      command = [sys.executable, "-m", "obaaf", "check", ".", "--settings", str(snapshot),
+                                 "--baseline", ".github/obaaf-baseline.json", "--fail-on", threshold]
+                      command.extend(["--summary"] if mode=="summary" else ["--format", mode])
+                      if name=="Expectrail":
+                          command.append("--no-fixes")
+                      outputs = []
+                      for source in (before, after):
+                          env = dict(os.environ, PYTHONPATH=str(source/"src"), PYTHONDONTWRITEBYTECODE="1")
+                          result = subprocess.run(command, cwd=site, env=env, capture_output=True)
+                          assert result.returncode==expected, (name, mode, result.stderr[-300:])
+                          assert b"git did not list the tracked files" not in result.stdout
+                          outputs.append((result.stdout, result.stderr, result.returncode))
+                      assert outputs[0]==outputs[1], (label,name,mode)
+                      print(label, name, mode, "matched", expected, flush=True)
+          PY
+      - name: Check the integrated guides with the two adoption drafts
+        run: |
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          git checkout -q --detach e49616ec3b1abe58e73273c852f2073e3dcb9f30
           git config user.name 'Sean Keluo-Udeke'
           git config user.email '55066947+seanudeke@users.noreply.github.com'
-          pr_head=c79b863d219d53e2c65f216d80c2e3b043781c86
-          git merge --no-ff --no-commit "$pr_head"
-          test "$(git diff --cached --name-only HEAD)" = tests/test_fix_patch.py
-          test "$(git rev-parse :tests/test_fix_patch.py)" = "$(git rev-parse "$pr_head:tests/test_fix_patch.py")"
+          git merge --no-ff --no-commit 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
           git write-tree
-          for setting in true false input; do
-            echo "Checking inherited core.autocrlf=$setting"
-            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.autocrlf GIT_CONFIG_VALUE_0="$setting" python -m unittest -v "$case_name"
-          done
-          python -m unittest -v test_fix_patch
+          python -m obaaf docs build --check
+          python -m unittest -v test_docs test_first_run test_templates_install_docs test_todo_upgrade
