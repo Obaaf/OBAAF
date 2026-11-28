@@ -1,0 +1,48 @@
+name: Check two pinned installations on a disposable Jenkins controller
+on:
+  push:
+    branches: [lead/jenkins-install-7231556749]
+permissions:
+  contents: read
+jobs:
+  controller:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Run a disposable controller and exclusive agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          export PROBE_ROOT
+          PROBE_ROOT=$(mktemp -d "$RUNNER_TEMP/controller-344.XXXXXX")
+          export TMPDIR="$PROBE_ROOT/tmp"
+          mkdir "$TMPDIR"
+          if git -C "$TMPDIR" rev-parse --git-dir >/dev/null 2>&1; then exit 1; fi
+          export JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=$TMPDIR -Djava.awt.headless=true"
+          probe="$GITHUB_WORKSPACE/.github/lead-checks/controller344"
+          cp "$probe/verify-stage.sh" "$PROBE_ROOT/"
+          python3 -m venv "$PROBE_ROOT/fixture-env"
+          python="$PROBE_ROOT/fixture-env/bin/python"
+          "$python" -m pip install --require-hashes --only-binary=:all: -r actions/setup-obaaf/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/tests" "$python" "$probe/fixture.py"
+          plugin="$PROBE_ROOT/model-definition"
+          git init -q "$plugin"
+          git -C "$plugin" fetch -q --depth=1 https://github.com/jenkinsci/pipeline-model-definition-plugin.git 6e7193cec599b402ee79ee9afc5b8a417eb43967
+          git -C "$plugin" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$plugin" rev-parse HEAD)" = 6e7193cec599b402ee79ee9afc5b8a417eb43967
+          cd "$plugin"
+          cp "$probe/ObaafInstallControllerTest.java" pipeline-model-definition/src/test/java/org/jenkinsci/plugins/pipeline/modeldefinition/actions/
+          mvn -B -ntp -pl pipeline-model-definition -am -Dtest=ObaafInstallControllerTest -Dsurefire.failIfNoSpecifiedTests=false -Dspotless.skip=true -Dspotbugs.skip=true -Dcheckstyle.skip=true -DskipITs package >"$PROBE_ROOT/maven.log" 2>&1 || { tail -150 "$PROBE_ROOT/maven.log"; exit 1; }
+          grep 'OBAAF controller verified both installations' "$PROBE_ROOT/maven.log"
+          python3 - <<'PY'
+          from pathlib import Path
+          from xml.etree import ElementTree
+          path = next(Path('pipeline-model-definition/target/surefire-reports').glob('TEST-*ObaafInstallControllerTest.xml'))
+          suite = ElementTree.parse(path).getroot()
+          assert suite.get('tests') == '1' and all(suite.get(k) == '0' for k in ('errors', 'failures', 'skipped'))
+          PY
