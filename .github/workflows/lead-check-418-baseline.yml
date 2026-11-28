@@ -1,4 +1,4 @@
-name: Measure lane inference within composite-action expansion
+name: Compare the 400-job fixture before and after draft 426
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
@@ -12,6 +12,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: 169af18424247a21656e41f18d9f72be97c25965
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
@@ -21,6 +22,8 @@ jobs:
           export TMPDIR="$RUNNER_TEMP" PYTHONDONTWRITEBYTECODE=1
           if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
           python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+          git worktree add -q --detach "$RUNNER_TEMP/obaaf-426-base" 67f84e5231146b2ff312b64f0c8021d7e2f544ec
+          git diff --exit-code 67f84e5231146b2ff312b64f0c8021d7e2f544ec HEAD -- tests/test_local_composite_actions.py
           cat > "$TMPDIR/measure.py" <<'PY'
           import ast
           import inspect
@@ -81,7 +84,7 @@ jobs:
           sys.exit(int(not result.wasSuccessful()))
           PY
           failed=0
-          for mode in measured-1 baseline measured-2; do
-            python "$TMPDIR/measure.py" "$mode" || failed=1
+          for checkout in "$RUNNER_TEMP/obaaf-426-base" "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" "$RUNNER_TEMP/obaaf-426-base"; do
+            (cd "$checkout" && python "$TMPDIR/measure.py" "$(git rev-parse --short HEAD)") || failed=1
           done
           exit "$failed"
