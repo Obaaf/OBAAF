@@ -70,3 +70,18 @@ jobs:
     steps:
       - run: 'Add-Content $env:GITHUB_ENV "X=1"'
       - run: '& ./scripts/eval.ps1 -Provider $env:PROVIDER'
+  # From the third review of 2d.25: an assignment of prose is no command.
+  pwsh-assigned-prose:
+    runs-on: ubuntu-latest
+    env: {BOT: aider}
+    steps:
+      - shell: pwsh
+        run: '$msg = "Reviewed by $env:BOT for you"; Write-Host $msg'
+  cmd-assigned-prose:
+    runs-on: windows-latest
+    env: {BOT: aider}
+    steps:
+      - shell: cmd
+        run: |
+          set MSG=Reviewed by %BOT% for you
+          echo %MSG%

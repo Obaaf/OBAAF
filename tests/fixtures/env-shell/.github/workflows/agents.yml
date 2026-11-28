@@ -133,3 +133,43 @@ jobs:
           set AGENT=claude
           exit /b
         env: {AGENT: echo}
+  # From the third review of 2d.25: a value left out, run in a place the reader reads but no list names.
+  pwsh-typed-copy-after-github-env:
+    runs-on: windows-latest
+    env: {AGENT: claude}
+    steps:
+      - run: '"X=1" >> $env:GITHUB_ENV'
+      - run: |
+          [string]$a = $env:AGENT
+          & $a --dangerously-skip-permissions -p x
+  pwsh-foreach-after-github-env:
+    runs-on: windows-latest
+    env: {AGENT: claude}
+    steps:
+      - run: '"X=1" >> $env:GITHUB_ENV'
+      - run: 'foreach ($t in $env:AGENT) { & $t --dangerously-skip-permissions -p x }'
+  cmd-if-exist-after-github-env:
+    runs-on: windows-latest
+    env: {AGENT: claude}
+    steps:
+      - shell: cmd
+        run: 'echo X=1>> %GITHUB_ENV%'
+      - shell: cmd
+        run: 'if exist "C:\Program Files\x" %AGENT% --dangerously-skip-permissions -p x'
+  pwsh-set-by-an-unlisted-setter:
+    runs-on: windows-latest
+    steps:
+      - run: |
+          $t = [type]('System.Envir'+'onment')
+          $t::SetEnvironmentVariable('AGENT','claude')
+          & $env:AGENT --dangerously-skip-permissions -p x
+        env: {AGENT: echo}
+  cmd-set-p-without-a-space:
+    runs-on: windows-latest
+    steps:
+      - shell: cmd
+        run: |
+          echo claude> a.txt
+          set/p AGENT=<a.txt
+          %AGENT% --dangerously-skip-permissions -p x
+        env: {AGENT: echo}

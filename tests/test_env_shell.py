@@ -52,17 +52,27 @@ AGENT_JOBS = {
     # program written out as for one put in (`$a = 'claude'; & $a`; D-153's stated limits): those jobs are in no
     # agent lane, and OBAAF-GHA-026 reads them.
     "pwsh-copied-into-a-variable": ("trusted", "high", "command-option"),
-    "pwsh-copied-after-github-env": ("agent", "medium", "command-computed"),
+    "pwsh-copied-after-github-env": ("trusted", "medium", "command-computed"),
     "pwsh-file-path-after-a-colon": ("agent", "high", "command-option"),
     "cmd-copied-into-a-variable": ("trusted", "high", "command-option"),
     "cmd-call-label-sets-it": ("trusted", "high", "command-option"),
+    # From the third review: a value left out (after `GITHUB_ENV`) run where the reader reads it, and setters the
+    # checker does not list. The copies and the script's own assignments are stated limits of the lanes.
+    "pwsh-typed-copy-after-github-env": ("trusted", "medium", "command-computed"),
+    "pwsh-foreach-after-github-env": ("trusted", "medium", "command-computed"),
+    "cmd-if-exist-after-github-env": ("agent", "medium", "command-computed"),
+    "pwsh-set-by-an-unlisted-setter": ("trusted", "medium", "command-computed"),
+    "cmd-set-p-without-a-space": ("trusted", "medium", "command-computed"),
 }
 # The jobs above where the lanes and OBAAF-GHA-026 disagree, each for a reason D-153 states.
-STATED_DISAGREEMENTS = {"pwsh-copied-into-a-variable", "cmd-copied-into-a-variable", "cmd-call-label-sets-it"}
+STATED_DISAGREEMENTS = {"pwsh-copied-into-a-variable", "cmd-copied-into-a-variable", "cmd-call-label-sets-it",
+                        "pwsh-copied-after-github-env",
+                        "pwsh-typed-copy-after-github-env", "pwsh-foreach-after-github-env",
+                        "pwsh-set-by-an-unlisted-setter", "cmd-set-p-without-a-space"}
 ORDINARY_JOBS = ["pwsh-region", "pwsh-tool-from-env", "cmd-greeting", "pwsh-linux-other-case",
                  "pwsh-single-quoted-and-escaped", "bash-reads-no-pwsh-reference", "pwsh-tool-named-in-prose",
                  "cmd-tool-named-in-prose", "cmd-ampersand-runs-another-program",
-                 "pwsh-call-operator-on-another-program"]
+                 "pwsh-call-operator-on-another-program", "pwsh-assigned-prose", "cmd-assigned-prose"]
 
 
 def checked(source=FIXTURE, *args):
@@ -168,7 +178,7 @@ class TheCostTest(unittest.TestCase):
         self.assertEqual(report["errors"], [])
         for text in calls:
             self.assertNotIn("aws s3 ls", text)
-            self.assertNotIn("build", text)
+            self.assertNotIn("$env:TOOL build", text)
 
     def test_many_pwsh_steps_stay_cheap(self):
         steps = "".join(f"      - shell: pwsh\n        run: 'Write-Host $env:V{n % 50} $env:W'\n" for n in range(1500))

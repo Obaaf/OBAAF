@@ -442,8 +442,11 @@ _LAUNCHER_WORD_RE = re.compile(r"(?<![\w.-])(?:iex|invoke-expression|start-proce
 _PS_ASSIGN_HEAD_RE = re.compile(r"\s*[$@]?[\w:.\[\]{}]+\s*(?:[-+*/%]|\?\?)?=(?!=)")
 _CMD_ASSIGN_HEAD_RE = re.compile(r"\s*@?set[\s,;=]", re.I)
 _KEYWORD_RE = re.compile(r"(?:do|else|then)(?![\w-])", re.I)
-_CMD_IF_RE = re.compile(r"if\s+(?:not\s+)?(?:/i\s+)?(?:(?:exist|defined|errorlevel|cmdextversion)\s+\S+"
-                        r"|\S+?\s*==\s*\S+|\S+\s+(?:equ|neq|lss|leq|gtr|geq)\s+\S+)", re.I)
+# An operand of a cmd `if` condition: a quoted text (`"C:\Program Files\x"`, `"a b"`) or a word.
+_CMD_OPERAND = r'(?:"[^"\n]*"|[^\s"=]+)'
+_CMD_IF_RE = re.compile(r"if\s+(?:not\s+)?(?:/i\s+)?(?:(?:exist|defined|errorlevel|cmdextversion)\s+" + _CMD_OPERAND
+                        + r"|" + _CMD_OPERAND + r"\s*==\s*" + _CMD_OPERAND + r"|" + _CMD_OPERAND
+                        + r"\s+(?:equ|neq|lss|leq|gtr|geq)\s+" + _CMD_OPERAND + r")", re.I)
 _HEAD_SKIP = " \t@\"'‘’“”"
 
 
@@ -512,13 +515,14 @@ class RunContext:
             break
         return i
 
-    def runs(self, at: int) -> tuple:
-        """(whether something may run what the reference at `at` gives, its logical line)."""
+    def runs(self, at: int, assignments: bool = True) -> tuple:
+        """(whether something may run what the reference at `at` gives, its logical line); with `assignments` False,
+        an assignment does not count (the lanes' probe, which does not follow a value copied into a variable)."""
         k = bisect.bisect_right(self.starts, at) - 1
         line, heads, commands = self._line(k)
         c = bisect.bisect_right(heads, at) - 1
         head, launcher, assign, place = commands[max(c, 0)]
-        return bool(launcher < at or assign or at <= place), line
+        return bool(launcher < at or (assign and assignments) or at <= place), line
 
 
 def _safe(value: str, family_name: str, in_string: bool) -> bool:
@@ -587,16 +591,19 @@ def put_in(text: str, family_name: str, lookup, budget=None) -> tuple | None:
 _PS_SETS_AFTER = re.compile(r"\s*(?:,|(?:[-+*/%]|\?\?)?=(?!=))")
 _PS_ENV_ANY_RE = re.compile(r"env:", re.I)
 _PS_DYNAMIC_RE = re.compile(
-    r"\bEnvironment\b|SessionState|ExecutionContext|Invoke-Expression|\biex\b|Import-Module|\bipmo\b"
+    r"Environment|SessionState|ExecutionContext|Invoke-Expression|\biex\b|Import-Module|\bipmo\b"
+    r"|Set-Alias|New-Alias|(?<![\w-])(?:sal|nal)(?![\w-])|\[\s*(?:scriptblock|type)\s*\]"
     r"|Invoke-Command|\bicm\b|\.ps1\b|\.psm1\b|(?:Set|New|Clear|Remove|Rename|Copy|Move)-Item|(?:Set|Add)-Content"
     r"|(?:^|[;|&({}])[ \t]*(?:si|ni|sc|ac|cli|ri|rni|cpi|mi|del|erase|rm|rmdir|rd|ren|mv|cp|copy|move)(?![\w-])"
     r"|(?:^|[;|&({}\s])\.\s+\S", re.I | re.M)
 _CMD_CALL_RE = re.compile(r"\bcall[\s,;=]+(?!:)\S", re.I)
 _CMD_UNORDERED_RE = re.compile(r"\bgoto\b|\bcall[\s,;=]+:", re.I)
-_CMD_SET_START_RE = re.compile(r"\bset[\s,;=]+(?:/[ap][\s,;=]*)?", re.I)
+_CMD_SET_START_RE = re.compile(r"\bset(?:[\s,;=\"]+|(?=/))(?:/[ap][\s,;=\"]*)?", re.I)
+# A command whose own word is a variable (`%S% AGENT=claude` with `S: set`) may be `set` (the third review).
+_CMD_COMPUTED_COMMAND_RE = re.compile(r"(?:^|[&|(])\s*@?(?:%[^%\s]+%|![^!\s]+!)", re.M)
 
 
-def _cmd_sets(text: str) -> tuple:
+def _cmd_sets(text: str, computed: bool = True) -> tuple:
     """(names, any_line) for a cmd script with its carets out: the first line each folded name is set on, and the
     first line of a `set` whose name holds a variable or of a `call` of anything but a label (None for none). Each
     line's `=` are found once and each `set`'s name is read up to the first `=` after it (bisect), so the cost is
@@ -604,7 +611,7 @@ def _cmd_sets(text: str) -> tuple:
     names: dict = {}
     any_line = None
     for number, line in enumerate(text.split("\n")):
-        if any_line is None and _CMD_CALL_RE.search(line):
+        if any_line is None and (_CMD_CALL_RE.search(line) or (computed and _CMD_COMPUTED_COMMAND_RE.search(line))):
             any_line = number
         starts = list(_CMD_SET_START_RE.finditer(line))
         if not starts:
@@ -654,8 +661,11 @@ def script_sets(text: str, family_name: str) -> Sets:
     """What the script may set itself (`Sets`), in one pass, so linear in the script."""
     if family_name == "cmd":
         text = text.replace("^", "")
-        names, any_line = _cmd_sets(text)
-        if _CMD_UNORDERED_RE.search(text):
+        unordered = bool(_CMD_UNORDERED_RE.search(text))
+        # Where lines run out of order, a command whose word is a variable is not counted as a possible `set` (it
+        # would make every name of such a script "any", the references run as commands included).
+        names, any_line = _cmd_sets(text, computed=not unordered)
+        if unordered:
             if any_line is not None:
                 return Sets((), True, family_name)
             return Sets(names, False, family_name)

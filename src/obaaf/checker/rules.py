@@ -822,6 +822,10 @@ def _cmd_carets_out(text: str) -> str:
     return re.sub(r"\^[ \t]*\r?\n", " ", text).replace("^", "")
 
 
+class _AltTooLong(Exception):
+    """A text with every value put in that would pass D-137's bound (`WorkflowRules._shell_put_in`)."""
+
+
 class WorkflowRules:
     """Applies every workflow rule to one parsed workflow."""
 
@@ -2560,19 +2564,47 @@ class WorkflowRules:
             if anything:
                 spots += shell_env.names_read(run, family)
             withheld: list = []
-            context = shell_env.RunContext(run, family)
-            for at, name in dict.fromkeys(spots):
-                runs, line = context.runs(at)
+            for _at, name in dict.fromkeys(spots):
                 for mode in modes:
-                    withheld.extend((value, runs, line) for value in wide.candidates(name, mode))
-            # One entry for each value, place and line (the line is the context's own text, kept by identity).
-            withheld = list({(v, runs, id(line)): (v, runs, line) for v, runs, line in withheld}.values())
+                    withheld.extend(wide.candidates(name, mode))
+            withheld = list(dict.fromkeys(withheld))
+            # The script again with every reference put in, wherever it stands and whatever the reasons it was left
+            # out, one text for each value a name may take (at most four): what the reader finds in them is what a
+            # value left out may run, which is "cannot tell" (the third review: a list of the places a value may run
+            # was got past by `[string]$a = $env:AGENT`, `foreach`, a pipeline, `Set-Variable` and others). None
+            # where they would pass D-137's bound for the step.
+            alts: list | None = []
+            if withheld:
+                pattern = shell_env.lane_pattern(family)
+                choices: dict = {}
+                for m in pattern.finditer(run):
+                    kind, name = shell_env.lane_reference(m)
+                    if kind == "shell" and name not in choices:
+                        choices[name] = list(dict.fromkeys(v for mode in modes for v in wide.candidates(name, mode)))
+                widest = min(4, max((len(v) for v in choices.values()), default=0))
+                alt_budget = PutInBudget(scale=max(1, widest))
+                for n in range(widest):
+                    def one(m, n=n):
+                        kind, name = shell_env.lane_reference(m)
+                        options = choices.get(name) if kind == "shell" else None
+                        if not options:
+                            return m.group(0)
+                        value = options[min(n, len(options) - 1)]
+                        if alts is not None and not alt_budget.take(value):
+                            raise _AltTooLong
+                        return value
+                    try:
+                        alt = pattern.sub(one, run)
+                    except _AltTooLong:
+                        alts = None
+                        break
+                    alts.append(_cmd_carets_out(alt) if family == "cmd" else alt)
             put = None
             if made is not None and made[2]:
                 put = _cmd_carets_out(made[0]) if family == "cmd" else made[0]
-            hit = (put, made is None, tuple(dict.fromkeys(withheld)), run, step)
+            hit = (put, made is None or alts is None, tuple(withheld), tuple(alts or ()), run, step)
             cache[key] = hit
-        return hit[0], hit[1], hit[2]
+        return hit[0], hit[1], hit[2], hit[3]
 
     def _agent_command(self, job: Job, step: Step, tool: str, name: str, flags: list, programs: list,
                        packages: list) -> None:
@@ -2720,37 +2752,47 @@ class WorkflowRules:
                 # A PowerShell or cmd script is read with the `env` values it reads put in (flagship slice 2d.25):
                 # `& $env:AGENT --auto -p x` with `AGENT: cn` is read as `& 'cn' --auto -p x`, and read at all only
                 # where the tool's letters are in its own text or its name in the text made.
-                read, refused, values = text, False, ()
+                read, refused, values, alts = text, False, (), ()
                 source = shell_sources.get(id(text))
                 if source is not None:
-                    put, refused, values = self._shell_put_in(job, step, source, scopes, trust_env, budget)
+                    put, refused, values, alts = self._shell_put_in(job, step, source, scopes, trust_env, budget)
                     read = text if put is None else put
-                # A value left out that names the tool or holds a warned option, where something on its line may run
-                # it (a launcher, the start of a command) or the line names the tool (`claude $env:FLAGS`).
-                lines_named: dict = {}
-
-                def line_names(line: str) -> bool:
-                    if id(line) not in lines_named:
-                        lines_named[id(line)] = agent_flags.names(line, programs, packages)
-                    return lines_named[id(line)]
-                withheld = [v for v, runs, line in values if (agent_flags.names(v, programs, packages) or any(
-                    option.casefold() in v.casefold() for flag in flags for option in flag["options"])) and (
-                    runs or line_names(line))]
+                # A value left out that names the tool or holds one of its warned options.
+                left = [v for v in values if agent_flags.names(v, programs, packages) or any(
+                    option.casefold() in v.casefold() for flag in flags for option in flag["options"])]
                 if agent_flags.appears(text, programs, packages) or (
-                        read is not text and agent_flags.names(read, programs, packages)) or withheld:
-                    reading.merge(agent_flags.read_script(read, programs, packages, flags, variables,
-                                                          mentioned=agent_flags.mentions(read, programs, packages),
-                                                          bash=False, loose=True,
-                                                          language=languages.get(id(text), ""),
-                                                          named=named_as_name()))
-                    if refused or withheld:
-                        # Past D-137's or D-138's bound, or with a value that names the tool or holds a warned option
-                        # left out: every warned option not found is "cannot tell", as `agent_flags._put_in_unread`
-                        # has it for bash.
-                        why = agent_flags.PUT_IN_UNREAD if refused else "a value of its env the checker does not put in"
+                        read is not text and agent_flags.names(read, programs, packages)) or left:
+                    language = languages.get(id(text), "")
+                    here = agent_flags.read_script(read, programs, packages, flags, variables,
+                                                   mentioned=agent_flags.mentions(read, programs, packages),
+                                                   bash=False, loose=True, language=language, named=named_as_name())
+                    if read is not text and not here.hits and not here.unknown and agent_flags.appears(
+                            text, programs, packages):
+                        # Never quieter than the script read as written, as the base read it (the third review: a
+                        # value put in can be stale where the script sets the name in a way the checker does not
+                        # list, `[type]('System.Envir'+'onment')`, `Set-Alias`, cmd's `%S% AGENT=claude`).
+                        here = agent_flags.read_script(text, programs, packages, flags, variables,
+                                                       mentioned=agent_flags.mentions(text, programs, packages),
+                                                       bash=False, loose=True, language=language,
+                                                       named=named_as_name())
+                    by_id = {flag["id"]: flag for flag in flags}
+                    if left and refused:
+                        # Past D-137's or D-138's bound: every warned option not found is "cannot tell", as
+                        # `agent_flags._put_in_unread` has it for bash.
                         for flag in flags:
-                            if flag["id"] not in reading.hits:
-                                reading.cannot_tell(flag, f"{why}: " + agent_flags._fact_text(text))
+                            if flag["id"] not in here.hits:
+                                here.cannot_tell(flag, f"{agent_flags.PUT_IN_UNREAD}: " + agent_flags._fact_text(text))
+                    elif left:
+                        # What the script with the values left out put in gives is "cannot tell".
+                        for alt in alts:
+                            other = agent_flags.read_script(alt, programs, packages, flags, {},
+                                                            mentioned=agent_flags.mentions(alt, programs, packages),
+                                                            bash=False, loose=True, language=language, named=True)
+                            for fid in list(other.hits) + list(other.unknown):
+                                if fid not in here.hits and fid in by_id:
+                                    here.cannot_tell(by_id[fid], "a value of its env the checker does not put in: "
+                                                     + agent_flags._fact_text(text))
+                    reading.merge(here)
         for other, command_like in others:
             # Another input, an `env` value or a `docker://` command line that runs the program: one whose text
             # starts a command with it, or that holds the tool's letters in an input whose name says it is a

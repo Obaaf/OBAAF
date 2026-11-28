@@ -2728,9 +2728,10 @@ class Step:
             # step's own lines (from the review: `if 1==1 %AGENT% -p x`, `cmd /d /c %AGENT% ...` and `-ArgumentList`
             # before `-FilePath` are read for a literal program and were not for one put in). A value with a space
             # is read only command by command, as D-139 reads a put-in text, so prose in it is not an agent.
-            # Only where the value stands where something may run it (`shell_env.RunContext`: a launcher before it
-            # in its command, an assignment, the program's place), so prose with a tool's name in it
-            # (`Write-Host "Using $env:TOOL"`) is not searched as a command (the second review).
+            # Only where the value stands where something may run it (`shell_env.RunContext`: a launcher as its
+            # command's program, the program's place; not an assignment, whose value the lanes do not follow), so
+            # prose with a tool's name in it (`Write-Host "Using $env:TOOL"`, `$msg = "... $env:BOT ..."`) is not
+            # searched as a command (the second and third reviews).
             texts, probes = [], []
             context = shell_env.RunContext(base, family)
             for values in readings:
@@ -2744,7 +2745,7 @@ class Step:
                         value = next(found)
                         if value is None:
                             return m.group(0)
-                        if value and not any(ch.isspace() for ch in value) and context.runs(offset + m.start())[0]:
+                        if value and not any(ch.isspace() for ch in value) and context.runs(offset + m.start(), assignments=False)[0]:
                             single.append(True)
                         return value
                     made_line = pattern.sub(one, line)
