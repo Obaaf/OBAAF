@@ -10,48 +10,985 @@
 
 version: 0.1.0
 
-# Actions that run an AI agent or model with tools. Matched as a prefix of the
-# `uses:` value, before the `@`.
-agent_actions:
-  - anthropics/claude-code-action
-  - anthropics/claude-code-base-action
-  - google-github-actions/run-gemini-cli
-  - openai/codex-action
-  - actions/ai-inference
-  - qodo-ai/pr-agent
-  - Codium-ai/pr-agent
-  - coderabbitai/ai-pr-reviewer
-  - All-Hands-AI/OpenHands
-  - sst/opencode
-  - cline/cline
+# Agent tools, one entry per tool (flagship slice 2d.5b, agent control R6). Agent products change faster
+# than the controls, so what the checker knows about each one is data, read from the tool's own
+# repository or documentation and dated. Every tool ci-agent-audit recognised at its commit 4a88ee6
+# (2026-11-07) has an entry; that list was used to know which tools to look at. Each fact slice 2d.5b
+# added was read from a source the entry names, not copied from that list; facts kept from OBAAF's
+# lists before the slice that no named source shows are listed under `carried`. The checker reads,
+# for each entry:
+#
+#   id            a short name, used in findings' facts (`agents`) and never changed once released
+#   name          the tool's own name for itself
+#   read          the date the sources were read
+#   sources       where the entry's facts were read: the tool's action file, README or documentation
+#   actions       actions that run the agent, matched as a prefix of the `uses:` value before the `@`
+#                 (`owner/repo` also matches `owner/repo/path`, and a called workflow
+#                 `owner/repo/.github/workflows/x.yml`, but not `owner/repo-docs`); each with the inputs
+#                 that carry a prompt
+#   not_agents    actions in a folder under one of those that run no agent (flagship slice 2d.11), each
+#                 with `action` (owner/repo/path; the folder exactly as written, owner and repository in
+#                 any case), `says` (the action's own words for what it does), `source` (where they are:
+#                 a file at a commit in that repository, with its lines), `checked` (what was read to know
+#                 it runs no agent) and `read` (the date). Any other path under an action is the agent.
+#   commands      Python regular expressions that find the agent run in a command line (`run:`, an
+#                 action's input, a `docker://` step's arguments); options may come before the prompt flag
+#   programs      the command-line programs the tool installs
+#   prompt_flags  the options that carry a prompt to those programs
+#   packages      the packages that install the tool, by registry (npm, pypi); an install without an exact
+#                 version runs whatever was published last (OBAAF-GHA-025, OBAAF-JEN-008)
+#   installs      of those packages, the ones a step before OBAAF's egress action may install, in the exact
+#                 forms docs/checker-configuration.md gives, without being taken for running the agent
+#                 (flagship slice 2c.8), with the program each installs
+#   install_urls  install scripts, as regular expressions matched anywhere in a script line, however the
+#                 script is fetched and run; each installs the version the script chooses
+#   settings      the values of an agent action's inputs that the tool's own documentation warns about
+#                 (flagship slice 2d.5c1, OBAAF-GHA-026), each with:
+#                   id        a short name, unique in the entry; the finding's fact `setting` is `<tool>/<id>`
+#                   action    one of the entry's actions (matched as they are, so a path under it too)
+#                   input     the input's name, as the action reads it (A to Z in any case)
+#                   equals    the values warned about, compared trimmed and in any case (the wider reading:
+#                             the actions read some of them exactly); or
+#                   set       true: any value that is not empty, a value warned about whatever it is
+#                   severity  high, medium or low
+#                   read      the date the words were read
+#                   says      the documentation's own words, quoted exactly
+#                   source    where those words are: a file at a commit, with its lines
+#                 Where two settings of an entry name one input, the first that matches is reported. A
+#                 value set by an expression is "cannot tell" (OBAAF-GHA-026, case `computed`). Settings
+#                 given as command-line options (`claude_args`, `codex-args`, a CLI's own flags) are not
+#                 read yet (slice 2d.5c2).
+#   carried       facts kept from OBAAF's lists before slice 2d.5b that none of the sources shows (they
+#                 were not dropped, so that nothing found before is lost; none is a new finding)
+#
+# The checker builds its lists from these entries when it loads them (obaaf/agent_tools.py):
+# `agent_actions`, `agent_commands`, `agent_packages`, `agent_installs` and `agent_install_urls`, in the
+# order the entries give them. A repository's own agents go in `agents.actions` and `agents.commands` of
+# its checker configuration, and a job can always be declared an agent job.
+agent_tools:
+  - id: claude-code
+    name: Claude Code
+    read: 2026-11-18
+    sources:
+      - https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/action.yml
+      - https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/base-action/action.yml
+      - https://github.com/anthropics/claude-code-base-action/blob/78702a3c36b5baa51f6fa2e298a962cae8bb55d8/action.yml
+      - https://github.com/anthropics/claude-code/blob/154c06539c4309e172b8ce6f2b07388987617d68/README.md
+      - https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/src/github/validation/untrusted-pr.ts
+      - https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/docs/security.md
+    actions:
+      anthropics/claude-code-action: {prompt_inputs: [prompt], args_inputs: [claude_args]}
+      anthropics/claude-code-base-action: {prompt_inputs: [prompt, prompt_file], args_inputs: [claude_args]}
+    commands:
+      - '(^|[\s;&|(/"''`])claude["''`]?\s+([^\n;&|]*\s)?(-p|--print)\b'
+      - '@anthropic-ai/claude-code'
+    programs: [claude]
+    prompt_flags: [-p, --print]
+    packages:
+      npm: ["@anthropic-ai/claude-code"]
+    installs: {"@anthropic-ai/claude-code": claude}
+    install_urls:
+      - 'claude\.ai/install\.(sh|ps1|cmd)\b'
+    settings:
+      - id: non-write-users-anyone
+        action: anthropics/claude-code-action
+        input: allowed_non_write_users
+        equals: ["*"]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          WARNING: Use with extreme caution - this bypasses security checks and should only be used for
+          workflows with very limited permissions (e.g., issue labeling).
+        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/action.yml#L34-L45
+      - id: non-write-users
+        action: anthropics/claude-code-action
+        input: allowed_non_write_users
+        set: true
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          WARNING: Use with extreme caution - this bypasses security checks and should only be used for
+          workflows with very limited permissions (e.g., issue labeling).
+        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/action.yml#L34-L45
+      - id: any-bot
+        action: anthropics/claude-code-action
+        input: allowed_bots
+        equals: ["*"]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          WARNING: On public repos with '*', external Apps may be able to invoke this action with prompts
+          they control.
+        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/action.yml#L30-L33
+      - id: full-output
+        action: anthropics/claude-code-action
+        input: show_full_output
+        equals: ["true"]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          WARNING: This outputs ALL Claude messages including tool execution results which may contain
+          secrets, API keys, or other sensitive information. These logs are publicly visible in GitHub
+          Actions.
+        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/action.yml#L164-L167
+      - id: base-full-output
+        action: anthropics/claude-code-base-action
+        input: show_full_output
+        equals: ["true"]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          WARNING: This outputs ALL Claude messages including tool execution results which may contain
+          secrets, API keys, or other sensitive information. These logs are publicly visible in GitHub
+          Actions.
+        source: https://github.com/anthropics/claude-code-base-action/blob/78702a3c36b5baa51f6fa2e298a962cae8bb55d8/action.yml#L82-L85
+    # Command-line options (flagship slice 2d.5c2a), read where `claude` is run and in `claude_args`. The
+    # action's own test for "turns off permission checks" is SKIPS_PERMISSION_CHECKS, lines 80 and 81 of the
+    # same file: `--(allow-)?dangerously-skip-permissions` or `--permission-mode bypassPermissions`.
+    flags:
+      - id: skip-permissions
+        options: [--dangerously-skip-permissions, --allow-dangerously-skip-permissions]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          claude_args turns off permission checks, so commands that are not on the deny list run without
+          approval.
+        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/src/github/validation/untrusted-pr.ts#L214-L218
+      - id: bypass-permissions-mode
+        options: [--permission-mode]
+        equals: [bypassPermissions]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          If `claude_args` turns off permission checks, for example with `bypassPermissions`, commands outside
+          the list run without approval, and the action logs a warning.
+        source: https://github.com/anthropics/claude-code-action/blob/5a856893345e332afa621934082d8c660c26d689/docs/security.md#L102
+    not_agents:
+      - action: anthropics/claude-code-action/agent-approval-check
+        read: 2026-11-19
+        says: >-
+          Require N human approvals on PRs that contain agent-authored commits (Claude, Claude Code, or any
+          configured bot identity). Posts an `agent-approval-check` commit status — mark it as a required
+          check on protected branches to gate merges.
+        checked: >-
+          Its composite steps (lines 49 to 72) set up Python, install httpx, PyYAML and tenacity at exact
+          versions and run its own agent_approval_check.py, which imports no model's library, starts no
+          other program and sends its requests only to api.github.com.
+        source: https://github.com/anthropics/claude-code-action/blob/f431adaf77e0fecf918431e75a2b5b45b85af002/agent-approval-check/action.yml#L1-L6
+    carried: ["claude -p and --print", "the install script claude.ai/install.cmd"]
 
-# Commands in `run:` scripts that start an agent CLI. Python regular
-# expressions, matched against each line. Options may come before the
-# prompt flag or subcommand (claude --model x -p ...).
-agent_commands:
-  - '(^|[\s;&|(])claude\s+([^\n;&|]*\s)?(-p|--print)\b'
-  - '@anthropic-ai/claude-code'
-  - '(^|[\s;&|(])gemini\s+([^\n;&|]*\s)?(-p|--prompt)\b'
-  - '@google/gemini-cli'
-  - '(^|[\s;&|(])codex\s+([^\n;&|]*\s)?exec\b'
-  - '@openai/codex'
-  - '(^|[\s;&|(])aider\s'
-  - '(^|[\s;&|(])opencode\s+([^\n;&|]*\s)?run\b'
-  - '(^|[\s;&|(])copilot\s+([^\n;&|]*\s)?(-p|--prompt)\b'
-  - '(^|[\s;&|(])cline\s'
+  - id: gemini-cli
+    name: Gemini CLI
+    read: 2026-11-18
+    sources:
+      - https://github.com/google-github-actions/run-gemini-cli/blob/387c8ddb7a72078825da941758b811b9153c71e8/action.yml
+      - https://github.com/google-gemini/gemini-cli-action/blob/a2b9c0548a45588c2e82fa67fb15e6b050ced328/action.yml
+      - https://github.com/google-gemini/gemini-cli/blob/3aa930d6e71c0ddea2610b20c12cdfab2ab9247d/README.md
+      - https://github.com/google-gemini/gemini-cli/blob/3aa930d6e71c0ddea2610b20c12cdfab2ab9247d/docs/reference/policy-engine.md
+    actions:
+      google-github-actions/run-gemini-cli: {prompt_inputs: [prompt]}
+      google-gemini/gemini-cli-action: {prompt_inputs: [prompt]}
+    commands:
+      - '(^|[\s;&|(/"''`])gemini["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
+      - '@google/gemini-cli'
+    programs: [gemini]
+    prompt_flags: [-p, --prompt]
+    packages:
+      npm: ["@google/gemini-cli"]
+    installs: {"@google/gemini-cli": gemini}
+    install_urls: []
+    # Both actions run `gemini --yolo` themselves, whatever their inputs say (run-gemini-cli's action.yml,
+    # lines 309 and 316; gemini-cli-action's, line 85), so no input turns it on or off and none is reported
+    # for it (flagship slice 2d.5c2b). The action passes `gemini_debug` through `fromJSON` (line 417) and
+    # compares the result with `true` (line 306), so the JSON string `"true"` turns debugging on too.
+    settings:
+      - id: debug
+        action: google-github-actions/run-gemini-cli
+        input: gemini_debug
+        equals: ["true"]
+        json: true
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Gemini CLI debug logging is enabled. This will stream responses, which could reveal sensitive
+          information if processed with untrusted inputs.
+        source: https://github.com/google-github-actions/run-gemini-cli/blob/387c8ddb7a72078825da941758b811b9153c71e8/action.yml#L307
+    # Command-line options (flagship slice 2d.5c2a), read where `gemini` is run. The same documentation says
+    # the sandbox is turned on by default with `--yolo` (docs/reference/configuration.md, line 3095), which is
+    # why these are medium. Gemini CLI reads its options with yargs, which also takes `--y` for `-y` and the
+    # camel-case `--approvalMode`.
+    flags:
+      - id: yolo
+        options: [--yolo, -y, --y]
+        severity: medium
+        read: 2026-11-19
+        says: "`yolo`: A mode where all tools are auto-approved (use with extreme caution)."
+        source: https://github.com/google-gemini/gemini-cli/blob/3aa930d6e71c0ddea2610b20c12cdfab2ab9247d/docs/reference/policy-engine.md#L212
+      - id: approval-mode-yolo
+        options: [--approval-mode, --approvalMode]
+        equals: [yolo]
+        severity: medium
+        read: 2026-11-19
+        says: "`yolo`: A mode where all tools are auto-approved (use with extreme caution)."
+        source: https://github.com/google-gemini/gemini-cli/blob/3aa930d6e71c0ddea2610b20c12cdfab2ab9247d/docs/reference/policy-engine.md#L212
+
+  - id: codex
+    name: Codex
+    read: 2026-11-18
+    sources:
+      - https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/action.yml
+      - https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/docs/security.md
+      - https://github.com/openai/codex/blob/333ea3194740c2e19edb215e7c8867170e013e13/README.md
+      - https://github.com/openai/codex/blob/333ea3194740c2e19edb215e7c8867170e013e13/codex-rs/utils/cli/src/shared_options.rs
+    actions:
+      openai/codex-action: {prompt_inputs: [prompt, prompt-file], args_inputs: [codex-args]}
+    commands:
+      - '(^|[\s;&|(/"''`])codex["''`]?\s+([^\n;&|]*\s)?exec\b'
+      - '@openai/codex'
+    programs: [codex]
+    prompt_flags: []
+    packages:
+      npm: ["@openai/codex"]
+    installs: {"@openai/codex": codex}
+    install_urls:
+      - 'chatgpt\.com/codex/install\.(sh|ps1)\b'
+    settings:
+      - id: safety-unsafe
+        action: openai/codex-action
+        input: safety-strategy
+        equals: [unsafe]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          `unsafe` (NOT RECOMMENDED) Do not try to restrict Codex's privileges at all. This is extremely
+          dangerous, as the default user for this Action likely has sudo privileges, which means it can
+          read secrets stored in memory (such as the value of `openai-api-key`) and print them to the output
+          of the GitHub Action or exfiltrate them in other ways.
+        source: https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/action.yml#L100-L104
+      - id: safety-read-only
+        action: openai/codex-action
+        input: safety-strategy
+        equals: [read-only]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Note Codex will still run as the default user for this Action, which likely has sudo privileges,
+          so it could read `openai-api-key` from memory and reveal it by printing it to the output of the
+          GitHub Action.
+        source: https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/action.yml#L95-L99
+      - id: anyone
+        action: openai/codex-action
+        input: allow-users
+        equals: ["*"]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          If you have effectively opened up your use of `openai/codex-action` to the world by configuring
+          `allow-users: "*"`, you might find yourself the target of API key abuse.
+        source: https://github.com/openai/codex-action/blob/4aac6da4b686168e147798ca841cf64ff0f027b8/docs/security.md#L66
+    # Command-line options (flagship slice 2d.5c2a), read where `codex` is run and in `codex-args`, from the
+    # CLI's own help text. `--sandbox danger-full-access` is not here: neither the CLI's files nor the
+    # action's give a sentence of warning for it (as for the action's `sandbox` input, F-267).
+    flags:
+      - id: bypass-approvals-and-sandbox
+        options: [--dangerously-bypass-approvals-and-sandbox, --yolo]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          Skip all confirmation prompts and execute commands without sandboxing. EXTREMELY DANGEROUS. Intended
+          solely for running in environments that are externally sandboxed.
+        source: https://github.com/openai/codex/blob/333ea3194740c2e19edb215e7c8867170e013e13/codex-rs/utils/cli/src/shared_options.rs#L52-L59
+      - id: bypass-hook-trust
+        options: [--dangerously-bypass-hook-trust]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Run enabled hooks without requiring persisted hook trust for this invocation. DANGEROUS. Intended only
+          for automation that already vets hook sources.
+        source: https://github.com/openai/codex/blob/333ea3194740c2e19edb215e7c8867170e013e13/codex-rs/utils/cli/src/shared_options.rs#L61-L64
+
+  - id: github-models
+    name: GitHub Models AI Inference
+    read: 2026-11-18
+    sources:
+      - https://github.com/actions/ai-inference/blob/41caef41a74eb26f6d0c6b1e9941d691588e0b2b/action.yml
+    actions:
+      actions/ai-inference: {prompt_inputs: [prompt, prompt-file, system-prompt, system-prompt-file, input, file_input]}
+    commands: []
+    programs: []
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+    no_warnings: >-
+      Read on 2026-11-19: actions/ai-inference's action.yml, README.md, SECURITY.md and src/copilot.ts at
+      41caef4. None of them warns about an input's value. The action runs GitHub Copilot CLI itself with
+      `-p`, `-s`, `--no-ask-user`, `--model` and `--allow-tool=` built from its inputs (src/copilot.ts,
+      lines 93 to 102); those inputs are not read as Copilot's options.
+
+  - id: pr-agent
+    name: PR-Agent
+    read: 2026-11-18
+    sources:
+      - https://github.com/qodo-ai/pr-agent/blob/c601521779a2b34d559291faa7fe16f8c6c96d34/action.yaml
+      - https://github.com/qodo-ai/pr-agent/blob/c601521779a2b34d559291faa7fe16f8c6c96d34/README.md
+      - https://github.com/qodo-ai/pr-agent/blob/c601521779a2b34d559291faa7fe16f8c6c96d34/docs/docs/usage-guide/configuration_options.md
+    # The-PR-Agent/pr-agent and qodo-ai/pr-agent served the same repository (the same commit) when read.
+    actions:
+      qodo-ai/pr-agent: {prompt_inputs: [artifact_instructions]}
+      Codium-ai/pr-agent: {prompt_inputs: [artifact_instructions]}
+      The-PR-Agent/pr-agent: {prompt_inputs: [artifact_instructions]}
+    commands:
+      - '(^|[\s;&|(/"''`])pr-agent["''`]?\s+([^\n;&|]*\s)?--(pr_url|issue_url)\b'
+    programs: [pr-agent]
+    prompt_flags: []
+    packages:
+      pypi: [pr-agent]
+    installs: {}
+    install_urls: []
+    settings: []
+    # Command-line options (flagship slice 2d.5c2b), read where `pr-agent` is run. The warning is about a
+    # `--config-branch` taken from a pull request: `$GITHUB_HEAD_REF`, the spelling it names that a script
+    # holds as text, is its `equals`; a value the checker cannot read (another variable, an expression such
+    # as the `${{ github.head_ref }}` it also names) is "cannot tell", and a branch written out
+    # (`--config-branch=main`) is not reported. `PR_AGENT_CONFIG_BRANCH`, a variable, is not read. Its other
+    # warning, about running the action on `pull_request_target` (docs/docs/installation/github.md, line
+    # 106), is about an event, which the event rules read.
+    flags:
+      - id: config-branch
+        options: [--config-branch]
+        equals: ["$GITHUB_HEAD_REF"]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          **Never set the config branch from untrusted or PR-derived input** (e.g.
+          `--config-branch=$GITHUB_HEAD_REF` / `${{ github.head_ref }}` in CI).
+        source: https://github.com/qodo-ai/pr-agent/blob/c601521779a2b34d559291faa7fe16f8c6c96d34/docs/docs/usage-guide/configuration_options.md#L70
+    carried: ["the action Codium-ai/pr-agent"]
+
+  - id: coderabbit
+    name: CodeRabbit AI PR Reviewer
+    read: 2026-11-18
+    # In OBAAF's list before slice 2d.5b. Its repository could not be read on 2026-11-18 (git asked
+    # for a sign-in, as it does for a repository that is private or gone), so nothing was added.
+    sources: []
+    actions:
+      coderabbitai/ai-pr-reviewer: {prompt_inputs: []}
+    commands: []
+    programs: []
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+    no_warnings: >-
+      coderabbitai/ai-pr-reviewer could not be read on 2026-11-19: GitHub refused an anonymous read of the
+      repository. Nothing is reported until its own files can be read.
+    carried: ["the action coderabbitai/ai-pr-reviewer"]
+
+  - id: openhands
+    name: OpenHands
+    read: 2026-11-18
+    sources:
+      - https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/pr-review/action.yml
+      - https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/qa-changes/action.yml
+      - https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/release-notes/action.yml
+      - https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/vulnerability-remediation/action.yml
+      - https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/issue-duplicate-checker/action.yml
+      - https://docs.openhands.dev/openhands/usage/cli/headless
+      - https://github.com/OpenHands/docs/blob/e19cd0cd1b5a715abdf2ab94963a16226936d477/openhands/usage/cli/terminal.mdx
+      - https://github.com/OpenHands/OpenHands-CLI/blob/283c6ac3610f4299f405f7389f65766dcb83e12a/openhands_cli/argparsers/util.py
+      - https://github.com/OpenHands/docs/blob/e19cd0cd1b5a715abdf2ab94963a16226936d477/openhands/usage/cli/headless.mdx
+    # All-Hands-AI/OpenHands was in OBAAF's list before slice 2d.5b; its default branch had no action
+    # file when read, so it is kept for workflows pinned to an older commit.
+    actions:
+      All-Hands-AI/OpenHands: {prompt_inputs: []}
+      OpenHands/extensions/plugins/pr-review: {prompt_inputs: []}
+      OpenHands/extensions/plugins/qa-changes: {prompt_inputs: []}
+      OpenHands/extensions/plugins/release-notes: {prompt_inputs: []}
+      OpenHands/extensions/plugins/vulnerability-remediation: {prompt_inputs: []}
+      OpenHands/extensions/plugins/issue-duplicate-checker: {prompt_inputs: []}
+    commands:
+      - '(^|[\s;&|(/"''`])openhands["''`]?\s+([^\n;&|]*\s)?--headless\b'
+    programs: [openhands]
+    prompt_flags: [-t, -f]
+    packages: {}
+    installs: {}
+    install_urls: []
+    # The pr-review action hands `enable-uv-cache` to astral-sh/setup-uv@v6 as `enable-cache`, whose
+    # default, `auto`, turns the cache on on GitHub-hosted runners (setup-uv's README at d0cc045, line 207),
+    # so `auto` is read as `true` (flagship slice 2d.5c2b).
+    settings:
+      - id: uv-cache
+        action: OpenHands/extensions/plugins/pr-review
+        input: enable-uv-cache
+        equals: ["true", "auto"]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Default is 'false' for security: shared caches can become a pivot into more privileged workflows
+          (prompt-injected reviewer could write a malicious wheel into cache; subsequent higher-privilege
+          workflow hits poisoned cache). Only opt in when you control the runner environment (e.g.
+          self-hosted, single-tenant) and accept the trade-off.
+        source: https://github.com/OpenHands/extensions/blob/1902359eb285eb09bfb488e392831b86883dda3d/plugins/pr-review/action.yml#L105-L113
+    # Command-line options (flagship slice 2d.5c2b), read where `openhands` is run. `--yolo` is the same
+    # option as `--always-approve` (OpenHands-CLI's openhands_cli/argparsers/util.py, lines 12 to 17), and
+    # Python's argparse takes any beginning of either (`--always`, `--yol`). High: nothing in the sentence's
+    # page puts the actions in a sandbox. `--headless`, the documented way to run it in CI, always approves
+    # every action (headless.mdx, lines 27 to 29), so it is reported too.
+    flags:
+      - id: always-approve
+        options: [--always-approve, --yolo]
+        prefixes: true
+        severity: high
+        read: 2026-11-19
+        says: "Auto-approve all actions (use with caution)"
+        source: https://github.com/OpenHands/docs/blob/e19cd0cd1b5a715abdf2ab94963a16226936d477/openhands/usage/cli/terminal.mdx#L62
+      - id: headless
+        options: [--headless]
+        prefixes: true
+        severity: high
+        read: 2026-11-19
+        says: >-
+          **Headless mode always runs in `always-approve` mode.** The agent will execute all actions without
+          any confirmation.
+        source: https://github.com/OpenHands/docs/blob/e19cd0cd1b5a715abdf2ab94963a16226936d477/openhands/usage/cli/headless.mdx#L28
+    carried: ["the action All-Hands-AI/OpenHands"]
+
+  - id: opencode
+    name: OpenCode
+    read: 2026-11-18
+    sources:
+      - https://github.com/anomalyco/opencode/blob/007afb1b0c8a36dff93d7945909d4e976545ba95/README.md
+      - https://github.com/anomalyco/opencode/blob/007afb1b0c8a36dff93d7945909d4e976545ba95/services/site/src/docs/v1/content/windows-wsl.mdx
+    # sst/opencode and anomalyco/opencode served the same repository (the same commit) when read. Its
+    # default branch had no action file then; sst/opencode was in OBAAF's list before slice 2d.5b.
+    actions:
+      sst/opencode: {prompt_inputs: []}
+      anomalyco/opencode: {prompt_inputs: []}
+    commands:
+      - '(^|[\s;&|(/"''`])opencode["''`]?\s+([^\n;&|]*\s)?run\b'
+    programs: [opencode]
+    prompt_flags: []
+    packages:
+      npm: [opencode-ai, "@opencode/cli"]
+    installs: {}
+    install_urls:
+      - 'opencode\.ai/(v2/)?install\b'
+    settings: []
+    # Command-line options (flagship slice 2d.5c2b), read where `opencode` is run. `--auto` is described as
+    # "Auto-approve permissions that are not explicitly denied", and the hidden `--yolo` and
+    # `--dangerously-skip-permissions` do the same (packages/cli/src/commands/handlers/run.ts, line 34), with
+    # no sentence of warning in OpenCode's files, so none of them is reported (decision F-267); Kilo Code,
+    # which shares this command, does warn (see its entry). The server's password is a variable the checker
+    # does not read, so `--hostname 0.0.0.0` is reported whether or not it is set.
+    flags:
+      - id: hostname-any
+        options: [--hostname]
+        equals: ["0.0.0.0"]
+        severity: medium
+        read: 2026-11-19
+        says: When using `--hostname 0.0.0.0`, set `OPENCODE_SERVER_PASSWORD` to secure the server.
+        source: https://github.com/anomalyco/opencode/blob/007afb1b0c8a36dff93d7945909d4e976545ba95/services/site/src/docs/v1/content/windows-wsl.mdx#L62
+    carried: ["opencode run", "the package opencode-ai", "the install script opencode.ai/install"]
+
+  - id: cline
+    name: Cline
+    read: 2026-11-18
+    sources:
+      - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/README.md
+      - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/README.md
+      - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/docs/features/auto-approve.mdx
+      - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/src/commands/program.ts
+      - https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/src/utils/helpers.ts
+    # The CLI's README gives `cline "<prompt>"` for a headless run, which the pattern below finds; the
+    # action was in OBAAF's list before slice 2d.5b, and the repository had no action file when read.
+    actions:
+      cline/cline: {prompt_inputs: []}
+    commands:
+      - '(^|[\s;&|(])cline\s'
+    programs: [cline]
+    prompt_flags: []
+    packages:
+      npm: [cline]
+    installs: {}
+    install_urls: []
+    settings: []
+    # Command-line options (flagship slice 2d.5c2b), read where `cline` is run, from the CLI's own help text
+    # (commander). `-z, --zen` runs "with full tool auto-approval (same semantics as `--yolo`)" (README,
+    # line 331) and `--auto-approve true` sets the same override as `--yolo` (program.ts, lines 145 to 160),
+    # so both are read with the sentence about `--yolo`, the wider reading (decision F-280). Before commander
+    # reads them, apps/cli/src/utils/helpers.ts (lines 509 to 526) turns `--autoapprove` into `--auto-approve`
+    # and puts `true` after one that is not followed by `true` or `false`, so it counts unless it is `false`. Not reported,
+    # because no option says it: a one-shot run (`cline "prompt"`, or a prompt on standard input) is in yolo
+    # mode by default unless it is given `--auto-approve false`, `--act` or `--plan` (README, lines 89 and
+    # 338).
+    flags:
+      - id: yolo
+        options: [--yolo, -y, --zen, -z]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          Auto-approve a limited tool set for unsupervised runs (benchmarks, CI). DANGEROUS: use only in
+          sandboxed environments.
+        source: https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/src/commands/program.ts#L28-L31
+      - id: auto-approve-true
+        options: [--auto-approve, --autoapprove]
+        unless: ["false"]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          Auto-approve a limited tool set for unsupervised runs (benchmarks, CI). DANGEROUS: use only in
+          sandboxed environments.
+        source: https://github.com/cline/cline/blob/eff43e19b267e171f597ab03733bfed25090f72d/apps/cli/src/commands/program.ts#L28-L31
+    carried: ["the action cline/cline"]
+
+  - id: aider
+    name: Aider
+    read: 2026-11-18
+    sources:
+      - https://github.com/Aider-AI/aider/blob/5dc9490bb35f9729ef2c95d00a19ccd30c26339c/README.md
+    actions: {}
+    commands:
+      - '(^|[\s;&|(])aider\s'
+    programs: [aider]
+    prompt_flags: []
+    packages:
+      pypi: [aider-chat, aider-install]
+    installs: {}
+    install_urls:
+      - 'aider\.chat/install\.(sh|ps1)\b'
+    settings: []
+    no_warnings: >-
+      Read on 2026-11-19 at 5dc9490: README.md and aider/website/docs (config/options.md, scripting.md).
+      `--yes-always` is described as "Always say yes to every confirmation" (options.md, line 711) with
+      no sentence of warning, so it is not reported.
+    carried: ["the install scripts aider.chat/install.sh and .ps1"]
+
+  - id: copilot-cli
+    name: GitHub Copilot CLI
+    read: 2026-11-18
+    sources:
+      - https://github.com/github/copilot-cli/blob/020bbc0a39e97deaf58327cb880167f845461690/README.md
+      - https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools.md
+      - https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-command-reference.md
+      - https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-programmatic-reference.md
+    actions: {}
+    commands:
+      - '(^|[\s;&|(/"''`])copilot["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
+      - '@github/copilot(?![\w-])'
+    programs: [copilot]
+    prompt_flags: [-p, --prompt]
+    packages:
+      npm: ["@github/copilot"]
+    installs: {"@github/copilot": copilot}
+    install_urls:
+      - 'gh\.io/copilot-install\b'
+    settings: []
+    shared_program: >-
+      AWS's Copilot CLI for containers on Amazon ECS is also `copilot` (`copilot svc deploy`). A `copilot`
+      command the checker cannot read is not "cannot tell" where every place the step names `copilot` is
+      followed by one of AWS Copilot's own commands.
+    # AWS Copilot's commands that GitHub Copilot CLI does not also have (`app`, `init`, `version` and
+    # `completion` are both tools'; GitHub's are listed in cli-command-reference.md, lines 22 to 37).
+    other_program: '\s+(env|svc|job|pipeline|task|storage|secret|deploy|run|docs)(?![\w-])'
+    # Command-line options (flagship slice 2d.5c2b), read where `copilot` is run. The CLI's documentation is
+    # GitHub's, in github/docs. "These options" are `--allow-all-tools`, `--allow-all` and `--yolo` (lines 98
+    # and 100). Not read: `--allow-all-paths` and `--allow-all-urls` alone (no sentence of warning names
+    # them), the variable `COPILOT_ALLOW_ALL`, and spellings such as
+    # `--allowAllTools` or a beginning of an option: the CLI's parser is not in its public files.
+    flags:
+      - id: allow-all
+        options: [--allow-all-tools, --allow-all, --yolo]
+        severity: high
+        read: 2026-11-19
+        says: It is strongly recommended that you only use these options in an isolated environment.
+        source: https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools.md#L104-L105
+      - id: show-secrets
+        options: [--show-secrets]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          `--show-secrets` can print sensitive environment variable and header values to your terminal or
+          logs. Only use this option in trusted environments, and avoid copying, pasting, or otherwise
+          capturing the output in shared logs or history.
+        source: https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-command-reference.md#L1083-L1084
+      - id: trust-folder
+        options: [--trust-folder]
+        severity: medium
+        read: 2026-11-19
+        says: Only use this for configuration you have reviewed.
+        source: https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-programmatic-reference.md#L53
+      - id: share-gist
+        options: [--share-gist]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Publish the session transcript as a secret GitHub gist after completion. Convenient for sharing
+          results from CI. Note that session transcripts may contain sensitive information.
+        source: https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-programmatic-reference.md#L55
+      - id: share
+        options: [--share]
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Export the session transcript to a markdown file after non-interactive completion (defaults to
+          `./copilot-session-<ID>.md`). Useful for auditing or archiving what the agent did. Note that session
+          transcripts may contain sensitive information.
+        source: https://github.com/github/docs/blob/39c1e014c75e972ab1fe531a81bc5bd42b543b07/content/copilot/reference/copilot-cli-reference/cli-programmatic-reference.md#L54
+    carried: ["copilot -p and --prompt"]
+
+  - id: qodo
+    name: Qodo Command
+    read: 2026-11-18
+    sources:
+      - https://github.com/qodo-ai/command/blob/e08f6fc8ad97a26bac17023e7a80eb4998a7e730/action.yml
+      - https://github.com/qodo-ai/command/blob/e08f6fc8ad97a26bac17023e7a80eb4998a7e730/README.md
+    # The README read says the action and `@qodo/command` are retired and that the current CLI is
+    # `@qodo/cli`; a workflow may still use either.
+    actions:
+      qodo-ai/command: {prompt_inputs: [prompt]}
+    commands:
+      - '@qodo/(command|cli)(?![\w-])'
+    programs: []
+    prompt_flags: []
+    packages:
+      npm: ["@qodo/command", "@qodo/cli"]
+    installs: {}
+    install_urls: []
+    settings: []
+    no_warnings: >-
+      Read on 2026-11-19 at e08f6fc: action.yml and README.md. The README says the action was retired on
+      2026-11-01 and that every invocation returns a retirement error before it reads credentials or
+      runs a prompt; nothing warns about an input's value.
+
+  - id: claude-code-security-review
+    name: Claude Code Security Reviewer
+    read: 2026-11-18
+    sources:
+      - https://github.com/anthropics/claude-code-security-review/blob/0c6a49f1fa56a1d472575da86a94dbc1edb78eda/action.yml
+    actions:
+      anthropics/claude-code-security-review:
+        prompt_inputs: [custom-security-scan-instructions, false-positive-filtering-instructions]
+    commands: []
+    programs: []
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+    no_warnings: >-
+      Read on 2026-11-19 at 0c6a49f: action.yml and README.md. The README warns that the action is not
+      hardened against prompt injection and should only review trusted pull requests (line 45), which is
+      about which events run it, not about an input's value; `run-every-commit`'s warning is about false
+      positives.
+
+  - id: auggie
+    name: Augment Auggie
+    read: 2026-11-18
+    sources:
+      - https://github.com/augmentcode/augment-action/blob/a2c41eb7e60fc44e2d269468cbcdeb651b8bd680/action.yml
+      - https://github.com/augmentcode/augment-agent/blob/cd94b92e0971d54781546c5889f28e24d5efee77/action.yml
+      - https://github.com/augmentcode/auggie/blob/8bd7186ea04e77d11f63e5850482643c8767666b/README.md
+    actions:
+      augmentcode/augment-action: {prompt_inputs: [prompt]}
+      augmentcode/augment-agent: {prompt_inputs: [instruction, instruction_file, custom_context]}
+    commands:
+      - '(^|[\s;&|(/"''`])auggie["''`]?\s+([^\n;&|]*\s)?--print\b'
+      - '@augmentcode/auggie(?![\w-])'
+    programs: [auggie]
+    prompt_flags: [--print]
+    packages:
+      npm: ["@augmentcode/auggie"]
+    installs: {"@augmentcode/auggie": auggie}
+    install_urls: []
+    settings: []
+    no_warnings: >-
+      Read on 2026-11-19: augmentcode/augment-action at a2c41eb, augmentcode/augment-agent at cd94b92 and
+      augmentcode/auggie at 8bd7186 (action files, README files and docs). The only warning is that the
+      tokens are credentials, which is not about a setting's value.
+
+  - id: continue
+    name: Continue
+    read: 2026-11-18
+    sources:
+      - https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/actions/general-review/action.yml
+      - https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/extensions/cli/README.md
+      - https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/docs/guides/notion-continue-guide.mdx
+    actions:
+      continuedev/continue/actions/general-review: {prompt_inputs: []}
+    commands:
+      - '(^|[\s;&|(/"''`])cn["''`]?\s+([^\n;&|]*\s)?-p\b'
+      - '@continuedev/cli(?![\w-])'
+    programs: [cn]
+    prompt_flags: [-p]
+    packages:
+      npm: ["@continuedev/cli"]
+    installs: {"@continuedev/cli": cn}
+    install_urls:
+      - 'raw\.githubusercontent\.com/continuedev/continue/[^/\s]+/extensions/cli/scripts/install\.(sh|ps1)\b'
+    settings: []
+    # Command-line options (flagship slice 2d.5c2b), read where `cn` is run. The CLI's reference describes
+    # `--auto` as "Allow all tools without prompting" (docs/cli/tool-permissions.mdx, line 82); the warning is
+    # in a guide.
+    flags:
+      - id: auto
+        options: [--auto]
+        severity: medium
+        read: 2026-11-19
+        says: Always test prompts in TUI mode first before running them with `--auto` in production.
+        source: https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/docs/guides/notion-continue-guide.mdx#L177-L178
+
+  - id: jules
+    name: Jules
+    read: 2026-11-18
+    sources:
+      - https://github.com/google-labs-code/jules-action/blob/bff7875eaa123cac6742b7cfc51005b95ba4d566/action.yaml
+    actions:
+      google-labs-code/jules-action: {prompt_inputs: [prompt]}
+    commands: []
+    programs: []
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+    no_warnings: >-
+      Read on 2026-11-19 at bff7875: action.yaml and README.md. The README warns that issue-triggered
+      workflows can be exploited (line 159), which is about events, not an input; the action sends
+      `requirePlanApproval: false` itself (action.yaml, line 74), which no input changes.
+
+  - id: goose
+    name: goose
+    read: 2026-11-18
+    sources:
+      - https://github.com/block/goose/blob/024e4cd5a8b878d0b45bb8c7dbd83ddf2801a599/README.md
+      - https://goose-docs.ai/docs/guides/running-tasks
+      - https://www.mankier.com/1/goose-run
+      - https://github.com/block/goose/blob/024e4cd5a8b878d0b45bb8c7dbd83ddf2801a599/documentation/docs/guides/goose-cli-commands.md
+    actions: {}
+    # `goose run` only: another tool named goose (database migrations) has no `run` command.
+    commands:
+      - '(^|[\s;&|(/"''`])goose["''`]?\s+([^\n;&|]*\s)?run\b'
+    programs: [goose]
+    prompt_flags: [-t, --text, -i, --instructions, --recipe]
+    packages: {}
+    installs: {}
+    install_urls:
+      - 'github\.com/(block|aaif-goose)/goose/releases/download/\S*/download_cli\.sh\b'
+    settings: []
+    shared_program: >-
+      pressly's database migration tool is also `goose` (`goose postgres "$DB" up`). A `goose` command the
+      checker cannot read is not "cannot tell" where every place the step names `goose` is followed by that
+      tool's own options, database drivers or commands.
+    # pressly/goose's usage: `goose [OPTIONS] DRIVER DBSTRING COMMAND`, or `goose COMMAND` with GOOSE_DRIVER.
+    other_program: '\s+(-dir|-table|-allow-missing|-no-versioning|-certfile|-ssl-cert|-ssl-key|-s\b|-v\b|-h\b|postgres|mysql|sqlite3|mssql|redshift|tidb|clickhouse|vertica|ydb|turso|starrocks|up|up-by-one|up-to|down|down-to|redo|reset|status|create|fix|validate)(?![\w-])'
+    # Command-line options (flagship slice 2d.5c2b), read where `goose` is run. goose's approval mode is the
+    # variable `GOOSE_MODE`, not an option, and is not read.
+    flags:
+      - id: unauthenticated
+        options: [--dangerously-unauthenticated]
+        severity: medium
+        read: 2026-11-19
+        says: Only use `--dangerously-unauthenticated` with local trusted clients.
+        source: https://github.com/block/goose/blob/024e4cd5a8b878d0b45bb8c7dbd83ddf2801a599/documentation/docs/guides/goose-cli-commands.md#L712
+
+  - id: kilo
+    name: Kilo Code
+    read: 2026-11-18
+    sources:
+      - https://github.com/Kilo-Org/kilocode/blob/956f3146050c68d82d11378442fef240703164ae/github/action.yml
+      - https://github.com/Kilo-Org/kilocode/blob/956f3146050c68d82d11378442fef240703164ae/README.md
+      - https://github.com/Kilo-Org/kilocode/blob/956f3146050c68d82d11378442fef240703164ae/packages/opencode/src/cli/cmd/run.ts
+    actions:
+      Kilo-Org/kilocode/github: {prompt_inputs: [prompt]}
+    commands:
+      - '(^|[\s;&|(/"''`])kilo["''`]?\s+([^\n;&|]*\s)?run\b'
+      - '@kilocode/cli(?![\w-])'
+    programs: [kilo]
+    prompt_flags: []
+    packages:
+      npm: ["@kilocode/cli"]
+    installs: {"@kilocode/cli": kilo}
+    install_urls:
+      - 'kilo\.ai/cli/install\b'
+    settings: []
+    # Command-line options (flagship slice 2d.5c2b), read where `kilo` is run, from the CLI's own help text.
+    # `--yolo` and `--dangerously-skip-permissions` are hidden options of the same command (run.ts, lines
+    # 261 to 270) that skip the permission checks `--auto` only answers (lines 298 and 780), so they are
+    # read with the sentence about `--auto`, the wider reading; yargs also takes the camel-case
+    # `--dangerouslySkipPermissions`. The README says the same of `--auto` (line 144: "Only use it in
+    # trusted environments.").
+    flags:
+      - id: auto
+        options: [--auto, --yolo, --dangerously-skip-permissions, --dangerouslySkipPermissions]
+        severity: high
+        read: 2026-11-19
+        says: "auto-approve permissions that are not explicitly denied (dangerous!)"
+        source: https://github.com/Kilo-Org/kilocode/blob/956f3146050c68d82d11378442fef240703164ae/packages/opencode/src/cli/cmd/run.ts#L256-L260
+
+  - id: kiro
+    name: Kiro CLI
+    read: 2026-11-18
+    sources:
+      - https://kiro.dev/docs/cli/headless/
+    actions: {}
+    commands:
+      - '(^|[\s;&|(/"''`])kiro-cli["''`]?\s+([^\n;&|]*\s)?--no-interactive\b'
+    programs: [kiro-cli]
+    prompt_flags: [--no-interactive]
+    packages: {}
+    installs: {}
+    install_urls:
+      - 'cli\.kiro\.dev/install\b'
+    settings: []
+    no_warnings: >-
+      Kiro CLI's options are documented on kiro.dev, which is not a file at a commit; kirodotdev/Kiro at
+      efac9e3 documents none of them. Nothing is reported until a file at a commit says something.
+
+  - id: qwen-code
+    name: Qwen Code
+    read: 2026-11-18
+    sources:
+      - https://github.com/QwenLM/qwen-code-action/blob/05f81718976f3b7da657422e6e8e4d372b8621d7/action.yml
+      - https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/README.md
+      - https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/docs/users/features/headless.md
+      - https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/packages/cli/src/config/top-level-options.ts
+    actions:
+      QwenLM/qwen-code-action: {prompt_inputs: [prompt]}
+    commands:
+      - '(^|[\s;&|(/"''`])qwen["''`]?\s+([^\n;&|]*\s)?(-p|--prompt)\b'
+      - '@qwen-code/qwen-code(?![\w-])'
+    programs: [qwen]
+    prompt_flags: [-p, --prompt]
+    packages:
+      npm: ["@qwen-code/qwen-code"]
+    installs: {"@qwen-code/qwen-code": qwen}
+    install_urls:
+      - 'qwen-code-assets\.oss-cn-hangzhou\.aliyuncs\.com/installation/install-qwen-standalone\.(sh|ps1)\b'
+    # The action runs `qwen --yolo` itself, whatever its inputs say (action.yml, line 232), so no input turns
+    # it on or off and none is reported for it (flagship slice 2d.5c2b). It passes `qwen_debug` through
+    # `fromJSON` (line 315), so the JSON string `"true"` turns debugging on too.
+    settings:
+      - id: debug
+        action: QwenLM/qwen-code-action
+        input: qwen_debug
+        equals: ["true"]
+        json: true
+        severity: medium
+        read: 2026-11-19
+        says: >-
+          Qwen Code debug logging is enabled. This will stream responses, which could reveal sensitive
+          information if processed with untrusted inputs.
+        source: https://github.com/QwenLM/qwen-code-action/blob/05f81718976f3b7da657422e6e8e4d372b8621d7/action.yml#L228
+    # Command-line options (flagship slice 2d.5c2b), read where `qwen` is run. High: the same sentence says
+    # `--yolo` turns on no sandbox, so every tool runs at the runner's privilege (Gemini CLI's is medium
+    # because its sandbox comes on with it). Qwen Code reads its options with yargs (`-y` is `--yolo`'s
+    # alias in packages/cli/src/config/top-level-options.ts, lines 250 to 256), which also takes `--y` and
+    # the camel-case `--approvalMode`. Its other approval modes are not here: `auto` is the CLI's default
+    # (packages/cli/src/config/config.ts, line 2009) and `auto-edit` allows less than it.
+    flags:
+      - id: yolo
+        options: [--yolo, -y, --y]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          Headless / CI runs combined with `--yolo` (or `--approval-mode=yolo`) auto-approve every tool call,
+          including `shell`, `write`, and `edit`. **`--yolo` does not enable a sandbox** — those tools run at
+          the host process's privilege level.
+        source: https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/docs/users/features/headless.md#L338
+      - id: insecure
+        options: [--insecure]
+        severity: medium
+        read: 2026-11-19
+        says: "WARNING: removes protection against man-in-the-middle attacks."
+        source: https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/packages/cli/src/config/top-level-options.ts#L145-L150
+      - id: approval-mode-yolo
+        options: [--approval-mode, --approvalMode]
+        equals: [yolo]
+        severity: high
+        read: 2026-11-19
+        says: >-
+          Headless / CI runs combined with `--yolo` (or `--approval-mode=yolo`) auto-approve every tool call,
+          including `shell`, `write`, and `edit`. **`--yolo` does not enable a sandbox** — those tools run at
+          the host process's privilege level.
+        source: https://github.com/QwenLM/qwen-code/blob/d9ac287c9fd5fe46382aa28d6222f0c7d058f51f/docs/users/features/headless.md#L338
+
+  - id: swe-agent
+    name: SWE-agent
+    read: 2026-11-18
+    sources:
+      - https://github.com/SWE-agent/SWE-agent/blob/3ea751c087f32b16e039a2233dd6eefecef325d5/docs/usage/cli.md
+    actions: {}
+    commands:
+      - '(^|[\s;&|(/"''`])sweagent["''`]?\s+([^\n;&|]*\s)?run\b'
+    programs: [sweagent]
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+    no_warnings: >-
+      Read on 2026-11-19 at 3ea751c: docs/usage/cli.md and docs/config. None of them warns about an option's
+      value.
+
+  - id: warp
+    name: Warp Oz
+    read: 2026-11-18
+    sources:
+      - https://github.com/warpdotdev/oz-agent-action/blob/b0c640eb560d1f2fc283244c582830aa16cefd8c/action.yml
+      - https://github.com/warpdotdev/warp-agent-action/blob/fee7dc8441f64d14a4ae22596eb68167ced24a1a/action.yml
+    actions:
+      warpdotdev/oz-agent-action: {prompt_inputs: [prompt, saved_prompt, skill]}
+      warpdotdev/warp-agent-action: {prompt_inputs: [prompt, saved_prompt]}
+    commands: []
+    programs: []
+    prompt_flags: []
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+    no_warnings: >-
+      Read on 2026-11-19: warpdotdev/oz-agent-action at b0c640e and warpdotdev/warp-agent-action at fee7dc8
+      (action files and READMEs). None of them warns about an input's value.
+
+  - id: amp
+    name: Amp
+    read: 2026-11-18
+    sources:
+      - https://ampcode.com/docs/cli/execute-mode
+    actions: {}
+    commands:
+      - '(^|[\s;&|(/"''`])amp["''`]?\s+([^\n;&|]*\s)?(-x|--execute)\b'
+    programs: [amp]
+    prompt_flags: [-x, --execute]
+    packages: {}
+    installs: {}
+    install_urls: []
+    settings: []
+    no_warnings: >-
+      Amp's options are documented on ampcode.com, which is not a file at a commit, and no public repository
+      of Amp's own was found. Nothing is reported.
 
 # Files that steer agents (R5). Glob patterns relative to the repository
 # root; `**` matches any number of directories.
 instruction_files:
+  # Matched without regard to letter case. Where a tool reads a file or folder in every directory,
+  # the pattern starts with **/ (slice 2d.2h; each name is from the tool's own documentation, listed
+  # in docs/bypass-attempts.md). Files that an instruction file pulls in by reference (`@path`,
+  # Aider's `read:`) are not followed.
   - AGENTS.md
   - "**/AGENTS.md"
+  - "**/AGENTS.override.md"
   - AGENT.md
   - "**/AGENT.md"
+  - REVIEW.md
   - opencode.json
   - opencode.jsonc
   - CLAUDE.md
   - "**/CLAUDE.md"
-  - CLAUDE.local.md
+  - "**/CLAUDE.local.md"
   - GEMINI.md
   - "**/GEMINI.md"
   - .github/copilot-instructions.md
@@ -59,19 +996,29 @@ instruction_files:
   - ".github/prompts/**"
   - ".github/chatmodes/**"
   - ".github/agents/**"
+  - ".github/skills/**"
+  - ".github/hooks/**"
+  - ".agents/**"
   - .cursorrules
-  - ".cursor/rules/**"
+  - "**/.cursor/**"
   - .windsurfrules
-  - ".windsurf/rules/**"
+  - "**/.windsurf/**"
   - .clinerules
   - ".clinerules/**"
-  - ".claude/**"
+  - ".cline/**"
+  - "**/.claude/**"
   - ".gemini/**"
   - ".codex/**"
   - .mcp.json
   - .vscode/mcp.json
   - ".continue/**"
-  - .aider.conf.yml
+  - "**/.aider.conf.yml"
+  - ".junie/**"
+  - ".amazonq/**"
+  - ".kiro/**"
+  - .rules
+  - ".augment/**"
+  - .augment-guidelines
 
 # Steps that upload or publish release artifacts (G7.2, FR6).
 upload_actions:
@@ -83,6 +1030,14 @@ upload_actions:
   - manleydev/butler-publish-itchio-action
   - yeslayla/butler-publish-itchio-action
   - Apple-Actions/upload-testflight-build
+  # Added by flagship slice 2d.2d: actions whose only job is to publish a package.
+  - pypa/gh-action-pypi-publish
+  - js-devtools/npm-publish
+  - goreleaser/goreleaser-action
+  - rubygems/release-gem
+  # Flagship slice 2d.2e: release assets uploaded by actions the list did not name.
+  - svenstaro/upload-release-action
+  - actions/upload-release-asset
 upload_commands:
   - '(^|[\s;&|(])steamcmd\b.*\+run_app_build'
   - '(^|[\s;&|(])butler\s+push\b'
@@ -93,12 +1048,52 @@ upload_commands:
   - '(^|[\s;&|(])az\s+storage\s+blob\s+upload'
   - '(^|[\s;&|(])fastlane\s+\S*(deliver|upload_to_app_store|upload_to_testflight|pilot|supply|upload_to_play_store)'
   - '(^|[\s;&|(])xcrun\s+altool\b.*--upload'
-  - '(^|[\s;&|(])(npm|pnpm|yarn)\s+publish\b'
+  - '(^|[\s;&|(])(npm|pnpm|yarn)\s+publish\b(?!(?=[^\n;&|#]*\s--dry-run(=true)?(?!\S)(?!\s+(false|0|no)(\s|$)))(?![^\n;&|#]*\s(--dry-run=(false|0|no)|--dry-run\s+(false|0|no)|--no-dry-run)(?!\S)))'
   - '(^|[\s;&|(])twine\s+upload\b'
-  - '(^|[\s;&|(])cargo\s+publish\b'
+  - '(^|[\s;&|(])cargo\s+publish\b(?!(?=[^\n;&|#]*\s--dry-run(=true)?(?!\S)(?!\s+(false|0|no)(\s|$)))(?![^\n;&|#]*\s(--dry-run=(false|0|no)|--dry-run\s+(false|0|no)|--no-dry-run)(?!\S)))'
   - '(^|[\s;&|(])dotnet\s+nuget\s+push\b'
   - '(^|[\s;&|(])docker\s+push\b'
-  - '(^|[\s;&|(]|\./)scripts?/publish'
+  - '(^|[\s;&|(]|\./)scripts?/(publish|release|deploy)'
+  # Added by flagship slice 2d.2d, from a reviewer's attempts on OBAAF-GHA-015. Each is matched in the
+  # script as written, with continued lines joined, and with quotes taken out.
+  - '(^|[\s;&|(])gh\s+release\s+edit\b'
+  - '(^|[\s;&|(])gh\s+api\b[^\n]*/releases\b'
+  - '(^|[\s;&|(])git\s+push\b[^\n]*\s--(tags|follow-tags)\b'
+  - '(^|[\s;&|(])aws\s+(-\S+\s+\S+\s+)*s3\s+(cp|sync|mv)\b'
+  - '(^|[\s;&|(])docker\s+(buildx\s+)?(build|bake)\b[^\n]*\s--push\b'
+  # Flagship slice 2d.14: an image build whose output pushes, read as `workflow.image_output_pushes` reads
+  # an action's `outputs`: `-o`/`--output` of type `registry`, of type `image` with a `push` or
+  # `push-by-digest` that is not false or an expression in it, or whose type or whole value is an
+  # expression; bake's `--set` of an `output` the same way (also `+=`), of `push` not false, or with an
+  # expression before its `=`. It looks up to 8,192 characters or quoted strings into one command, past
+  # quoted text but not past an unquoted `;`, `&` or `|`, and reads each output's first 256 characters or
+  # expressions, not past a space before the next option, inside an expression too. And a multi-platform
+  # image's manifest list, which `docker buildx imagetools create` pushes unless it is given `--dry-run`.
+  - '(^|[\s;&|(])docker\s+(buildx\s+(build|bake|b)|(builder\s+|image\s+)?(build|bake))\b(?:[^\n;&|''"]|''[^''\n]{0,4096}''|"[^"\n]{0,4096}"){0,8192}?\s((-o(\s+|=)?|--output(\s+|=))[''"]?(?:(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}type=registry\b)|(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}type=image\b)(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}(?:\bpush(?:-by-digest)?=(?!(false|False|FALSE|0|f|F)\b)|\$\{\{))|(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}type=\$\{\{)|\$\{\{)|--set(\s+|=)[''"]?(?:[^\s;&|''"=]*\$\{\{|[^\s;&|''"=.]*\.(push\+?=(?!(false|False|FALSE|0|f|F)\b)|outputs?\+?=[''"]?(?:(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}type=registry\b)|(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}type=image\b)(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}(?:\bpush(?:-by-digest)?=(?!(false|False|FALSE|0|f|F)\b)|\$\{\{))|(?=(?:[^\s;&|''"$,]|,\s*(?!-)|\$(?!\{\{)|\$\{\{(?:[^}\n\s]|\s(?!-)){0,256}\}\}){0,256}type=\$\{\{)|\$\{\{))))'
+  - '(^|[\s;&|(])docker\s+buildx\s+imagetools\s+create\b(?![^\n;&|#]{0,65536}\s--dry-run(=(true|True|TRUE|1|t|T))?(?=\s|$))'
+  - '(^|[\s;&|(])docker\s+(image|manifest)\s+push\b'
+  - '(^|[\s;&|(])(npm|pnpm|yarn)\s+(-\S+\s+)*(npm\s+)?publish\b(?!(?=[^\n;&|#]*\s--dry-run(=true)?(?!\S)(?!\s+(false|0|no)(\s|$)))(?![^\n;&|#]*\s(--dry-run=(false|0|no)|--dry-run\s+(false|0|no)|--no-dry-run)(?!\S)))'
+  - '(^|[\s;&|(])cargo\s+(\+\S+\s+)?publish\b(?!(?=[^\n;&|#]*\s--dry-run(=true)?(?!\S)(?!\s+(false|0|no)(\s|$)))(?![^\n;&|#]*\s(--dry-run=(false|0|no)|--dry-run\s+(false|0|no)|--no-dry-run)(?!\S)))'
+  - '(^|[\s;&|(])(uv|poetry|hatch|flit)\s+publish\b(?!(?=[^\n;&|#]*\s--dry-run(=true)?(?!\S)(?!\s+(false|0|no)(\s|$)))(?![^\n;&|#]*\s(--dry-run=(false|0|no)|--dry-run\s+(false|0|no)|--no-dry-run)(?!\S)))'
+  - '(^|[\s;&|(])gem\s+push\b'
+  - '(^|[\s;&|(])(firebase\s+deploy|wrangler\s+(deploy|publish)|netlify\s+deploy\b[^\n]*--prod|vercel\b[^\n]*--prod)\b'
+  - '(^|[\s;&|(])curl\b[^\n]*\s(-T|--upload-file)\s'
+  - '\b(createRelease|uploadReleaseAsset|updateRelease)\s*\('
+  # Flagship slice 2d.2e: publishing the list did not name. The Maven, Gradle and JFrog forms are the
+  # Jenkins list's; `gh` with options before `release`; registries for charts, images and packages.
+  - '(^|[\s;&|(])(\./)?(mvn|mvnw)\b[^\n;&|]*\s(deploy|release:perform)\b(?![^\n;&|#]*\s-DaltDeploymentRepository=\S*::file:)'
+  - '(^|[\s;&|(])(\./)?(gradle|gradlew)\b[^\n;&|]*\s(publish(?!ToMavenLocal\b)\w*|uploadArchives)\b'
+  - '(^|[\s;&|(])(\./)?sbt\b[^\n;&|]*\s(\+?publish(Signed)?|\+?release)\b'
+  - '(^|[\s;&|(])(jf|jfrog)\s+rt\s+(u|upload|dp|docker-push|bp|build-publish)\b'
+  - '(^|[\s;&|(])gh\s+(-\S+\s+\S+\s+)*release\s+(upload|create|edit)\b'
+  - '(^|[\s;&|(])(helm|oras|podman|crane)\s+push\b(?![^\n;&|#]*\s(oci://)?(localhost|127\.0\.0\.1)[:/])'
+  - '(^|[\s;&|(])(semantic-release|changeset\s+publish|bun\s+publish|jsr\s+publish|vsce\s+publish|ovsx\s+publish)\b(?!(?=[^\n;&|#]*\s(--dry-run(=true)?|-d)(?!\S)(?!\s+(false|0|no)(\s|$)))(?![^\n;&|#]*\s(--dry-run=(false|0|no)|--dry-run\s+(false|0|no)|--no-dry-run)(?!\S)))'
+  - '(^|[\s;&|(])(maturin|pdm)\s+(publish|upload)\b'
+  - '(^|[\s;&|(])pod\s+trunk\s+push\b'
+  - '(^|[\s;&|(])goreleaser\s+release\b(?![^\n;&|#]*\s(--snapshot|--skip[= ]\S*publish|--skip-publish)(\s|$))'
+  - '(^|[\s;&|(])aws\s+(-\S+\s+\S+\s+)*s3api\s+put-object\b'
+  - 'uploads\.github\.com'
+  - '\brequest\s*\(\s*[''"]POST\s+/repos/[^''"]*/releases'
 
 # Jenkins only (advisory): Pipeline steps and commands that publish outside Jenkins. The
 # commands extend upload_commands for Jenkinsfiles; they are kept separate so adding them
@@ -130,18 +1125,6 @@ jenkins_upload_commands:
   - '(^|[\s;&|(])curl\b[^\n;&|]*\s(-T|--upload-file)\s'
   - '(^|[\s;&|(])az\s+artifacts\s+universal\s+publish\b'
 
-# Agent CLIs installed from a package registry (R6). An install without a version, or with
-# a moving tag such as @latest, runs whatever was published last. npm and PyPI names.
-agent_packages:
-  - "@anthropic-ai/claude-code"
-  - "@google/gemini-cli"
-  - "@openai/codex"
-  - "@github/copilot"
-  - opencode-ai
-  - aider-chat
-  - aider-install
-  - "@qodo/command"
-
 # Steps that sign provenance or other attestations (G7.1, FR5).
 provenance_actions:
   - actions/attest-build-provenance
@@ -164,8 +1147,9 @@ release_verify_commands:
 # Steps that verify an agent's signed record (R8) and check its proposal (R4) before applying
 # it. An effect job needs both, in the job itself or in a job it needs (OBAAF-GHA-021).
 record_verify_commands:
+  # Flagship slice 2d.2e: `gh attestation verify` is no longer counted here. It checks a signature and
+  # a predicate type, not the record's run, snapshot or what the agent was allowed.
   - '(^|[\s;&|(])obaaf\s+verify\s+agent-run\b'
-  - '(^|[\s;&|(])gh\s+attestation\s+verify\b'
 proposal_check_commands:
   - '(^|[\s;&|(])obaaf\s+proposal\s+check\b'
 
@@ -181,14 +1165,107 @@ signing_secret_patterns:
   - 'CERTIFICATE_?(P12|PFX|BASE64)'
   - 'DEVELOPER_?ID_?CERT'
   - 'MATCH_?PASSWORD'
-# Commands that load a key file into the build environment.
+  - 'KEY_?STORE'
+  - '(^|_)CSC_(LINK|KEY_PASSWORD)($|_)'
+  - '(^|_)(MACOS|APPLE|WINDOWS|WIN|MAC)_?(CODESIGN_?)?CERT(IFICATE)?($|_)'
+  # Flagship slice 2d.2i (names a Jenkins attack got past; `-` and `.` are read as `_` in Jenkins):
+  # release.jks, secring.gpg, signing.asc, a credential named GPG, signingInMemoryKey (Gradle),
+  # ios-dist-cert, artifact-signer-key. Not `signer` alone: OBAAF's own Jenkins
+  # template names `obaaf-release-signer` a credential that can only ask a KMS to sign.
+  # Not `ASC` alone (App Store Connect's ASC_KEY_ID), a `GPG_` prefix (GPG_FINGERPRINT) or an upload key
+  # (SENTRY_UPLOAD_KEY): the review of slice 2d.2i found them on ordinary workflows.
+  - '(^|_)(GPG|PGP)$'
+  - '(^|_)(JKS|SECRING)($|_)'
+  - '(^|_)(SIGN(ING)?|PRIVATE|SECRET|KEY)_?ASC($|_)'
+  - 'SIGNING_?IN_?MEMORY'
+  - 'DIST(RIBUTION)?_?CERT'
+  - 'SIGNER_?KEY'
+# Commands that load a key file into the build environment. A command continued on the next line
+# with a backslash is joined before these are matched.
 signing_commands:
-  - 'cosign\s+(sign|attest)(-blob)?\b(?!.*--key\s+(awskms|gcpkms|azurekms|hashivault|k8s)://).*--key\b'
-  - 'signtool(\.exe)?\s+sign\b.*\s/f\s'
-  - '(^|[\s;&|(])gpg\s+(--batch\s+)?--import\b'
-  - '(^|[\s;&|(])security\s+import\b.*\.p12'
+  # `--key=awskms://...` is a key in a KMS too (flagship slice 2d.2i).
+  - 'cosign\s+(sign|attest)(-blob)?\b(?!.*--key(\s+|=)(awskms|gcpkms|azurekms|hashivault|k8s)://).*--key\b'
+  - '(?i)signtool(\.exe)?\s+sign\b.*\s/f\s'
+  - '(^|[\s;&|(/`])gpg2?(\.exe)?([ \t]+--?\w[\w-]*(=\S+|[ \t]+("[^"\n]*"|''[^''\n]*''|(?!["''-])[^\s;&|]+))?)*[ \t]+--import(?![\w-])'
+  # Any `security import` but of a public certificate or a provisioning profile (flagship slice 2d.2i:
+  # `security import "$P12"`).
+  - '(^|[\s;&|(])security\s+import\s+(?!\S*\.(?i:cer|crt|der|mobileprovision|provisionprofile)["'']?(\s|$))'
   - '(^|[\s;&|(])jarsigner\b.*-keystore\b'
-  - '(^|[\s;&|(])apksigner\s+sign\b.*--ks\b'
+  - '(^|[\s;&|(])apksigner\s+sign\b.*--(ks|key)\b'
+  - '(?i:\bImport-PfxCertificate\b)'
+  # Flagship slice 2d.2i: commands a Jenkins attack got past.
+  - '(?i)(^|[\s;&|(])certutil(\.exe)?\b.*\s-importpfx\b'
+  - 'cosign\s+import-key-pair\b'
+  - 'docker\s+trust\s+key\s+load\b'
+  - '(^|[\s;&|(])osslsigncode\s+sign\b.*\s-(pkcs12|key)\b'
+  - '(^|[\s;&|(])openssl\s+(dgst|pkeyutl)\b.*\s-sign\b'
+  - '(^|[\s;&|(])ssh-keygen\b.*\s-Y\s+sign\b'
+# Actions that load a signing key or certificate into the runner. Matched as a prefix of the
+# `uses:` value, before the `@`.
+signing_actions:
+  - crazy-max/ghaction-import-gpg
+  - apple-actions/import-codesign-certs
+
+# Inputs that an action runs as a shell command or a script (OBAAF-GHA-010, flagship slice 2d.2d). An
+# expression written in one is expanded before the action runs it, as in a step's `run`. Matched by the
+# action's name in any letter case; an action not listed here is not read.
+script_inputs:
+  actions/github-script: [script]
+  azure/cli: [inlineScript]
+  azure/powershell: [inlineScript]
+  appleboy/ssh-action: [script]
+  garygrossgarten/github-action-ssh: [command]
+  google-github-actions/ssh-compute: [command, script]
+  nick-fields/retry: [command, on_retry_command]
+  nick-invision/retry: [command, on_retry_command]
+  wandalen/wretry.action: [command]
+  addnab/docker-run-action: [run]
+  uraimo/run-on-arch-action: [run, install]
+  cypress-io/github-action: [build, start, command]
+  # From the zizmor parity test (flagship slice 2d.3b): zizmor's test workflows at v1.32.0 report both, and
+  # each runs its input as code. mikefarah/yq at b534aa9 passes `cmd` to its image, whose
+  # github-action/entrypoint.sh runs `eval "$1"` in sh; Amadevus/pwsh-script at 97a8b21 runs `script`
+  # as PowerShell (its action.yml gives it to action.ps1 as PWSH_SCRIPT_ACTION_TEXT).
+  mikefarah/yq: [cmd]
+  amadevus/pwsh-script: [script]
+
+# Secret names that hold a credential for publishing a release: a package registry, an app store, a
+# game store, a container registry (OBAAF-GHA-015, flagship slice 2d.2d). Matched without regard to
+# letter case. A job that holds one and that untrusted input can start is reported even when nothing
+# else marks it a release job.
+publishing_secret_patterns:
+  - '(^|_)NPM_?(TOKEN|AUTH|PUBLISH)'
+  - 'PYPI'
+  - 'TWINE_(PASSWORD|TOKEN)'
+  - 'CARGO_REGISTRY_TOKEN|CRATES_IO'
+  - 'RUBYGEMS|GEM_HOST_API_KEY'
+  - 'NUGET_?(API_?)?KEY'
+  - 'OSSRH|SONATYPE|MAVEN_(CENTRAL_)?(PASSWORD|TOKEN)'
+  - 'DOCKER_?(HUB)?_?(ACCESS_)?(TOKEN|PASSWORD|PAT)'
+  - '(^|_)(GHCR|REGISTRY|QUAY)_?(TOKEN|PASSWORD|PAT)'
+  - 'HEX_API_KEY|COCOAPODS_TRUNK_TOKEN|PUB_DEV|VSCE_PAT|OVSX_PAT'
+  - 'APP_?STORE_?CONNECT|ASC_(KEY|API)|APPLE_(API|ID)_?(KEY|PASSWORD)'
+  - 'GOOGLE_PLAY|PLAY_STORE|PLAY_SERVICE_ACCOUNT'
+  - 'STEAM_?(USERNAME|PASSWORD|CONFIG|TOTP)|STEAMWORKS'
+  - 'BUTLER_API_KEY|ITCH_?IO'
+  - 'CHROME_WEBSTORE|AMO_(JWT|API)|FIREFOX_ADDONS'
+  - '(^|_)(RELEASE|PUBLISH)_?(TOKEN|KEY|PAT)'
+
+# Actions that publish or deploy and are not among upload_actions (OBAAF-GHA-015, flagship slice 2d.2d).
+# They do not put a job in the release lane, which would bring the other release rules; a job that uses
+# one and that untrusted input can start is reported by OBAAF-GHA-015 as one that may release.
+publishing_actions:
+  - docker/build-push-action
+  - actions/deploy-pages
+  - peaceiris/actions-gh-pages
+  - jamesives/github-pages-deploy-action
+  - cloudflare/wrangler-action
+  - cloudflare/pages-action
+  - amondnet/vercel-action
+  - aws-actions/amazon-ecs-deploy-task-definition
+  - azure/webapps-deploy
+  - google-github-actions/deploy-cloudrun
+  - changesets/action
 
 # Evidence of an egress restriction for agent jobs (R7, FR7).
 egress_actions:
@@ -278,5 +1355,31 @@ harden_runner_releases:
 
 # Commits of OBAAF's egress action (actions/egress, slice 2c.2) that OBAAF lists as released: each
 # one a commit the escape tests passed on, listed by a maintainer. OBAAF-GHA-020 credits the action
-# only at one of these. None is listed yet, so the action is "cannot tell" at best.
-egress_action_releases: []
+# only at one of these. The workflow must also meet the other egress control conditions.
+#
+# Only a commit at or after `egress_action_floor` may be listed. The floor was the merge of slice 2c.4
+# (#128): the checker reads the action's `model-keys` and `env` inputs as the action reads them from
+# there, and the text beside a cleared finding describes the action's own resolver, which exists from
+# there (slice 2c.5, decision D-052). Since slice 2c.6 it is the last commit of that slice's change to
+# the action: before it, a command in the sandbox could reach the runner's own programs through their
+# sockets in /tmp, and a link it left in the copy reached a later step (decision D-054). Since slice
+# 2c.10a it is slice 2c.9's last change to the action: before it, the job's env, GITHUB_ENV and
+# GITHUB_PATH could make the action's own steps, which hold the step's env outside the sandbox, run
+# or load other code (bash, BASH_ENV, LD_PRELOAD, a program first on the PATH), or succeed without
+# running (LD_TRACE_LOADED_OBJECTS) (decision D-069). Since slice 2c.11b it is slice 2c.11a's change to
+# the action: before it, an OPENSSL_ variable the job set (OPENSSL_CONF, or Ubuntu's FIPS pair beside
+# OPENSSL_MODULES) made libcrypto load a module the job named into those steps' Python, where the key
+# is held; from it, egress.py removes every OPENSSL_ variable before the import that initialises
+# libcrypto, which the escape tests' openssl-modules job showed on a GitHub-hosted runner (run
+# 43817685428; decision D-071), so the checker no longer counts those names (decision D-072). Since
+# slice 2c.12b it is that slice's last change to the action: before it, those steps started in the locale
+# and with the time-zone file the job named, and their one download used the proxy and the CA file
+# the job named; from it, each step's env fixes LC_ALL and TZ and egress.py empties its environment
+# before it imports anything but os, which the escape tests' own-steps-environment job showed on a
+# GitHub-hosted runner (run 43986589031), so no further variable counts (decision D-075). A test
+# refuses a listed commit that does not have the floor as an ancestor in this repository's history, or
+# whose action's own steps differ from the floor's where the checker's verdicts rest on them. A later
+# commit that reads its inputs another way must not be listed until the checker reads it that way too.
+egress_action_floor: f3b50d418f421ea5dd17b277310fa11fe3541635
+egress_action_releases:
+  - 80db1e68769165c9ecf24e553254fa35d6e168d5

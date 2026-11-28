@@ -122,7 +122,7 @@ families:
           source, version, and digest. On a scratch branch, change one byte of a covered file without
           updating the manifest. Pass if the build fails.
         evidence: "The manifest file and the build step that checks it."
-        checks: [OBAAF-GHA-008, OBAAF-JEN-008]
+        checks: [OBAAF-GHA-008, OBAAF-GHA-025, OBAAF-JEN-008]
         tools: ["obaaf manifest create", "obaaf manifest check"]
 
       - id: G2.2
@@ -189,7 +189,7 @@ families:
           builds accept no jobs triggered by pull requests, forks, partners, or agents, and that
           interactive logins to them are disabled. Pass if both hold.
         evidence: "Build-agent pool configuration and access settings."
-        checks: [OBAAF-GHA-013, OBAAF-GHA-015, OBAAF-GHA-002, OBAAF-GHA-010, OBAAF-GHA-019, OBAAF-JEN-002, OBAAF-JEN-004, OBAAF-JEN-009, OBAAF-JEN-015]
+        checks: [OBAAF-GHA-013, OBAAF-GHA-015, OBAAF-GHA-002, OBAAF-GHA-010, OBAAF-GHA-028, OBAAF-GHA-019, OBAAF-JEN-002, OBAAF-JEN-004, OBAAF-JEN-009, OBAAF-JEN-015]
 
       - id: G3.2
         title: Use tiered isolation
@@ -555,7 +555,7 @@ families:
           write access to protected branches, and that a separate approved job applies its proposals.
           Pass if all hold.
         evidence: "Workflow permissions for each agent."
-        checks: [OBAAF-GHA-001, OBAAF-GHA-003, OBAAF-GHA-004, OBAAF-GHA-005, OBAAF-GHA-010, OBAAF-GHA-011, OBAAF-GHA-020, OBAAF-GHA-022, OBAAF-JEN-001, OBAAF-JEN-003, OBAAF-JEN-007, OBAAF-JEN-009]
+        checks: [OBAAF-GHA-001, OBAAF-GHA-003, OBAAF-GHA-004, OBAAF-GHA-005, OBAAF-GHA-010, OBAAF-GHA-028, OBAAF-GHA-011, OBAAF-GHA-020, OBAAF-GHA-022, OBAAF-JEN-001, OBAAF-JEN-003, OBAAF-JEN-007, OBAAF-JEN-009]
 
       - id: G8.2
         title: Protect agent instructions as code

@@ -13,9 +13,21 @@ from dataclasses import dataclass, field
 from importlib import resources
 from typing import Any
 
-from obaaf import yamlutil
+from obaaf import agent_tools, yamlutil
+from obaaf.causes import CauseCatalog
 
 DATA_FILES = ("profile", "assessment", "agent_controls", "compromises", "frameworks", "rules", "detection")
+# The longest a rule's `why` may be: one line of the text report (slice 3.2b).
+WHY_MAX = 160
+# Where a sentence ends inside a `why`: a full stop, question or exclamation mark, then white space
+# and anything but a lower-case ASCII letter (a capital in any script, a digit, a backtick, a quote);
+# a question or exclamation mark straight before an ASCII letter; or a full stop straight before an
+# ASCII capital and a lower-case letter (One.Two). A full stop inside a name or number (Node.JS,
+# v7.0.1) is not an end, and neither is one followed by a lower-case word: an abbreviation such as
+# "e.g. this" passes, and so would a second sentence that begins in lower case, which the catalogue
+# tests catch by refusing ". " anywhere in a `why`. Not caught either: a full stop followed by a
+# closing quote or bracket before the next sentence (`it." Then`), and "One.Écrit".
+_SENTENCE_END = re.compile(r"[.!?](?=\s+[^a-z\s])|[!?](?=[A-Za-z])|\.(?=[A-Z][a-z])")
 
 
 def _read(name: str) -> Any:
@@ -43,6 +55,12 @@ class Catalog:
     tiers: dict = field(default_factory=dict)         # tier number -> tier
     agent_requirements: dict = field(default_factory=dict)  # R-id -> requirement
     rules: dict = field(default_factory=dict)         # rule id -> rule
+    # Faults in the agent tools' entries as written (flagship slice 2d.5b): `detection` holds the lists
+    # built from them, so the entries are checked as they were read.
+    agent_tool_problems: list = field(default_factory=list)
+
+    cause_data: dict = field(default_factory=lambda: _read("causes"))
+    causes: CauseCatalog = field(init=False)
 
     def __post_init__(self) -> None:
         for fam in self.profile["families"]:
@@ -57,6 +75,7 @@ class Catalog:
             self.agent_requirements[req["id"]] = req
         for rule in self.rules_data["rules"]:
             self.rules[rule["id"]] = rule
+        self.causes = CauseCatalog(self.cause_data, self.rules)
 
     # ------------------------------------------------------------------ lookups
     def items_for_requirement(self, gid: str) -> list[dict]:
@@ -197,9 +216,18 @@ class Catalog:
             for rid in rule.get("agent_controls", []):
                 if rid not in self.agent_requirements:
                     out.append(f"{rule_id}: unknown agent control {rid}")
-            for key in ("title", "description", "fix"):
+            for key in ("title", "why", "description", "fix"):
                 if not str(rule.get(key, "")).strip():
                     out.append(f"{rule_id}: missing {key}")
+            # The line the text report prints under each finding (slice 3.2b): one sentence a stranger
+            # reads on a first run, so it is short and says one thing.
+            why = " ".join(str(rule.get("why", "")).split())
+            if why and len(why) > WHY_MAX:
+                out.append(f"{rule_id}: why must be at most {WHY_MAX} characters, not {len(why)}")
+            if why and not why.endswith("."):
+                out.append(f"{rule_id}: why must end with a full stop")
+            if why and _SENTENCE_END.search(why[:-1]):
+                out.append(f"{rule_id}: why must be one sentence")
             if rule.get("category") not in ("authority", "hygiene"):
                 out.append(f"{rule_id}: category must be 'authority' or 'hygiene', found {rule.get('category')!r}")
             if rule.get("remediation") not in (None, "config", "architecture"):
@@ -222,6 +250,8 @@ class Catalog:
                 checks = (self.agent_requirements.get(rid, {}).get("obaaf") or {}).get("checks") or []
                 if rid in self.agent_requirements and rule_id not in checks:
                     out.append(f"{rule_id} lists {rid}, but {rid} does not list {rule_id}")
+        out.extend(self.agent_tool_problems)
+        out.extend(self.causes.problems)
         return out
 
 
@@ -235,5 +265,6 @@ def load() -> Catalog:
         compromises=data["compromises"],
         frameworks=data["frameworks"],
         rules_data=data["rules"],
-        detection=data["detection"],
+        detection=agent_tools.expand(data["detection"]),
+        agent_tool_problems=agent_tools.problems(data["detection"]),
     )

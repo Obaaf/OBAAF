@@ -163,11 +163,48 @@ class JenkinsReleaseLaneTest(unittest.TestCase):
         # What the publish template runs before anyone approves.
         before = self.verify(envelopes, release_run=tag_build(self.rev), pre_approval=True)
         self.assertTrue(before.ok, before.blocks)
-        self.assertFalse(self.verify(envelopes, release_run=tag_build("b" * 40), pre_approval=True).ok)
+        blocked = self.verify(envelopes, release_run=tag_build("b" * 40), pre_approval=True)
+        self.assertFalse(blocked.ok)
+        # A pre-approval run that blocks never says PASSED (review of #393).
+        self.assertEqual(blocked.to_text().splitlines()[0], "Release verification: BLOCKED, do not upload")
         after = self.verify(envelopes, approvals=publish_run(), release_run=tag_build(self.rev))
         self.assertTrue(after.ok, after.blocks)
         self.assertEqual(after.approvals, ["carol"])
         self.assertEqual(after.artifacts[0]["tier"], "B")
+
+    def test_pre_approval_with_no_approvals_required_still_needs_full_verification(self):
+        self.policy.write_text(self.policy.read_text().replace("min_approvals: 1", "min_approvals: 0"))
+        result = self.verify(self.write_records(), release_run=tag_build(self.rev), pre_approval=True)
+        self.assertTrue(result.ok, result.blocks)
+        self.assertEqual(result.to_text().splitlines()[0],
+                         "Pre-approval checks: PASSED, full verification is still required")
+        # Nor is its JSON a decision to upload (#394): the tie to the tag build is not checked yet.
+        doc = result.to_dict()
+        self.assertEqual((doc["allowed"], doc["checksPassed"], doc["preApproval"], doc["approvalsRequired"]),
+                         (False, True, True, 0))
+
+    def test_the_json_decision_of_a_jenkins_release(self):
+        # #394: a pre-approval run's JSON never says the upload may proceed; the full run's does.
+        envelopes = self.write_records()
+        (self.tmp / "publish-run.json").write_text(json.dumps(publish_run()))
+        (self.tmp / "release-run.json").write_text(json.dumps(tag_build(self.rev)))
+        args = ["verify", "release", "--policy", self.policy, "--artifacts", self.dist,
+                "--release-run", self.tmp / "release-run.json", "--repo-dir", self.repo,
+                "--source-revision", self.rev, "--format", "json"]
+        for env in envelopes:
+            args += ["--dsse", env]
+        cases = ((["--pre-approval"], 0, (False, True, True)),
+                 ([], 1, (False, False, False)),
+                 (["--approvals", self.tmp / "publish-run.json"], 0, (True, True, False)))
+        for extra, expected_code, expected in cases:
+            with self.subTest(extra=extra):
+                code, out, err = run_cli(*args, *extra)
+                self.assertEqual(code, expected_code, err or out)
+                doc = json.loads(out)
+                self.assertEqual(doc["format"], "obaaf-release-decision/v0.2")
+                self.assertEqual((doc["allowed"], doc["checksPassed"], doc["preApproval"]), expected, doc["blocks"])
+                self.assertEqual(doc["approvalsRequired"], 1)
+                self.assertEqual(doc["approvals"], ["carol"] if expected[0] else [])
 
     def test_raw_r_s_signatures_from_a_key_service_are_accepted(self):
         self.assertTrue(self.verify(self.write_records(p1363=True), pre_approval=True).ok)
@@ -177,13 +214,39 @@ class JenkinsReleaseLaneTest(unittest.TestCase):
         (self.tmp / "publish-run.json").write_text(json.dumps(publish_run()))
         (self.tmp / "release-run.json").write_text(json.dumps(tag_build(self.rev)))
         args = ["verify", "release", "--policy", self.policy, "--artifacts", self.dist,
-                "--approvals", self.tmp / "publish-run.json", "--release-run", self.tmp / "release-run.json",
-                "--repo-dir", self.repo, "--source-revision", self.rev]
+                "--release-run", self.tmp / "release-run.json",
+                "--repo-dir", self.repo]
         for env in envelopes:
             args += ["--dsse", env]
-        code, out, _ = run_cli(*args)
-        self.assertEqual(code, 0, out)
-        self.assertIn("release approved by: carol", out)
+        code, out, err = run_cli(*args, "--source-revision", self.rev, "--pre-approval")
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual(out.splitlines()[0], "Pre-approval checks: PASSED, release approval is still required")
+        code, out, err = run_cli(*args, "--source-revision", self.rev)
+        self.assertEqual(code, 1, err or out)
+        self.assertEqual(out.splitlines()[0], "Release verification: BLOCKED, do not upload")
+        # Blocked for the missing approval itself, not only for the missing publishing build's JSON.
+        self.assertIn("no Jenkins approvals were supplied", out)
+        args += ["--approvals", self.tmp / "publish-run.json"]
+        revision_file = self.tmp / "release-sha.txt"
+        revision_file.write_text(self.rev + "\n", encoding="ascii")
+        for revision in (["--source-revision", self.rev], ["--revision-file", revision_file]):
+            code, out, err = run_cli(*args, *revision)
+            self.assertEqual(code, 0, err or out)
+            self.assertEqual(out.splitlines()[0], "Release verification: PASSED, upload may proceed")
+            self.assertIn("release approved by: carol", out)
+        revision_file.write_text("b" * 40, encoding="ascii")
+        self.assertEqual(run_cli(*args, "--revision-file", revision_file)[0], 1)
+        for invalid in (b"", b"main\n", self.rev.encode() + b"\nextra", b"f" * 1024):
+            revision_file.write_bytes(invalid)
+            code, _, err = run_cli(*args, "--revision-file", revision_file)
+            self.assertEqual(code, 2)
+            self.assertIn("expected one full lowercase Git commit ID", err)
+        revision_file.unlink()
+        self.assertEqual(run_cli(*args, "--revision-file", revision_file)[0], 2)
+        code, _, err = run_cli(*args, "--revision-file", "")
+        self.assertEqual(code, 2)
+        self.assertIn("--revision-file: no file named", err)
+        self.assertEqual(run_cli(*args, "--revision-file", revision_file, "--source-revision", self.rev)[0], 2)
 
     def test_records_name_the_jenkins_build_and_say_it_is_self_reported(self):
         self.write_records()
@@ -335,14 +398,28 @@ class JenkinsReleaseTemplatesTest(unittest.TestCase):
             self.assertEqual([(f.rule, f.line, f.message) for f in result.active()], [], name)
             self.assertNotIn("fail", {row["status"] for row in result.coverage}, name)
 
+    def test_publish_template_is_cannot_tell_only_for_its_path_change(self):
+        # Both checks run under withEnv(["PATH+OBAAF=..."]), with a `command -v` step that fails the build when the
+        # shell does not find the virtual environment's `obaaf`. The checker does not read that step, and a PATH change
+        # around a check can make its shell run another program, so the three rules cannot tell (the review of #365).
+        # Every reason they give is that change: nothing else in the template keeps them from passing.
+        result = check(TEMPLATES / "obaaf-release-publish.Jenkinsfile")
+        rows = {row["rule"]: row for row in result.coverage}
+        for rule in ("OBAAF-JEN-010", "OBAAF-JEN-011", "OBAAF-JEN-012"):
+            self.assertEqual(rows[rule]["status"], "unknown", rule)
+            self.assertTrue(rows[rule]["reasons"], rule)
+            for reason in rows[rule]["reasons"]:
+                self.assertIn("PATH+OBAAF is set around the step", reason, rule)
+
     def test_publish_template_verifies_and_approves_before_it_uploads(self):
         text = (TEMPLATES / "obaaf-release-publish.Jenkinsfile").read_text()
+        self.assertRegex(text, r"(?m)^  options \{\n(?:    [^\n]*\n)*?    disableRestartFromStage\(\)")
         verify = text.index("--approvals publish-run.json")
         self.assertLess(text.index("submitter: 'release-managers'"), verify)
         self.assertLess(verify, text.index("./scripts/publish.sh"))
         self.assertIn("aws kms sign", text)
         # Pre-approval checks already tie the artifacts to the tag build.
-        self.assertIn("--release-run release-run.json --repo-dir . --source-revision", text)
+        self.assertIn("--release-run release-run.json --repo-dir . --revision-file release-sha.txt", text)
 
     def test_publish_template_ships_only_the_build_that_started_it(self):
         text = (TEMPLATES / "obaaf-release-publish.Jenkinsfile").read_text()

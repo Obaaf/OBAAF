@@ -426,8 +426,12 @@ class SecretRulesTest(unittest.TestCase):
         self.assertIn("PACKAGE_INDEX_TOKEN", result["message"])
 
     def test_a_secret_stored_for_every_job_is_passed_whole(self):
+        # The called job reads what it is passed (slice 2b.9: before, it read PACKAGE_INDEX_TOKEN, which the caller
+        # does not pass, and which is now a finding of its own: see test_settings_reusable_secrets.TheIncidentTest).
+        reads_key = workflow("  workflow_call:\n", job("upload", "", "      - run: ./u\n        env:\n"
+                                                                    "          T: ${{ secrets.key }}\n"))
         found = assess_files(ADMIN, {"r.yml": self.caller("\n      key: ${{ secrets.MODEL_API_KEY }}"),
-                                     "publish.yml": self.callee()})
+                                     "publish.yml": reads_key})
         self.assertEqual(status(found, "OBAAF-SET-011"), "no-finding")
 
     def test_secret_names_not_read_is_cannot_tell_and_no_caller_does_not_apply(self):
@@ -953,13 +957,21 @@ class FirstReviewTest(unittest.TestCase):
     def test_an_environment_the_configuration_names_when_the_environments_were_not_all_read(self):
         files = {"x.yml": workflow("  push:\n", job("j"))}
         config = "protected_secrets:\n  DEPLOY_KEY: production\n"
-        partly = refused(ADMIN, f"{R}/environments/release/deployment-branch-policies?per_page=100")
-        for entries in (partly, refused(ADMIN, ENVIRONMENTS)):
-            results = [r for r in of(assess_files(entries, files, config=config), "OBAAF-SET-003")
-                       if r["subject"] == 'environment "production"']
-            self.assertEqual([(r["state"], r["unread"]) for r in results], [("cannot-tell", ["environments"])])
-        self.assertEqual(len([r for r in of(assess_files(ADMIN, files, config=config), "OBAAF-SET-003", "finding")
-                              if r["subject"] == 'environment "production"']), 1)
+
+        def production(entries):
+            return [r for r in of(assess_files(entries, files, config=config), "OBAAF-SET-003")
+                    if r["subject"] == 'environment "production"']
+
+        self.assertEqual([(r["state"], r["unread"]) for r in production(refused(ADMIN, ENVIRONMENTS))],
+                         [("cannot-tell", ["environments"])])
+        # Since slice 2b.9b: a part of another environment that was not read (its branch patterns, its custom
+        # rules) leaves the list whole, so an environment it does not hold does not exist. Before, this was
+        # "cannot tell" (the review of 2b.9b, B2).
+        for path in (f"{R}/environments/release/deployment-branch-policies?per_page=100",
+                     f"{R}/environments/release/deployment_protection_rules?per_page=100"):
+            self.assertEqual([(r["state"], r["severity"]) for r in production(refused(ADMIN, path))],
+                             [("finding", "high")], path)
+        self.assertEqual([(r["state"], r["severity"]) for r in production(ADMIN)], [("finding", "high")])
 
     # -- reusable workflows
     def test_ways_of_passing_an_environment_only_secret(self):
@@ -985,14 +997,19 @@ class FirstReviewTest(unittest.TestCase):
         found = assess_files(ADMIN, {"r.yml": caller, "p.yml": callee})
         self.assertEqual(self.states(found, "OBAAF-SET-011"), ["cannot-tell"])
 
-    def test_a_secret_passed_by_name_is_empty_whatever_the_called_job_declares(self):
+    def test_a_secret_passed_by_name_reaches_a_called_job_that_declares_the_environment(self):
+        # Slice 2b.9 (#212, item 1): GitHub's page on reusing workflows says "You can pass a secret by name even if
+        # it only exists in the environment" and "The job that sets `environment` receives the environment
+        # secret's value". Before, this was a finding that said the value was empty "whatever the called
+        # workflow declares", and the fix told the caller to stop passing it, which the page says empties it.
         caller = workflow("  push:\n", "  c:\n    uses: ./.github/workflows/p.yml\n    secrets:\n"
                                         "      PACKAGE_INDEX_TOKEN: ${{ secrets.PACKAGE_INDEX_TOKEN }}\n")
         callee = workflow("  workflow_call:\n", job("u", "    environment: release\n",
                                                    "      - run: ./u\n        env:\n          T: ${{ secrets.PACKAGE_INDEX_TOKEN }}\n"))
-        finding, = of(assess_files(ADMIN, {"r.yml": caller, "p.yml": callee}), "OBAAF-SET-011")
-        self.assertIn("whatever the called workflow declares", finding["message"])
-        self.assertIn("stop passing it from the caller", rules.RULE_BY_ID["OBAAF-SET-011"].fix)
+        self.assertEqual(status(assess_files(ADMIN, {"r.yml": caller, "p.yml": callee}), "OBAAF-SET-011"), "no-finding")
+        fix = rules.RULE_BY_ID["OBAAF-SET-011"].fix
+        self.assertNotIn("stop passing", fix)
+        self.assertIn("pass the secret from the caller", fix)
 
     # -- bypass
     def test_what_github_says_of_the_tokens_own_account_does_not_stand_for_the_list(self):
@@ -1284,8 +1301,10 @@ class CommandTest(unittest.TestCase):
     def test_every_rule_has_a_line_and_fixes_can_be_left_out(self):
         _, out, _ = audit_command(ADMIN, INCIDENT_REPO, token=True)
         for rule in rules.RULES:
+            found = assess(ADMIN)
+            # One line under RULES, and one under each of FINDINGS and CANNOT TELL that has a result of it.
             self.assertEqual(sum(1 for line in out.splitlines() if line.startswith(f"  {rule.id}  ")),
-                             2 if of(assess(ADMIN), rule.id) else 1, rule.id)
+                             1 + bool(of(found, rule.id, "finding")) + bool(of(found, rule.id, "cannot-tell")), rule.id)
         self.assertIn("    Fix: ", out)
         self.assertNotIn("    Fix: ", audit_command(ADMIN, INCIDENT_REPO, "--no-fixes", token=True)[1])
 
@@ -1358,8 +1377,11 @@ class WorkflowUsageTest(unittest.TestCase):
                                                         "names": ["test (3.13)"]})
         self.assertEqual(jobs["release.yml#publish"]["check"]["names"], ["publish / upload"])
         self.assertEqual(jobs["publish.yml#upload"]["called_from"], ["push"])
-        self.assertEqual(jobs["release.yml#publish"]["passes"], {"inherit": False, "names": ["PACKAGE_INDEX_TOKEN"],
-                                                                 "all": False})
+        self.assertEqual(jobs["release.yml#publish"]["passes"], {
+            "inherit": False, "names": ["PACKAGE_INDEX_TOKEN"], "all": False,
+            # By the name the called workflow reads it under (slice 2b.9).
+            "keys": {"TOKEN": {"plain": "PACKAGE_INDEX_TOKEN", "reads": ["PACKAGE_INDEX_TOKEN"], "all": False}},
+            "odd_keys": False, "inputs": [], "inputs_all": False})
         self.assertEqual(jobs["scan.yml#scan"]["triggers"], ["pull_request_target", "workflow_run"])
 
     def test_a_configuration_that_cannot_be_read_is_said_and_protects_nothing_silently(self):

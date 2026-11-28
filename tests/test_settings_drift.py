@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from helpers import FIXTURES, ROOT, TEMPLATES, TEST_SHA, TempDir, run_cli
+from test_settings_audit import with_no_custom_rules
 
 from obaaf import audit
 from obaaf.audit import drift, github, settings as settings_mod, snapshot as snapshot_mod
@@ -40,7 +41,10 @@ def take(name: str = "admin-token", token: str | None = TOKEN, repository: str =
 
 
 def expectrail() -> dict:
-    return take("live-expectrail-no-token", token=None, repository="Expectrail/Expectrail")
+    # GitHub's answers of 2026-11-12, which predate the read of custom deployment protection rules (slice 2b.9b):
+    # an answer of none is added for each environment, so that this is the snapshot today's reader would make.
+    return take("live-expectrail-no-token", token=None, repository="Expectrail/Expectrail",
+                entries=with_no_custom_rules(recording("live-expectrail-no-token")))
 
 
 def env(snap: dict, name: str) -> dict:
@@ -174,7 +178,8 @@ class EachKindOfChangeTest(unittest.TestCase):
         self.live["settings"]["repository_secrets"]["value"].append("DEPLOY_KEY")
         self.live["settings"]["environments"]["value"].append(
             {"name": "staging", "deployment_branches": "any", "wait_timer": 0, "reviewers": [],
-             "prevent_self_review": None, "other_protection_rules": [], "can_admins_bypass": None})
+             "prevent_self_review": None, "other_protection_rules": [], "custom_protection_rules": [],
+             "can_admins_bypass": None})
         policy = copy.deepcopy(self.live["settings"]["actions_policies"]["value"][0])
         policy["id"], policy["name"] = 8, "another"
         self.live["settings"]["actions_policies"]["value"].append(policy)
@@ -339,7 +344,8 @@ class HolesInTheExpectedSnapshotTest(unittest.TestCase):
             "problems": [{"key": "staging", "what": "x", "reason_code": "network", "reason": "x"}], "needs": "x"}
         live["settings"]["environments"]["value"].append(
             {"name": "staging", "deployment_branches": "any", "wait_timer": 0, "reviewers": [],
-             "prevent_self_review": None, "other_protection_rules": [], "can_admins_bypass": None})
+             "prevent_self_review": None, "other_protection_rules": [], "custom_protection_rules": [],
+             "can_admins_bypass": None})
         self.assertEqual(snapshot_mod.problems(forged), [])
         result = drift.compare(forged, live)
         not_compared = [(e["setting"], e["item"]) for e in result["not_compared"]]

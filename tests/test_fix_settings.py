@@ -1,0 +1,372 @@
+"""Replay reported tightening commands with the selected offline settings evidence."""
+import os
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from helpers import run_cli
+from obaaf import checker, fix
+from obaaf.catalog import load
+from obaaf.audit import snapshot
+from obaaf.checker import baseline
+from test_settings_audit import recording, take
+
+
+class FixSettingsTest(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(self.root)
+        self.path = Path(".github/workflows/ci.yml")
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("""on: workflow_dispatch
+permissions: {contents: read}
+jobs:
+  assistant:
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      API_KEY: ${{ secrets.PACKAGE_INDEX_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install -g @openai/codex
+      - run: codex exec review
+""")
+        Path(".github/CODEOWNERS").write_text("/.github/ @example/build\n")
+        self.config = Path(".github/obaaf.yml")
+        self.config.write_text("protected_secrets: {PACKAGE_INDEX_TOKEN: release}\n")
+        self.settings = Path("-team settings.json")
+        self.option = f"--settings={self.settings}"
+        self.data, _ = take(recording("admin-token"), token="dummy")
+        self.data["taken_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.data["settings"]["environments"]["value"][1]["branch_policies"] = [{"type": "branch", "name": "main"}]
+        snapshot.write(self.data, self.settings)
+        for args in (["init", "-q"], ["remote", "add", "origin", "https://github.com/example-studio/game.git"],
+                     ["add", "."], ["-c", "user.name=Example", "-c", "user.email=test@example.org",
+                                    "commit", "-qm", "Fixture"]):
+            subprocess.run(["git", *args], check=True)
+
+    def test_report_commands_replay_same_control_and_ownership_through_apply(self):
+        code, out, err = run_cli("check", ".", "--format=json", "--platform=github", "--fail-on=never", self.option)
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)
+        groups = {g["id"]: g for g in report["todo"]}
+        original = checker.check
+        observed = []
+
+        def check(*args, **kwargs):
+            result = original(*args, **kwargs)
+            control = next(f for f in result.findings if f.rule == "OBAAF-GHA-005").controls[1]
+            self.assertEqual(control.verdict, "verified")
+            self.assertTrue(any(f.rule == "OBAAF-REPO-001" and str(self.settings) in f.message for f in result.findings))
+            self.assertEqual(kwargs["settings"].source, args[0] / self.settings)
+            observed.append(args[0])
+            return result
+
+        with patch.object(checker, "check", side_effect=check):
+            for cause in ("agent-tool-version", "checkout-credentials"):
+                args = shlex.split(groups[cause]["command"])
+                self.assertIn(self.option, args)
+                args = [w.replace("=VERSION", "=1.2.3") for w in args[1:]]
+                for flags in [(), ("--apply",)]:
+                    observed.clear()
+                    code, out, err = run_cli(*args, *flags)
+                    self.assertEqual(code, 0, err)
+                    self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
+                    self.assertIn("--- a/", out)
+                    self.assertIn(self.root, observed)
+                    self.assertGreaterEqual(len(set(observed)), 4 if flags else 3)
+                subprocess.run(["git", "-c", "user.name=Example", "-c", "user.email=test@example.org",
+                                "commit", "-qam", "Apply fixture change"], check=True)
+
+    def test_child_targets_replay_report_and_named_commands_from_parent(self):
+        findings = checker.check(self.root).findings
+        expires = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
+        with tempfile.TemporaryDirectory() as parent:
+            self.addCleanup(os.chdir, self.root)
+            os.chdir(parent)
+            for name in ("egress", "=ls"):
+                child = Path(name)
+                shutil.copytree(self.root, child)
+                settings = f"--settings={child / self.settings}"
+                threshold = "--fail-on=never"
+                policy = child / "baseline.json"
+                policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
+                code, out, err = run_cli("check", name, "--format=json", settings, threshold,
+                                         "--platform=github", f"--baseline={policy}")
+                self.assertEqual(code, 0, err)
+                groups = {g["id"]: g for g in json.loads(out)["todo"]}
+                workflow = child / self.path
+                original = workflow.read_bytes()
+                for cause, rule, step, change in (
+                    ("checkout-credentials", "OBAAF-GHA-011", 1, "persist-credentials: false"),
+                    ("agent-tool-version", "OBAAF-GHA-025", 2, "@openai/codex@1.2.3"),
+                ):
+                    with self.subTest(name=name, cause=cause):
+                        def replay(command):
+                            args = shlex.split(command)
+                            self.assertEqual(args[:3], ["obaaf", "fix", "./" + name])
+                            for option in (settings, threshold, "--platform=github", f"--baseline={policy}"):
+                                self.assertIn(option, args)
+                            self.assertNotIn("--apply", args)
+                            result = run_cli(*args[1:])
+                            self.assertEqual(workflow.read_bytes(), original)
+                            return result
+
+                        command = groups[cause]["command"].replace("=VERSION", "=1.2.3")
+                        code, out, err = replay(command)
+                        self.assertEqual(code, 0, err)
+                        self.assertIn(change, out)
+                        self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
+
+                        finding = next(f for f in findings if f.rule == rule)
+                        entry = baseline.entry_for(finding, "@example/build", "previous review", expires)
+                        policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": [entry]}))
+                        candidate = f"{self.path}#assistant/step-{step}"
+                        code, out, err = replay(command + " " + shlex.quote("--candidate=" + candidate))
+                        self.assertEqual(code, 1, err or out)
+                        marker = "After resolving it, preview the same request again with: "
+                        retry, = [line.split(marker, 1)[1] for line in out.splitlines() if marker in line]
+                        self.assertIn("--candidate=" + candidate, shlex.split(retry))
+                        policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
+                        code, out, err = replay(retry)
+                        self.assertEqual(code, 0, err)
+                        self.assertIn(change, out)
+                        self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
+            os.chdir(self.root)
+
+    def test_repository_relative_directory_link_preserves_input_spelling(self):
+        from obaaf.settings_evidence import fix_input_relative
+
+        folder = Path("policy")
+        folder.mkdir()
+        alias = Path("current")
+        alias.symlink_to(folder, target_is_directory=True)
+        for name in ("settings.json", "config.yml", "baseline.json"):
+            with self.subTest(name=name):
+                (folder / name).write_text("{}")
+                selected = alias / name
+                result = fix_input_relative(selected, self.root, settings=name == "settings.json")
+                self.assertEqual(result, selected)
+                self.assertEqual(checker._as_found(result, self.root.resolve(), strict=True),
+                                 [selected.as_posix(), (folder / name).as_posix()])
+
+    def test_parent_component_is_relative_to_the_linked_directory(self):
+        from obaaf.settings_evidence import fix_input_relative
+
+        folder = Path("policy") / "archive"
+        folder.mkdir(parents=True)
+        Path("current").symlink_to(folder, target_is_directory=True)
+        selected = Path("current/../settings.json")
+        expected = folder.parent / "settings.json"
+        expected.write_text("{}")
+        self.assertEqual(selected.resolve(), self.root / expected)
+        for is_snapshot in (False, True):
+            with self.subTest(is_snapshot=is_snapshot):
+                self.assertEqual(fix_input_relative(selected, self.root, settings=is_snapshot), expected)
+
+    def test_parent_component_before_a_directory_link_keeps_the_checker_name(self):
+        # Review of #310 at 6ef5790: from a subdirectory, `../current/x` is `current/x` to the
+        # checker's ownership rule. The proof must name the same alias, not only its target.
+        from obaaf.settings_evidence import fix_input_relative
+
+        folder = Path("policy")
+        folder.mkdir()
+        Path("current").symlink_to(folder, target_is_directory=True)
+        Path("docs").mkdir()
+        root = self.root.resolve()
+        for name in ("settings.json", "config.yml", "baseline.json"):
+            (folder / name).write_text("{}")
+            for selected in (Path("docs/../current") / name, self.root / "docs/../current" / name):
+                with self.subTest(selected=selected):
+                    result = fix_input_relative(selected, self.root, settings=name == "settings.json")
+                    self.assertEqual(result, Path("current") / name)
+                    self.assertEqual(checker._as_found(self.root / result, root, strict=True),
+                                     checker._as_found(selected, root, strict=True))
+        # Where the textual name is another file (#332), the proof keeps the file the check reads.
+        Path("policy/archive").mkdir()
+        Path("old").symlink_to("policy/archive", target_is_directory=True)
+        Path("settings.json").write_text("{}")
+        self.assertEqual(fix_input_relative(Path("old/../settings.json"), self.root), folder / "settings.json")
+
+    def test_subdirectory_check_and_printed_fix_name_the_same_unowned_inputs(self):
+        folder = Path("policy")
+        folder.mkdir()
+        shutil.copy(self.settings, folder / "settings.json")
+        shutil.copy(self.config, folder / "obaaf.yml")
+        (folder / "baseline.json").write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
+        Path("current").symlink_to(folder, target_is_directory=True)
+        Path("docs").mkdir()
+        os.chdir("docs")
+        options = ["--settings=../current/settings.json", "--config=../current/obaaf.yml",
+                   "--baseline=../current/baseline.json"]
+        code, out, err = run_cli("check", "..", "--format=json", "--platform=github", "--fail-on=medium", *options)
+        self.assertEqual(code, 1, err)
+        report = json.loads(out)
+        unowned = {path for f in report["findings"] if f["rule"] == "OBAAF-REPO-001"
+                   for path in f["facts"]["files"]}
+        self.assertEqual(unowned, {f"{folder}/{name}" for folder in ("current", "policy")
+                                   for name in ("settings.json", "obaaf.yml", "baseline.json")})
+        groups = {g["id"]: g for g in report["todo"]}
+        for cause in ("checkout-credentials", "agent-tool-version"):
+            with self.subTest(cause=cause):
+                args = shlex.split(groups[cause]["command"].replace("=VERSION", "=1.2.3"))
+                for option in options:
+                    self.assertIn(option, args)
+                code, out, err = run_cli(*args[1:])
+                self.assertEqual(code, 0, err)
+                owners = {line.split()[0].lstrip("/") for line in out.splitlines() if line.endswith(" OWNER")}
+                self.assertEqual(owners, unowned)
+                self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
+        os.chdir(self.root)
+
+    def test_repository_inputs_through_a_linked_parent(self):
+        policy = Path("baseline.json")
+        policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": []}))
+        with tempfile.TemporaryDirectory() as parent:
+            alias = Path(parent) / "project"
+            alias.symlink_to(self.root, target_is_directory=True)
+            options = [f"--settings={alias / self.settings}", f"--config={alias / self.config}",
+                       f"--baseline={alias / policy}"]
+            code, out, err = run_cli("check", ".", "--format=json", "--fail-on=never", *options)
+            self.assertEqual(code, 0, err)
+            row = next(g for g in json.loads(out)["todo"] if g["id"] == "checkout-credentials")
+            args = shlex.split(row["command"])
+            for option in options:
+                self.assertIn(option, args)
+            code, out, err = run_cli(*args[1:])
+            self.assertEqual(code, 0, err)
+            self.assertIn("PACKAGE_INDEX_TOKEN: verified", err)
+            self.assertIn("persist-credentials: false", out)
+
+    def test_check_guidance_for_absolute_directory_link_in_repository(self):
+        folder = self.root / "snapshots"
+        folder.mkdir()
+        shutil.copyfile(self.settings, folder / "settings.json")
+        alias = Path("current-snapshots")
+        alias.symlink_to(folder, target_is_directory=True)
+        args = ("check", ".", f"--settings={alias / 'settings.json'}", "--fail-on=never")
+        code, out, err = run_cli(*args, "--format=json")
+        self.assertEqual(code, 0, err)
+        groups = {g["id"]: g for g in json.loads(out)["todo"]}
+        code, report, err = run_cli(*args, "--summary")
+        self.assertEqual(code, 0, err)
+        for cause in ("checkout-credentials", "agent-tool-version"):
+            row = groups[cause]
+            self.assertIsNone(row["command"])
+            self.assertIn("--settings", row["nextAction"])
+            self.assertIn(row["nextAction"], report)
+
+    def test_check_guidance_for_settings_outside_reviewable_repository_files(self):
+        with tempfile.TemporaryDirectory() as parent:
+            for path in (Path(parent) / "settings.json", Path(".git/settings.json")):
+                with self.subTest(path=path):
+                    shutil.copyfile(self.settings, path)
+                    args = ("check", ".", f"--settings={path}", "--fail-on=never")
+                    code, out, err = run_cli(*args, "--format=json")
+                    self.assertEqual(code, 0, err)
+                    groups = {g["id"]: g for g in json.loads(out)["todo"]}
+                    code, report, err = run_cli(*args, "--summary")
+                    self.assertEqual(code, 0, err)
+                    for cause in ("checkout-credentials", "agent-tool-version"):
+                        row = groups[cause]
+                        self.assertIsNone(row["command"])
+                        self.assertIn("--settings", row["nextAction"])
+                        self.assertIn(row["nextAction"], report)
+                    code, _, err = run_cli("fix", ".", "--tighten", "checkout-credentials", f"--settings={path}")
+                    self.assertEqual(code, 2, err)
+                    if path.parent == Path(".git"):
+                        self.assertIn(".git", err.split(str(path))[0])
+                    else:
+                        self.assertIn("inside the repository", err)
+
+    def test_explicit_egress_job_still_previews_confinement(self):
+        before = self.path.read_bytes()
+        catalog = load()
+        catalog = replace(catalog, detection={**catalog.detection, "egress_action_releases": ["c" * 40]})
+        with patch("obaaf.fix_egress.load", return_value=catalog):
+            code, out, err = run_cli("fix", "egress", "--job", "assistant", ".")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Checked on a private copy", out)
+        self.assertIn("job 'assistant'", out)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_partial_scan_and_unusable_settings(self):
+        args = ("fix", str(self.path), "--config", str(self.config), "--tighten", "checkout-credentials")
+        code, _, err = run_cli(*args, self.option)
+        self.assertEqual(code, 0, err)
+        self.assertIn("does not check snapshot code ownership", err)
+        old = self.path.read_bytes()
+        for name in ("missing.json", str(self.root.parent / "outside.json"), str(self.settings)):
+            if name == str(self.settings):
+                self.settings.write_text("{}")
+            code, _, err = run_cli(*args, f"--settings={name}", "--apply")
+            self.assertEqual(code, 2, err)
+            self.assertEqual(self.path.read_bytes(), old)
+        for args in [("fix", "--gate", "medium"), ("fix", "egress", "--job", "assistant")]:
+            self.assertEqual(run_cli(*args, self.option)[0], 2)
+
+    def test_withheld_checkout_and_pin_preserve_retry_for_multiline_settings_path(self):
+        settings = Path("team\nsettings.json")
+        self.settings.rename(settings)
+        args = ("check", ".", f"--settings={settings}", "--fail-on=never")
+        code, out, err = run_cli(*args, "--format=json")
+        self.assertEqual(code, 0, err)
+        groups = {g["id"]: g for g in json.loads(out)["todo"]}
+        for cause in ("checkout-credentials", "agent-tool-version"):
+            self.assertIn(f"--settings={settings}", shlex.split(groups[cause]["command"]))
+        for flags in ((), ("--summary",)):
+            code, out, err = run_cli(*args, *flags)
+            self.assertEqual(code, 0, err)
+            self.assertIn("Review later steps that need Git credentials", out)
+            self.assertIn("Choose an exact npm version for @openai/codex", out)
+            self.assertNotIn(str(settings), out)
+
+        findings = checker.check(self.root).findings
+        for rule, step, selection in [("OBAAF-GHA-011", 1, ["--tighten", "checkout-credentials"]),
+                                      ("OBAAF-GHA-025", 2, ["--pin", "@openai/codex=1.2.3"])]:
+            with self.subTest(rule=rule):
+                finding = next(f for f in findings if f.rule == rule)
+                expires = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
+                policy = Path("baseline.json")
+                policy.write_text(json.dumps({"format": baseline.FORMAT, "findings": [
+                    baseline.entry_for(finding, "@example/build", "previous review", expires)]}))
+                candidate = f"{self.path}#assistant/step-{step}"
+                for named in (False, True):
+                    with self.subTest(named=named):
+                        extra = ["--candidate", candidate] if named else []
+                        code, out, err = run_cli("fix", ".", *selection, "--baseline", policy,
+                                                 f"--settings={settings}", *extra)
+                        expected_code = 1 if named or selection[0] == "--pin" else 0
+                        self.assertEqual(code, expected_code, err or out)
+                        self.assertIn("Review the reported findings", out)
+                        self.assertIn("After resolving it" if named else "Retry this step alone", out)
+                        self.assertIn("obaaf fix", out)
+                        self.assertIn(" ".join(selection), out)
+                        self.assertIn("--candidate", out)
+                        self.assertNotIn(str(settings), out)
+                        self.assertNotIn("--- a/", out)
+
+    def test_changed_snapshot_refused_before_write(self):
+        display = fix._render
+        before = self.path.read_bytes()
+
+        def changed(*args):
+            display(*args)
+            self.data["settings"]["repository_secrets"]["value"].append("ANOTHER_NAME")
+            snapshot.write(self.data, self.settings)
+
+        with patch.object(fix, "_render", side_effect=changed):
+            code, _, err = run_cli("fix", ".", "--tighten", "checkout-credentials", self.option, "--apply")
+        self.assertEqual(code, 2, err)
+        self.assertIn("settings evidence changed", err)
+        self.assertEqual(self.path.read_bytes(), before)

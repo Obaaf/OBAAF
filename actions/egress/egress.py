@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """OBAAF egress control: run one command with its network limited to an allow-list.
 
-This file is the whole of the action's logic. ``action.yml`` calls it with
-``python3 -I`` (so nothing in the working directory can be imported in place of
-the standard library) in two steps: ``install`` and ``run``.
+This file is the whole of the action's logic. ``action.yml`` runs it in three
+steps, ``check-allow``, ``install`` and ``run``, each with ``/usr/bin/python3 -I
+-S`` as the step's shell (slice 2c.9): no bash, so nothing the job's
+environment tells bash (``BASH_ENV``, ``SHELLOPTS``, ``PS4``, an exported
+function) has any effect; nothing found through the ``PATH``; nothing imported
+from the working directory, ``PYTHONPATH`` or a ``site`` directory in place of
+the standard library. Each step's own ``env`` empties the variables that make
+the dynamic loader load other code (``LOADER_VARIABLES``), and ``main`` refuses
+to go on if one still has a value. These steps hold what the workflow put in the
+step's ``env``, model keys included, outside the sandbox.
 
 The command runs under the Agent Workflow Firewall (AWF, github/gh-aw-firewall,
 MIT licence) at one version that OBAAF's CI has tested, in AWF's default mode
@@ -28,19 +35,73 @@ wrapper adds, and why, is in docs/egress-control.md:
   printed, and the step fails if the runner's GITHUB_ENV, GITHUB_PATH,
   GITHUB_OUTPUT, GITHUB_STATE or GITHUB_STEP_SUMMARY files changed;
 * the hosts the proxy refused are listed in the job summary, and the proxy's
-  log is kept outside the scratch directory.
+  log is kept outside the scratch directory;
+* sockets and named pipes in the runner's /tmp that the command could open
+  (a .NET program's diagnostic socket, for one) are made unwritable while it
+  runs, and the probe fails if it can still write one (slice 2c.6);
+* after the run, every symbolic link, pipe, socket and device file in the
+  scratch directory is deleted, so a later step that reads or uploads the
+  copy cannot be pointed at the runner's own files (slice 2c.6).
 
 Only the Python standard library is used.
 """
 
 from __future__ import annotations
 
+import os
+
+# The action's own steps run outside the sandbox and hold the step's env, model
+# keys included (see run()). OpenSSL reads part of its configuration from the
+# environment the first time libcrypto is initialised, which here is when
+# ``import hashlib`` below runs: ``OPENSSL_CONF`` can name a configuration file
+# that loads a provider or engine module, and on Ubuntu libcrypto loads a module
+# from the directory ``OPENSSL_MODULES`` names when ``OPENSSL_FORCE_FIPS_MODE`` is
+# set or ``OPENSSL_FIPS_MODE_SWITCH_PATH`` names a file holding ``1``. A module the
+# workflow chose would then run in this key-holding process. The dynamic loader's
+# own variables (``LD_*`` and the rest of ``LOADER_VARIABLES``) are emptied by each
+# step's env in action.yml, because ``ld.so`` reads them before Python starts;
+# OpenSSL's are read later, from inside Python, so the action removes every
+# ``OPENSSL_`` variable from this process's environment before the first import
+# that initialises libcrypto. This changes only the action's own step process:
+# not the job's other steps, and not the command AWF runs, which is given a clean
+# environment of its own (child_env in run(), and AWF's env-file). ``import os``
+# does not initialise libcrypto; ``import hashlib``, ``import secrets`` and
+# ``import urllib.request`` below do. The name is matched trimmed and upper-cased,
+# a superset of what libcrypto reads, so no spelling slips through. Slice 2c.11,
+# issue #195; see docs/egress-control.md.
+OPENSSL_VARIABLES_REMOVED = sorted(
+    name for name in os.environ if name.strip().upper().startswith("OPENSSL_")
+)
+for _openssl_name in OPENSSL_VARIABLES_REMOVED:
+    del os.environ[_openssl_name]
+
+# OpenSSL's are not the only variables read from inside Python after it has
+# started. The standard library and the C library read others when they are
+# first needed: the proxy variables (urllib.request, for the install step's one
+# download), SSL_CERT_FILE and SSL_CERT_DIR (libcrypto), TEMP and TMP (tempfile),
+# HOME, the resolver's, and whatever a later version reads. A workflow can set
+# all of these for the action's steps, in an env or through GITHUB_ENV (measured
+# in slice 2c.12a, tests/egress/runner-variables.json). So the step does not
+# argue about each: it keeps a copy of what it was given, for its own inputs and
+# the runner's files, and empties the process's environment before anything but
+# ``os`` is imported. From here on nothing in this process, and no program it
+# starts without an environment of its own, sees a variable the workflow set.
+# What is read before this line runs (by the loader, by glibc and by Python as
+# they start) is fixed by each step's env in action.yml: LOADER_VARIABLES and
+# STARTUP_PINS below. Emptied only when this file is the program (the action's
+# steps and the resolver), not when it is imported, as the tests do. Slice
+# 2c.12, issue #198.
+STEP_ENVIRONMENT = dict(os.environ)
+ENVIRONMENT_EMPTIED = __name__ == "__main__"
+if ENVIRONMENT_EMPTIED:
+    os.environ.clear()
+
 import hashlib
 import json
-import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -87,16 +148,28 @@ FIXED_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # Exit status of the step when the sandbox did not hold or did not start.
 EXIT_NOT_CONFINED = 3
 
+# Where the probe looks, inside the sandbox, for sockets and named pipes the
+# command could write (slice 2c.6). The runner's /tmp is mounted into the
+# sandbox; the others hold the places such endpoints usually live.
+ENDPOINT_PLACES = "/tmp /run /var /home /etc"
+# Where the action looks, on the runner, for sockets and named pipes to make
+# unwritable while the command runs: the runner's /tmp, which AWF mounts.
+ENDPOINT_ROOT = "/tmp"
+
 _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 _HOST_RE = re.compile(rf"^(?:{_LABEL}\.)+[a-z](?:[a-z0-9-]{{0,61}}[a-z0-9])?$")
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Variables the workflow may not pass to the command: they change how the
 # command, its shell or its network behave, or they point at the runner's
-# own files.
+# own files. LC_ALL and TZ are here because each step's own env fixes them
+# (STARTUP_PINS below, slice 2c.12): the value the workflow gave them never
+# reaches this file, and the action's own value must not be passed on in its
+# place. A command that needs either sets it itself.
 RESERVED_NAMES = frozenset(
     {
         "PATH", "HOME", "TMPDIR", "SHELL", "BASH_ENV", "ENV", "IFS", "CDPATH",
+        "LC_ALL", "TZ",
         "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH", "PYTHONSTARTUP",
         "PYTHONHOME", "NODE_OPTIONS", "PERL5LIB", "PERL5OPT", "RUBYOPT",
         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY",
@@ -115,8 +188,9 @@ RESERVED_PREFIXES = ("AWF_", "OBAAF_EGRESS_", "ACTIONS_", "SQUID_", "OTEL_", "FO
 RESERVED_SUFFIXES = ("_API_TARGET", "_API_BASE_PATH", "_BASE_URL", "_ENDPOINT_OVERRIDE")
 # Model keys and GitHub tokens: AWF v0.29.13 withholds these from the command
 # and hands model keys to its API proxy (src/services/agent-environment/
-# excluded-vars.ts). This action does not set up the API proxy (OBAAF has not
-# tested it), so passing one would silently give the command nothing.
+# excluded-vars.ts). Passed in env, one would silently give the command
+# nothing, so env refuses them all. The two in MODEL_KEYS can be given to AWF's
+# API proxy instead, through the model-keys input; the rest are untested.
 WITHHELD_BY_AWF = frozenset(
     {
         "AGENT_API_KEY", "OPENAI_API_KEY", "OPENAI_KEY", "CODEX_API_KEY",
@@ -127,7 +201,91 @@ WITHHELD_BY_AWF = frozenset(
     }
 )
 
+# Model keys the model-keys input accepts, each with the host AWF's API proxy
+# sends it to (AWF v0.29.13: src/domain-utils.ts, DEFAULT_ANTHROPIC_API_TARGET
+# and DEFAULT_OPENAI_API_TARGET; the action refuses the *_API_TARGET names that
+# would change them). AWF reads them from its own environment
+# (src/commands/resolve-credentials.ts), gives them to the API proxy sidecar,
+# and gives the command a base URL pointing at the sidecar and a placeholder
+# key. These two are the ones the escape tests send a request through.
+MODEL_KEYS = {
+    "ANTHROPIC_API_KEY": "api.anthropic.com",
+    "OPENAI_API_KEY": "api.openai.com",
+}
+
 RUNNER_FILES = ("GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY")
+
+# Variables that make the dynamic loader, or the C library the action's Python
+# runs on, load or read files the job chose: of the 34 names the dynamic loader
+# of Ubuntu 24.04 (glibc 2.39) itself removes from the environment of a setuid
+# program, read from /lib64/ld-linux-x86-64.so.2 on 2026-11-16 (the escape
+# tests compare them with the runner's own loader), the 32 the loader reads by
+# their value. The action's steps run outside the sandbox with the step's env,
+# model keys included, so each step's own env in action.yml sets every one of
+# them to "" (slice 2c.9), and main() refuses to go on if one still has a value:
+# that would mean the runner did not apply the step's env, and the loader may
+# already have obeyed it.
+LOADER_VARIABLES = (
+    "GCONV_PATH", "GETCONF_DIR", "GLIBC_TUNABLES", "HOSTALIASES", "LD_AUDIT", "LD_BIND_NOT", "LD_BIND_NOW",
+    "LD_DEBUG", "LD_DEBUG_OUTPUT", "LD_HWCAP_MASK", "LD_LIBRARY_PATH", "LD_ORIGIN_PATH",
+    "LD_PRELOAD", "LD_PROFILE", "LD_VERBOSE", "LD_WARN", "LOCALDOMAIN", "LOCPATH",
+    "MALLOC_ARENA_MAX", "MALLOC_ARENA_TEST", "MALLOC_MMAP_MAX_", "MALLOC_MMAP_THRESHOLD_", "MALLOC_PERTURB_",
+    "MALLOC_TOP_PAD_", "MALLOC_TRACE", "MALLOC_TRIM_THRESHOLD_", "NIS_PATH", "NLSPATH", "RESOLV_HOST_CONF",
+    "RES_OPTIONS", "TMPDIR", "TZDIR",
+)
+# The other two the loader acts on when they are present, whatever their value,
+# so an empty value would switch them on (the 2c.9 review saw LD_SHOW_AUXV=""
+# print the auxiliary vector in every step). Neither makes the loader load a
+# file: LD_SHOW_AUXV prints what the kernel passed the process, LD_DYNAMIC_WEAK
+# changes which of the libraries already loaded a weak symbol resolves to. They
+# are left as the job sets them. LD_TRACE_LOADED_OBJECTS is not on the loader's
+# list but is read the same way, and it stops the program before it starts and
+# ends it with status 0; it cannot be emptied either, so the action's last step
+# fails the action when the run step ended 0 without reporting that the sandbox
+# held (action.yml).
+LOADER_PRESENCE_VARIABLES = ("LD_DYNAMIC_WEAK", "LD_SHOW_AUXV")
+
+# What glibc and Python read from the environment while Python starts, before
+# this file's first line, other than the loader's variables above and Python's
+# own (which -I ignores). Each step's env in action.yml sets them to these
+# values, and main() refuses to go on with any other (slice 2c.12):
+#   LC_ALL  Python sets its character type from the environment as it starts
+#           (LC_ALL, then LC_CTYPE, then LANG), and glibc then opens the files
+#           of the locale that is named, under /usr/lib/locale. LC_ALL outranks
+#           the other two. "C" is the one locale glibc has built in: it opens no
+#           file for it, and in it glibc does not consult LANGUAGE, which in a
+#           locale such as en_US.UTF-8 names directories of message catalogues
+#           and may hold "../". Python reads and writes UTF-8 in the C locale
+#           (its UTF-8 mode).
+#   TZ      read when Python first imports time, which it does as it starts. A
+#           value that names a file, with or without a leading colon, is opened
+#           and read as a zone. UTC0 names none of the workflow's: glibc looks
+#           for /usr/share/zoneinfo/UTC0, which Ubuntu does not have, and then
+#           reads the value as UTC.
+STARTUP_PINS = {"LC_ALL": "C", "TZ": "UTC0"}
+
+# The resolver the action gives AWF's proxy (slice 2c.4). Squid resolves every
+# name it is asked for before it refuses an unlisted one (AWF v0.29.13 puts an
+# access rule of type dst, for the API proxy's address, ahead of the rule that
+# refuses unlisted names: src/squid/config-sections.ts and config-generator.ts),
+# so with an ordinary resolver a refused name still left the runner in a DNS
+# query. The action runs its own resolver on the runner, answering only names
+# the allow-list covers (and the hosts of the model keys given), and gives AWF
+# its address with --dns-servers. Every other name is answered REFUSED on the
+# runner and goes no further.
+DNS_PORT = 53
+DNS_RCODE_FORMERR = 1
+DNS_RCODE_REFUSED = 5
+DNS_LOG_LIMIT = 2000
+# The bridge Docker creates on every hosted runner. Its address is the
+# runner's own, so a container on any bridge network reaches it.
+DNS_BRIDGE = "docker0"
+# What a label may hold for the resolver to pass the name on. A label of any
+# other byte (a dot inside a label, for one) would let a name that looks
+# covered be a different name under another domain, so it is refused.
+_DNS_LABEL_RE = re.compile(rb"[A-Za-z0-9_-]{1,63}")
+NOBODY_UID = 65534
+NOBODY_GID = 65534
 
 # Probe targets used before the command starts. The direct addresses are
 # public resolvers; nothing on the list can make them reachable, because AWF
@@ -138,7 +296,14 @@ PROBE_HOSTS = ("example.com", "example.net", "example.org")
 
 
 class UsageError(Exception):
-    """A problem with the step's inputs. Reported as an error; exit 2."""
+    """A problem with the step's inputs. Reported as an error; exit 2.
+
+    ``reason`` goes to the step's ``refused`` output, so a workflow (and the
+    escape tests) can tell a refusal from another failure."""
+
+    def __init__(self, message: str, reason: str = "input"):
+        super().__init__(message)
+        self.reason = reason
 
 
 # ---------------------------------------------------------------------------
@@ -189,8 +354,10 @@ def parse_env_names(text: str, environ: dict[str, str]) -> dict[str, str]:
     for name in names:
         if not _NAME_RE.match(name):
             raise UsageError(f"env: {name!r} is not a variable name")
+        if name in MODEL_KEYS:
+            raise UsageError(f"env: {name} is a model key, which AWF withholds from the command; name it under model-keys instead, and AWF's API proxy will use it for the command (see docs/egress-control.md)")
         if name in WITHHELD_BY_AWF:
-            raise UsageError(f"env: {name} is a model key or GitHub token name, which AWF withholds from the command and this action does not route to AWF's API proxy (untested); see docs/egress-control.md")
+            raise UsageError(f"env: {name} is a model key or GitHub token name, which AWF withholds from the command; the action gives only {', '.join(sorted(MODEL_KEYS))} to AWF's API proxy (the others are untested); see docs/egress-control.md")
         if name in RESERVED_NAMES or name.startswith(RESERVED_PREFIXES) or name.endswith(RESERVED_SUFFIXES):
             raise UsageError(f"env: {name} cannot be passed to the command; the action sets or withholds it on purpose, or AWF reads it as its own configuration")
         if name not in environ:
@@ -202,6 +369,348 @@ def parse_env_names(text: str, environ: dict[str, str]) -> dict[str, str]:
     return result
 
 
+def parse_model_keys(text: str, environ: dict[str, str]) -> dict[str, str]:
+    """Return the model keys named in the model-keys input with their values, or raise UsageError.
+
+    A model key goes to AWF's own environment, from which AWF gives it to its
+    API proxy sidecar; the command never sees it.
+    """
+    names = [item for item in re.split(r"[\s,]+", text or "") if item]
+    result: dict[str, str] = {}
+    for name in names:
+        if not _NAME_RE.match(name):
+            raise UsageError(f"model-keys: {name!r} is not a variable name")
+        if name not in MODEL_KEYS:
+            raise UsageError(f"model-keys: {name} is not one of {', '.join(sorted(MODEL_KEYS))}, the model keys this action has tested through AWF's API proxy")
+        if name not in environ:
+            raise UsageError(f"model-keys: {name} is not set in the step's environment; set it under the step's env: key")
+        value = environ[name]
+        if not value.strip():
+            raise UsageError(f"model-keys: {name} is empty (a secret that is not available to this job is empty)")
+        if "\n" in value or "\r" in value or "\0" in value:
+            raise UsageError(f"model-keys: the value of {name} holds a line break or NUL")
+        result[name] = value
+    return result
+
+
+def resolver_names(allow: list[str], model_keys: dict[str, str]) -> list[str]:
+    """The names the action's resolver answers, as written to its names file.
+
+    The allow-list, each name with its subdomains, as AWF's proxy allows them;
+    then the API host of each model key the list does not cover, marked "="
+    because the resolver answers that host exactly and not its subdomains (the
+    API proxy needs the one host, and its subdomains would be a way for the
+    command to put data in a name the list does not cover).
+    """
+    names = list(allow)
+    for key in model_keys:
+        host = MODEL_KEYS[key]
+        if not covered(host, allow) and "=" + host not in names:
+            names.append("=" + host)
+    return names
+
+
+def read_resolver_names(text: str) -> tuple[list[str], list[str]]:
+    """The names file read back: (names with their subdomains, exact names), each checked as an allow-list."""
+    entries = [item for item in re.split(r"[\s,]+", text or "") if item]
+    exact = [item[1:] for item in entries if item.startswith("=")]
+    wide = [item for item in entries if not item.startswith("=")]
+    return parse_allow_list(" ".join(wide)), (parse_allow_list(" ".join(exact)) if exact else [])
+
+
+# ---------------------------------------------------------------------------
+# The resolver given to AWF's proxy
+# ---------------------------------------------------------------------------
+
+def dns_question(message: bytes) -> tuple[str | None, int, int] | None:
+    """Read the one question of a DNS query.
+
+    Returns ``(name, qtype, end)``, where ``end`` is the offset just after the
+    question and ``name`` is None when a label holds a byte other than a
+    letter, digit, hyphen or underscore. Returns None when the message is not
+    a standard query with exactly one question in class IN, or cannot be read.
+    """
+    if len(message) < 12:
+        return None
+    flags = int.from_bytes(message[2:4], "big")
+    if flags & 0x8000 or (flags >> 11) & 0xF != 0:
+        return None
+    if int.from_bytes(message[4:6], "big") != 1:
+        return None
+    labels: list[bytes] = []
+    offset = 12
+    size = 0
+    while True:
+        if offset >= len(message):
+            return None
+        length = message[offset]
+        offset += 1
+        if length == 0:
+            break
+        if length > 63:
+            # A compression pointer, or the reserved label types: never in a query's question.
+            return None
+        label = message[offset:offset + length]
+        if len(label) != length:
+            return None
+        size += length + 1
+        if size > 254:
+            return None
+        labels.append(label)
+        offset += length
+    if offset + 4 > len(message):
+        return None
+    qtype = int.from_bytes(message[offset:offset + 2], "big")
+    qclass = int.from_bytes(message[offset + 2:offset + 4], "big")
+    if qclass != 1:
+        return None
+    end = offset + 4
+    if not labels or not all(_DNS_LABEL_RE.fullmatch(label) for label in labels):
+        return (None, qtype, end)
+    return (b".".join(labels).decode("ascii").lower(), qtype, end)
+
+
+def dns_refusal(query: bytes, end: int, rcode: int = DNS_RCODE_REFUSED) -> bytes | None:
+    """A response to ``query`` with ``rcode`` and no answer, echoing the
+    question when ``end`` marks one (0 for none). None if the query is too
+    short to carry an ID."""
+    if len(query) < 12:
+        return None
+    flags = int.from_bytes(query[2:4], "big")
+    reply = 0x8000 | (flags & 0x7800) | (flags & 0x0100) | 0x0080 | (rcode & 0xF)
+    question = query[12:end] if end else b""
+    counts = (1 if end else 0, 0, 0, 0)
+    return query[0:2] + reply.to_bytes(2, "big") + b"".join(c.to_bytes(2, "big") for c in counts) + question
+
+
+def dns_printable(message: bytes) -> str:
+    """The question's name as text for the log, every byte outside a plain label escaped."""
+    labels = []
+    offset = 12
+    while offset < len(message):
+        length = message[offset]
+        if length == 0 or length > 63:
+            break
+        label = message[offset + 1:offset + 1 + length]
+        labels.append("".join(chr(b) if 0x21 <= b < 0x7F and b not in (0x2E, 0x5C) else f"\\{b:03d}" for b in label))
+        offset += 1 + length
+    return ".".join(labels)[:300] or "(unreadable)"
+
+
+def dns_query(name: str, ident: int, qtype: int = 1) -> bytes:
+    """A standard recursive query for ``name`` (used by the action's own check of the resolver)."""
+    header = ident.to_bytes(2, "big") + (0x0100).to_bytes(2, "big") + (1).to_bytes(2, "big") + bytes(6)
+    body = b"".join(bytes([len(p)]) + p.encode("ascii") for p in name.split(".")) + b"\x00"
+    return header + body + qtype.to_bytes(2, "big") + (1).to_bytes(2, "big")
+
+
+class DnsFilter:
+    """Answers a query by forwarding it to the runner's resolver when the name
+    is covered, and with REFUSED otherwise. Shared by the UDP and TCP servers."""
+
+    def __init__(self, names: list[str], upstream: str, log, upstream_port: int = DNS_PORT,
+                 exact: list[str] | None = None) -> None:
+        self.names = names
+        self.exact = list(exact or [])
+        self.upstream = upstream
+        self.upstream_port = upstream_port
+        self.log = log
+        self.logged = 0
+        import threading
+        self.lock = threading.Lock()
+
+    def note(self, line: str) -> None:
+        with self.lock:
+            if self.logged < DNS_LOG_LIMIT:
+                self.log.write(line + "\n")
+                self.log.flush()
+            elif self.logged == DNS_LOG_LIMIT:
+                self.log.write("... (log limit reached)\n")
+                self.log.flush()
+            self.logged += 1
+
+    def decide(self, query: bytes) -> tuple[bytes | None, bytes | None]:
+        """(query to forward, or None; reply to give when nothing is forwarded).
+
+        The query forwarded is rebuilt from its ID, its recursion flag and its
+        one question, which dns_question has read and checked: nothing else
+        the asker put in the message (other sections, EDNS options, trailing
+        bytes) reaches the runner's resolver.
+        """
+        question = dns_question(query)
+        if question is None:
+            self.note(f"refused unreadable {dns_printable(query)}")
+            return None, dns_refusal(query, 0, DNS_RCODE_FORMERR)
+        name, qtype, end = question
+        if name is not None and (name in self.exact or covered(name, self.names)):
+            self.note(f"allowed {qtype} {name}")
+            flags = int.from_bytes(query[2:4], "big") & 0x0100
+            return query[:2] + flags.to_bytes(2, "big") + b"\x00\x01" + bytes(6) + query[12:end], None
+        self.note(f"refused {qtype} {name if name is not None else dns_printable(query)}")
+        return None, dns_refusal(query, end)
+
+    def forward_udp(self, query: bytes) -> bytes | None:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(5)
+            sock.connect((self.upstream, self.upstream_port))
+            sock.send(query)
+            try:
+                for _ in range(5):
+                    reply = sock.recv(65535)
+                    if reply[:2] == query[:2]:
+                        return reply
+            except OSError:
+                return None
+        return None
+
+    def forward_tcp(self, query: bytes) -> bytes | None:
+        import socket
+        try:
+            with socket.create_connection((self.upstream, self.upstream_port), timeout=5) as sock:
+                sock.sendall(len(query).to_bytes(2, "big") + query)
+                head = _recv_exact(sock, 2)
+                if head is None:
+                    return None
+                return _recv_exact(sock, int.from_bytes(head, "big"))
+        except OSError:
+            return None
+
+
+def _recv_exact(sock, size: int) -> bytes | None:
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data
+
+
+def dns_filter(argv: list[str]) -> int:
+    """The resolver itself: ``egress.py dns-filter LISTEN UPSTREAM NAMES-FILE LOG-FILE UID:GID``.
+
+    Started by the run step with sudo, because it listens on port 53; it binds
+    both sockets, opens its log, hands the log to the runner user, gives up
+    root for nobody, prints "ready" and serves until its standard input closes.
+    """
+    import socketserver
+    import threading
+
+    if len(argv) != 5:
+        print("usage: egress.py dns-filter LISTEN UPSTREAM NAMES-FILE LOG-FILE UID:GID", file=sys.stderr)
+        return 2
+    listen, upstream, names_file, log_file, owner = argv
+    names, exact = read_resolver_names(Path(names_file).read_text())
+    uid, gid = (int(part) for part in owner.split(":", 1))
+
+    fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.fchown(fd, uid, gid)
+    log = os.fdopen(fd, "a", encoding="utf-8")
+    log.write(f"listening on {listen}:{DNS_PORT}, forwarding to {upstream}: {', '.join(names)}"
+              f"{' (with subdomains); ' + ', '.join(exact) + ' (exactly)' if exact else ''}\n")
+    log.flush()
+    deciding = DnsFilter(names, upstream, log, exact=exact)
+
+    class Udp(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            data, sock = self.request
+            outgoing, reply = deciding.decide(data)
+            if outgoing:
+                reply = deciding.forward_udp(outgoing)
+            if reply:
+                sock.sendto(reply, self.client_address)
+
+    class Tcp(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            conn = self.request
+            conn.settimeout(10)
+            while True:
+                try:
+                    head = _recv_exact(conn, 2)
+                    data = _recv_exact(conn, int.from_bytes(head, "big")) if head else None
+                except OSError:
+                    return
+                if not data:
+                    return
+                outgoing, reply = deciding.decide(data)
+                if outgoing:
+                    reply = deciding.forward_tcp(outgoing)
+                if not reply:
+                    return
+                try:
+                    conn.sendall(len(reply).to_bytes(2, "big") + reply)
+                except OSError:
+                    return
+
+    class UdpServer(socketserver.ThreadingUDPServer):
+        daemon_threads = True
+
+    class TcpServer(socketserver.ThreadingTCPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+    udp = UdpServer((listen, DNS_PORT), Udp)
+    tcp = TcpServer((listen, DNS_PORT), Tcp)
+    os.setgroups([])
+    os.setgid(NOBODY_GID)
+    os.setuid(NOBODY_UID)
+    if os.getuid() == 0 or os.geteuid() == 0:
+        print("could not give up root", file=sys.stderr)
+        return 1
+    for server in (udp, tcp):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    print("ready", flush=True)
+    try:
+        sys.stdin.read()
+    except (OSError, KeyboardInterrupt):
+        pass
+    udp.shutdown()
+    tcp.shutdown()
+    log.write("stopped\n")
+    log.close()
+    return 0
+
+
+def dns_ask(server: str, name: str, timeout: float = 3.0) -> int | None:
+    """The response code the resolver at ``server`` gives for ``name``, or None for no answer."""
+    import socket
+    ident = secrets.randbelow(0x10000)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout)
+        try:
+            sock.sendto(dns_query(name, ident), (server, DNS_PORT))
+            while True:
+                reply, _ = sock.recvfrom(65535)
+                if len(reply) >= 4 and int.from_bytes(reply[:2], "big") == ident:
+                    return reply[3] & 0xF
+        except OSError:
+            return None
+
+
+def bridge_address(ip_tool: str | None) -> str | None:
+    """The IPv4 address of Docker's docker0 bridge on this runner, or None."""
+    if not ip_tool:
+        return None
+    done = subprocess.run([ip_tool, "-4", "-o", "addr", "show", "dev", DNS_BRIDGE], capture_output=True,
+                          text=True, check=False, env={"PATH": FIXED_PATH})
+    match = re.search(r"\binet (\d{1,3}(?:\.\d{1,3}){3})/\d+", done.stdout)
+    return match.group(1) if match else None
+
+
+def runner_resolver(resolv_conf: str = "/etc/resolv.conf") -> str | None:
+    """The first IPv4 nameserver of the runner's own resolver configuration."""
+    try:
+        text = Path(resolv_conf).read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        match = re.match(r"^\s*nameserver\s+(\d{1,3}(?:\.\d{1,3}){3})\s*$", line)
+        if match:
+            return match.group(1)
+    return None
+
+
 def image_tag() -> str:
     """The value of AWF's --image-tag: the version and a digest for each image."""
     version = AWF_VERSION.lstrip("v")
@@ -210,12 +719,14 @@ def image_tag() -> str:
 
 
 def awf_argv(awf: str, allow: list[str], config: str, env_file: str, workdir: str,
-             awf_work: str, logs: str, inner: str) -> list[str]:
+             awf_work: str, logs: str, inner: str, dns_server: str) -> list[str]:
     """The whole AWF command line. Nothing here comes from the workflow but
-    the allow-list, which parse_allow_list has reduced to host names."""
+    the allow-list, which parse_allow_list has reduced to host names; the DNS
+    server is the action's own resolver on the runner."""
     return [
         awf,
         "--allow-domains", ",".join(allow),
+        "--dns-servers", dns_server,
         "--config", config,
         "--env-file", env_file,
         "--container-workdir", workdir,
@@ -226,6 +737,23 @@ def awf_argv(awf: str, allow: list[str], config: str, env_file: str, workdir: st
         "--",
         "/bin/bash", inner,
     ]
+
+
+def awf_config(scratch: str) -> dict:
+    """AWF's configuration file: writes only under the scratch directory, and
+    the providers' hosted web tools refused by AWF's API proxy.
+
+    With a model key, an agent could ask the provider to fetch or search the
+    web for it (Anthropic's web_fetch and web_search tools, OpenAI's hosted
+    web search), and the provider's servers, not the runner, would make the
+    request, out of the proxy's sight. AWF's API proxy refuses a request that
+    carries such a tool when its policy says enabled: false (AWF v0.29.13,
+    src/hosted-web-policy.ts and containers/api-proxy/claude-hosted-web.js).
+    """
+    return {
+        "filesystem": {"allowWrite": [scratch]},
+        "apiProxy": {"hostedWeb": {"claude": {"enabled": False}, "codex": {"enabled": False}}},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +788,17 @@ attempt "unlisted host {blocked_host} through the proxy" curl -sS --max-time 10 
 attempt "unlisted host {blocked_host} without the proxy" curl -sS --noproxy '*' --max-time 5 -o /dev/null https://{blocked_host}/
 attempt "sudo" sudo -n true
 attempt "Docker socket" bash -c "curl -sS --max-time 5 --unix-socket /var/run/docker.sock http://localhost/_ping || curl -sS --max-time 5 --unix-socket /run/docker.sock http://localhost/_ping"
+# Sockets and named pipes the command could write: a program on the runner
+# that listens on one (a .NET program's diagnostic socket in /tmp, for one)
+# would act for the command outside the sandbox. The action makes those in
+# the runner's /tmp unwritable before the run; any left writable stops it.
+endpoints="$(find {ENDPOINT_PLACES} \\( -path '{scratch}' -o -path /proc \\) -prune -o \\( -type s -o -type p \\) -writable -print 2>/dev/null | head -5 | tr '\\n' ' ')"
+if [ -n "$endpoints" ]; then
+  echo "obaaf-egress: probe: sockets or pipes it could write ($endpoints) GOT OUT"
+  failed=1
+else
+  echo "obaaf-egress: probe: sockets and pipes outside the scratch directory blocked"
+fi
 if [ "$failed" -ne 0 ]; then
   echo "obaaf-egress: the sandbox did not hold; the command was not run"
   exit {EXIT_NOT_CONFINED}
@@ -287,8 +826,15 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def step_environment() -> dict[str, str]:
+    """What the workflow and the runner gave this step: the copy taken before
+    the process's environment was emptied, or the environment itself when this
+    file was imported and nothing was emptied (slice 2c.12)."""
+    return dict(STEP_ENVIRONMENT) if ENVIRONMENT_EMPTIED else dict(os.environ)
+
+
 def _state_dir() -> Path:
-    base = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
+    base = step_environment().get("RUNNER_TEMP") or tempfile.gettempdir()
     return Path(base) / "obaaf-egress"
 
 
@@ -327,11 +873,16 @@ def _runner_file_hashes(environ: dict[str, str]) -> dict[str, str | None]:
 
 
 def _denied_hosts(log_dir: Path) -> list[str]:
-    """Hosts the proxy refused, from Squid's access log.
+    """Hosts the proxy refused, from Squid's access log, as plain text.
 
     AWF v0.29.13 writes the log in its format ``firewall_detailed``:
-    ``time client:port host dest:port version method status code:hierarchy url "agent"``,
-    where ``host`` is the request's Host header (``name:443`` for CONNECT).
+    ``time client:port host dest:port version method status code:hierarchy url "agent"``.
+    ``host`` is the Host header the command sent, which it can set to any
+    text; the host is taken from ``url`` instead (``name:443`` for CONNECT,
+    ``http://name/...`` otherwise), which is what the proxy was asked for and
+    refused. Either way the command chose it, so anything but the characters
+    of a host name and port is replaced: a later step that pastes the output
+    into a script must not run what the command wrote (slice 2c.6).
     """
     hosts: list[str] = []
     for log in sorted(log_dir.rglob("access*.log")):
@@ -343,11 +894,86 @@ def _denied_hosts(log_dir: Path) -> list[str]:
             fields = line.split()
             if len(fields) < 9 or "DENIED" not in fields[7]:
                 continue
-            host = fields[2] if fields[2] != "-" else fields[8].split("://", 1)[-1].split("/", 1)[0]
+            target = fields[8] if fields[8] != "-" else fields[2]
+            host = target.split("://", 1)[-1].split("/", 1)[0]
             host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+            host = re.sub(r"[^A-Za-z0-9._:\[\]-]", "?", host)[:120]
             if host and host not in hosts:
                 hosts.append(host)
     return hosts
+
+
+def _dns_refused(log: Path) -> list[str]:
+    """Names the action's resolver refused, from its log, as plain text."""
+    names: list[str] = []
+    try:
+        text = log.read_text(errors="replace")
+    except OSError:
+        return names
+    for line in text.splitlines():
+        parts = line.split(" ", 2)
+        if len(parts) == 3 and parts[0] == "refused":
+            name = re.sub(r"[^A-Za-z0-9._\\-]", "?", parts[2])[:120]
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def start_resolver(environ: dict[str, str], names: list[str], private: Path, log: Path,
+                   blocked: str) -> tuple[subprocess.Popen | None, str, str | None]:
+    """Start the resolver AWF's proxy will use, and check it.
+
+    Returns (process, address, problem); problem is None when the resolver
+    is listening on Docker's bridge, refuses ``blocked`` and answers the
+    first listed name. The check's queries go to the resolver only: a refused
+    name goes no further.
+    """
+    ip_tool = shutil.which("ip", path=FIXED_PATH)
+    address = bridge_address(ip_tool)
+    if address is None:
+        return None, "", f"the runner has no {DNS_BRIDGE} bridge with an IPv4 address for the proxy's resolver"
+    upstream = runner_resolver()
+    if upstream is None:
+        return None, address, "the runner's /etc/resolv.conf names no IPv4 nameserver to forward listed names to"
+    names_file = private / "dns-names.txt"
+    names_file.write_text("\n".join(names) + "\n")
+    script = os.path.abspath(__file__)
+    argv = ["sudo", "-n", "/usr/bin/python3", "-I", "-S", script, "dns-filter", address, upstream,
+            str(names_file), str(log), f"{os.getuid()}:{os.getgid()}"]
+    try:
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
+                                   env={"PATH": FIXED_PATH}, text=True)
+    except OSError as error:
+        return None, address, f"the proxy's resolver could not start ({error})"
+    import select
+    ready, _, _ = select.select([process.stdout], [], [], 20)
+    line = process.stdout.readline().strip() if ready else ""
+    if line != "ready":
+        return process, address, "the proxy's resolver did not start"
+    refused = dns_ask(address, blocked)
+    if refused != DNS_RCODE_REFUSED:
+        return process, address, f"the proxy's resolver did not refuse the unlisted {blocked} (answer {refused})"
+    answered = dns_ask(address, names[0], timeout=6.0)
+    if answered is None or answered == DNS_RCODE_REFUSED:
+        return process, address, f"the proxy's resolver did not answer the listed {names[0]} (answer {answered})"
+    return process, address, None
+
+
+def stop_resolver(process: subprocess.Popen | None) -> None:
+    """Stop the resolver: it serves until its standard input closes."""
+    if process is None:
+        return
+    try:
+        if process.stdin:
+            process.stdin.close()
+        process.wait(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        subprocess.run(["sudo", "-n", "kill", "-TERM", str(process.pid)], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env={"PATH": FIXED_PATH})
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _remove(path: Path) -> None:
@@ -386,14 +1012,191 @@ def _summary(environ: dict[str, str], text: str) -> None:
             handle.write(text)
 
 
+# ---------------------------------------------------------------------------
+# What the command could reach on the runner's disk (slice 2c.6)
+# ---------------------------------------------------------------------------
+
+_INCLUDE_RE = re.compile(r"^\s*\[\s*include(?:if)?\b", re.IGNORECASE | re.MULTILINE)
+# A remote URL with a user and a password: https://x-access-token:<token>@host/...
+_URL_CREDENTIAL_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s/@:]*:[^\s/@]+@", re.IGNORECASE)
+_GIT_CONFIG_NAMES = ("config", "config.worktree")
+
+
+def git_credentials(workspace: Path) -> str | None:
+    """Why the copy of ``workspace`` would carry a checkout's credential, or None.
+
+    actions/checkout before v6 wrote the token into ``.git/config`` as an
+    ``http.<url>.extraheader``; v6 and later write an ``includeIf`` there that
+    names a file holding it, under ``RUNNER_TEMP`` (its CHANGELOG, v6.0.0:
+    "Persist creds to a separate file"). Either, in the configuration of any
+    repository in the tree (a second checkout, a submodule's directory under
+    ``.git/modules``), means the token was persisted. Both are refused: the
+    first is copied with the workspace, and the second points git, run in the
+    copy by a later step, at the file.
+    """
+    for dirpath, _dirnames, filenames in os.walk(workspace):
+        parts = Path(dirpath).relative_to(workspace).parts
+        if ".git" not in parts:
+            continue
+        for filename in _GIT_CONFIG_NAMES:
+            if filename not in filenames:
+                continue
+            config = Path(dirpath) / filename
+            name = config.relative_to(workspace)
+            try:
+                with config.open("rb") as handle:
+                    text = handle.read(1 << 20).decode("utf-8", errors="replace")
+            except OSError as error:
+                return f"{name} could not be read ({error.strerror})"
+            if "extraheader" in text.lower():
+                return f"{name} holds a credential (an extraheader)"
+            if _INCLUDE_RE.search(text):
+                return f"{name} includes another file, which is where actions/checkout v6 and later keep the token"
+            if _URL_CREDENTIAL_RE.search(text):
+                return f"{name} holds a credential in a remote URL"
+    return None
+
+
+def _quiet(argv: list[str], extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Run a helper with a fixed PATH and nothing else of the environment."""
+    env = {"PATH": FIXED_PATH}
+    env.update(extra_env or {})
+    return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, check=False, env=env)
+
+
+def split_null_list(data: bytes, root: Path) -> list[str]:
+    """Paths printed by ``find -print0`` under ``root``, relative to it, as plain text."""
+    names: list[str] = []
+    for raw in data.split(b"\0"):
+        if not raw:
+            continue
+        text = raw.decode("utf-8", errors="replace")
+        prefix = str(root).rstrip("/") + "/"
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+        # The command chose these names, and a later step may paste the output
+        # into a script: only the characters of a plain path are kept.
+        names.append(re.sub(r"[^A-Za-z0-9._/+=@%-]", "?", text)[:200])
+    return names
+
+
+def lock_endpoints(root: str, skip: Path) -> tuple[list[tuple[str, int, int]], str | None]:
+    """Make every socket and named pipe under ``root`` that this user could
+    write unwritable to it, for the length of the run.
+
+    The command runs as the runner's own user, without capabilities, and sees
+    the runner's /tmp read-only. A read-only mount does not stop it from
+    connecting to a socket there, and a program on the runner that listens on
+    one acts for it outside the sandbox: every .NET program (the runner's own
+    Runner.Listener and Runner.Worker among them) listens on
+    ``/tmp/dotnet-diagnostic-<pid>-...-socket`` unless told not to, and that
+    socket can make the program write a core dump of its memory, where the
+    job's secrets are, or load a library. Write permission is what connect(2)
+    and opening a pipe need, and the command cannot change a mode on a
+    read-only mount. Returns the locked endpoints (path, mode, owner) and a
+    problem, or None.
+    """
+    found = _quiet(["sudo", "-n", "find", root, "-xdev", "(", "-type", "s", "-o", "-type", "p", ")", "-print0"])
+    if found.returncode not in (0, 1) or (found.returncode == 1 and not found.stdout):
+        return [], f"could not list the sockets and pipes under {root} (find status {found.returncode})"
+    locked: list[tuple[str, int, int]] = []
+    problems: list[str] = []
+    skip_prefix = str(skip).rstrip("/") + "/"
+    for raw in found.stdout.split(b"\0"):
+        if not raw:
+            continue
+        path = os.fsdecode(raw)
+        if path.startswith(skip_prefix):
+            continue
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue  # gone since find saw it
+        if not (stat.S_ISSOCK(info.st_mode) or stat.S_ISFIFO(info.st_mode)):
+            continue
+        if not os.access(path, os.W_OK):
+            continue  # this user cannot reach it, and neither can the command
+        mode = stat.S_IMODE(info.st_mode)
+        if info.st_uid == os.getuid():
+            try:
+                os.chmod(path, 0)
+            except OSError:
+                pass
+        else:
+            _quiet(["sudo", "-n", "chmod", "000", "--", path])
+        locked.append((path, mode, info.st_uid))
+        if os.access(path, os.W_OK):
+            problems.append(path)
+    if problems:
+        return locked, f"could not make {', '.join(problems[:5])} unwritable"
+    return locked, None
+
+
+def unlock_endpoints(locked: list[tuple[str, int, int]]) -> None:
+    """Give the endpoints lock_endpoints changed their modes back."""
+    for path, mode, owner in locked:
+        try:
+            if owner != os.getuid():
+                raise PermissionError
+            os.chmod(path, mode)
+        except OSError:
+            _quiet(["sudo", "-n", "chmod", f"{mode:o}", "--", path])
+
+
+def running_containers(home: Path) -> set[str] | None:
+    """IDs of the containers running on the runner, or None if Docker did not answer."""
+    done = _quiet(["docker", "ps", "-q", "--no-trunc"], {"HOME": str(home)})
+    if done.returncode != 0:
+        return None
+    return set(done.stdout.decode(errors="replace").split())
+
+
+def remove_special_files(scratch: Path) -> tuple[list[str], str | None]:
+    """Delete every entry under ``scratch`` that is not a regular file or a
+    directory: symbolic links, named pipes, sockets and device files.
+
+    The scratch directory is the action's output, and a later step reads or
+    uploads it with the runner's full access. A link the command left there
+    would point that step at the runner's own files: actions/upload-artifact
+    or a step that reads the copy would take ``/proc/self/environ`` or a file
+    under ``RUNNER_TEMP`` through it. ``find`` runs as root (the command may
+    leave a directory it cannot read) and does not follow links. Returns the
+    deleted entries, relative to ``scratch``, and a problem, or None.
+    """
+    argv = ["sudo", "-n", "find", str(scratch), "-xdev", "!", "-type", "f", "!", "-type", "d"]
+    done = _quiet(argv + ["-print0", "-delete"])
+    removed = split_null_list(done.stdout, scratch)
+    left = _quiet(argv + ["-print", "-quit"])
+    if done.returncode != 0 or left.returncode != 0 or left.stdout.strip():
+        return removed, (f"could not delete every link, pipe, socket and device file under {scratch} "
+                         f"(find status {done.returncode}, then {left.returncode})")
+    return removed, None
+
+
+def read_marker(marker: Path) -> str | None:
+    """The probe's marker, read without following a link or blocking on a pipe."""
+    try:
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, 256).decode("utf-8", errors="replace")
+    finally:
+        os.close(fd)
+
+
 def run(environ: dict[str, str]) -> int:
     """Run the workflow's command under AWF. Returns the step's exit status."""
     allow = parse_allow_list(environ.get("INPUT_ALLOW", ""))
     passed = parse_env_names(environ.get("INPUT_ENV", ""), environ)
+    model_keys = parse_model_keys(environ.get("INPUT_MODEL_KEYS", ""), environ)
     command = environ.get("INPUT_RUN", "")
     if not command.strip():
         raise UsageError("run: give the command to run")
     blocked = probe_host(allow)
+    dns_names = resolver_names(allow, model_keys)
 
     state = _state_dir()
     awf = state / "bin" / "awf"
@@ -413,10 +1216,11 @@ def run(environ: dict[str, str]) -> int:
     for sub in ("home", "tmp", "workspace"):
         (scratch / sub).mkdir()
     workspace = Path(environ.get("GITHUB_WORKSPACE") or os.getcwd())
-    git_config = workspace / ".git" / "config"
-    if git_config.is_file() and "extraheader" in git_config.read_text(errors="replace").lower():
+    credential = git_credentials(workspace)
+    if credential:
         shutil.rmtree(scratch, ignore_errors=True)
-        raise UsageError("the workspace's .git/config holds a credential (actions/checkout without persist-credentials: false); the copy the command works on would carry it")
+        raise UsageError(f"the workspace's {credential}: check out with persist-credentials: false, so the copy the command works on carries no token",
+                         reason="credential")
     copy = scratch / "workspace"
     shutil.copytree(workspace, copy, symlinks=True, dirs_exist_ok=True)
 
@@ -436,7 +1240,7 @@ def run(environ: dict[str, str]) -> int:
         path.chmod(0o700)
 
     config = private / "awf-config.json"
-    config.write_text(json.dumps({"filesystem": {"allowWrite": [str(scratch)]}}) + "\n")
+    config.write_text(json.dumps(awf_config(str(scratch))) + "\n")
     env_file = private / "command.env"
     fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -458,11 +1262,56 @@ def run(environ: dict[str, str]) -> int:
         "TMPDIR": str(awf_tmp),
         "LANG": "C.UTF-8",
     }
-    argv = awf_argv(str(awf), allow, str(config), str(env_file), str(copy), str(awf_work), str(logs), str(inner))
+    # Model keys go to AWF's own environment, never to the command's file:
+    # AWF gives them to its API proxy sidecar.
+    child_env.update(model_keys)
+
+    # The resolver AWF's proxy is given. It must be running, refuse a name the
+    # list does not cover and answer one it does, or nothing runs.
+    dns_log = logs.parent / "dns.log"
+    resolver, dns_server, problem = start_resolver(environ, dns_names, private, dns_log, blocked)
+    if problem:
+        print(f"::error::obaaf-egress: {problem}; the command was not run")
+        stop_resolver(resolver)
+        for path in sorted(private.iterdir()):
+            if path not in (logs, dns_log):
+                _remove(path)
+        _set_output(environ, "dns-log", str(dns_log))
+        _set_output(environ, "confined", "false")
+        return EXIT_NOT_CONFINED
+    argv = awf_argv(str(awf), allow, str(config), str(env_file), str(copy), str(awf_work), str(logs), str(inner),
+                    dns_server)
+
+    # Sockets and pipes in the runner's /tmp the command could write, made
+    # unwritable for the run, and the containers already running, so that one
+    # AWF leaves behind is found (slice 2c.6).
+    locked, problem = lock_endpoints(ENDPOINT_ROOT, scratch)
+    containers_before = running_containers(private)
+    if containers_before is None and not problem:
+        problem = "Docker did not list its running containers"
+    if problem:
+        print(f"::error::obaaf-egress: {problem}; the command was not run")
+        unlock_endpoints(locked)
+        stop_resolver(resolver)
+        for path in sorted(private.iterdir()):
+            if path not in (logs, dns_log):
+                _remove(path)
+        _set_output(environ, "dns-log", str(dns_log))
+        _set_output(environ, "confined", "false")
+        return EXIT_NOT_CONFINED
+    if locked:
+        shown = [re.sub(r"[^\x21-\x7e]", "?", path)[:120] for path, _, _ in locked[:10]]
+        print(f"obaaf-egress: made {len(locked)} socket(s) or pipe(s) in {ENDPOINT_ROOT} unwritable for the run: "
+              + ", ".join(shown) + (", ..." if len(locked) > 10 else ""))
 
     before = _runner_file_hashes(environ)
     token = secrets.token_hex(16)
     print(f"obaaf-egress: AWF {AWF_VERSION}; allowed: {', '.join(allow)}")
+    if model_keys:
+        print(f"obaaf-egress: model keys given to AWF's API proxy, not to the command: {', '.join(model_keys)}"
+              f" (it reaches {', '.join(MODEL_KEYS[k] for k in model_keys)} whatever allow says)")
+    print(f"obaaf-egress: the proxy's resolver is the action's own, at {dns_server}; it answers only: "
+          f"{', '.join(n[1:] + ' (exactly)' if n.startswith('=') else n for n in dns_names)}")
     print(f"obaaf-egress: the command can write only under {scratch}")
     sys.stdout.flush()
     print(f"::stop-commands::{token}", flush=True)
@@ -475,6 +1324,33 @@ def run(environ: dict[str, str]) -> int:
         sys.stderr.flush()
         print(f"\n::{token}::", flush=True)
     elapsed = time.monotonic() - started
+    resolver_died = resolver is not None and resolver.poll() is not None
+    stop_resolver(resolver)
+    dns_refused = _dns_refused(dns_log)
+    # A container AWF left running could still write to the scratch
+    # directory after the clean-up below, so none may be left.
+    # If Docker does not answer, nothing shows that no container is left, and
+    # the endpoints stay unwritable for the rest of the job (which harms
+    # nothing) and the step fails. The same if an exception ends the run
+    # above: AWF may not have stopped its containers.
+    containers_after = running_containers(private)
+    stray = sorted((containers_after or set()) - (containers_before or set()))
+    if stray:
+        _quiet(["docker", "rm", "-f", *stray], {"HOME": str(private)})
+        containers_after = running_containers(private)
+        stray = sorted(set(stray) & containers_after) if containers_after is not None else stray
+    if containers_after is None:
+        print("::error::obaaf-egress: Docker did not list its containers after the run, so it is not known that none is left; the step fails")
+        stray = stray or ["unknown"]
+    elif stray:
+        print(f"::error::obaaf-egress: containers started for the run are still running ({', '.join(c[:12] for c in stray)}); the step fails")
+    else:
+        # Only now, with nothing of the run left running, may the endpoints
+        # be writable again.
+        unlock_endpoints(locked)
+    removed, special_problem = remove_special_files(scratch)
+    if special_problem:
+        print(f"::error::obaaf-egress: {special_problem}; the step fails")
     try:
         env_file.unlink()
     except OSError:
@@ -486,7 +1362,7 @@ def run(environ: dict[str, str]) -> int:
     # log, which the command cannot write, is kept.
     left = []
     for path in sorted(private.iterdir()):
-        if path == logs:
+        if path in (logs, dns_log):
             continue
         _remove(path)
         if path.exists() or path.is_symlink():
@@ -500,35 +1376,50 @@ def run(environ: dict[str, str]) -> int:
     after = _runner_file_hashes(environ)
     changed = [name for name in before if before[name] != after.get(name)]
 
-    try:
-        probe_ok = marker.read_text().strip() == nonce
-    except OSError:
-        probe_ok = False
+    probe_ok = (read_marker(marker) or "").strip() == nonce
 
     denied = _denied_hosts(logs)
     _set_output(environ, "workspace", str(copy))
     _set_output(environ, "scratch", str(scratch))
     _set_output(environ, "log-dir", str(logs))
+    _set_output(environ, "dns-log", str(dns_log))
     _set_output(environ, "exit-code", str(status))
     _set_output(environ, "denied", ",".join(denied))
+    _set_output(environ, "dns-refused", ",".join(dns_refused))
+    _set_output(environ, "removed", ",".join(name.replace(",", "?") for name in removed[:200]))
 
     lines = ["### OBAAF egress control\n\n",
              f"- AWF {AWF_VERSION}, allowed: {', '.join('`' + h + '`' for h in allow)}\n",
              f"- command exit status: {status}, {elapsed:.0f} s\n"]
+    if model_keys:
+        lines.append(f"- model keys given to AWF's API proxy: {', '.join('`' + k + '`' for k in model_keys)}"
+                     f" (it reaches {', '.join('`' + MODEL_KEYS[k] + '`' for k in model_keys)} whatever `allow` says)\n")
     if denied:
         lines.append(f"- refused by the proxy: {', '.join('`' + h + '`' for h in denied)}\n")
     else:
         lines.append("- refused by the proxy: none logged\n")
+    if dns_refused:
+        lines.append(f"- names the proxy's resolver refused (they did not leave the runner): {', '.join('`' + h + '`' for h in dns_refused[:50])}\n")
+    if removed:
+        lines.append(f"- links, pipes, sockets and device files deleted from the scratch directory: {len(removed)}"
+                     f" ({', '.join('`' + n + '`' for n in removed[:20])}{', ...' if len(removed) > 20 else ''})\n")
+    if resolver_died:
+        lines.append("- **the action's resolver stopped before the command ended**\n")
     if not probe_ok:
         lines.append("- **the sandbox did not start or did not hold: the command did not run**\n")
     _summary(environ, "".join(lines) + "\n")
     print(f"obaaf-egress: refused by the proxy: {', '.join(denied) if denied else 'none logged'}")
+    print(f"obaaf-egress: refused by the proxy's resolver: {', '.join(dns_refused[:50]) if dns_refused else 'none'}")
 
+    if resolver_died:
+        print("::error::obaaf-egress: the action's resolver stopped before the command ended, so the run is not the one the escape tests cover; the step fails")
+        _set_output(environ, "confined", "false")
+        return EXIT_NOT_CONFINED
     if changed:
         print(f"::error::The runner's {', '.join(changed)} changed while the command ran; the step fails")
         _set_output(environ, "confined", "false")
         return EXIT_NOT_CONFINED
-    if changed_left:
+    if changed_left or stray or special_problem:
         _set_output(environ, "confined", "false")
         return EXIT_NOT_CONFINED
     if not probe_ok:
@@ -541,20 +1432,72 @@ def run(environ: dict[str, str]) -> int:
     return status
 
 
+def runner_problem(uname=os.uname) -> str | None:
+    """Why this is not a runner the action was tested on, or None.
+
+    Read from the kernel, not from ``RUNNER_OS`` or a ``uname`` found through
+    the ``PATH``, either of which the job can set (issue #145)."""
+    info = uname()
+    if info.sysname != "Linux" or info.machine != "x86_64":
+        return f"the OBAAF egress control runs on Linux x64 runners only (this is {info.sysname} {info.machine})"
+    return None
+
+
+def inherited_hooks(environ: dict[str, str]) -> list[str]:
+    """The loader variables that still have a value in this step (slice 2c.9).
+
+    action.yml sets every one to "" in each step's own env, which overrides
+    the job's env, the workflow's and GITHUB_ENV. One with a value means that
+    did not happen, so the step stops before it does anything."""
+    return [name for name in LOADER_VARIABLES if environ.get(name)]
+
+
+def unpinned(environ: dict[str, str]) -> list[str]:
+    """The startup variables that do not have the value action.yml gives them
+    in this step (slice 2c.12). As for the loader's: the step's own env
+    outranks the job's, the workflow's and GITHUB_ENV, so another value means
+    the runner did not apply it, and glibc or Python may already have read
+    what the workflow set."""
+    return [name for name, value in STARTUP_PINS.items() if environ.get(name, "") != value]
+
+
 def main(argv: list[str]) -> int:
+    if len(argv) >= 2 and argv[1] == "dns-filter":
+        return dns_filter(argv[2:])
     if len(argv) != 2 or argv[1] not in ("install", "run", "check-allow"):
         print("usage: egress.py install|run|check-allow", file=sys.stderr)
+        return 2
+    problem = runner_problem()
+    if problem:
+        print(f"::error::{problem}.")
+        return 2
+    environ = step_environment()
+    hooks = inherited_hooks(environ)
+    if hooks:
+        print(f"::error::obaaf-egress: this step's environment still sets {', '.join(hooks)}, which the action's "
+              "own env empties, so the runner did not apply it and the dynamic loader may have obeyed them; "
+              "nothing was run")
+        _set_output(environ, "refused", "environment")
+        return 2
+    loose = unpinned(environ)
+    if loose:
+        print(f"::error::obaaf-egress: this step's environment does not set {', '.join(loose)} as the action's own "
+              "env does, so the runner did not apply it and Python may have started with what the workflow set; "
+              "nothing was run")
+        _set_output(environ, "refused", "environment")
         return 2
     try:
         if argv[1] == "install":
             return install()
         if argv[1] == "check-allow":
-            parse_allow_list(os.environ.get("INPUT_ALLOW", ""))
-            parse_env_names(os.environ.get("INPUT_ENV", ""), dict(os.environ))
+            parse_allow_list(environ.get("INPUT_ALLOW", ""))
+            parse_env_names(environ.get("INPUT_ENV", ""), environ)
+            parse_model_keys(environ.get("INPUT_MODEL_KEYS", ""), environ)
             return 0
-        return run(dict(os.environ))
+        return run(environ)
     except UsageError as error:
         print(f"::error::{error}")
+        _set_output(environ, "refused", error.reason)
         return 2
 
 

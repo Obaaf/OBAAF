@@ -1,0 +1,18 @@
+# obaaf-models: An agent's command-line tool is run with an option its own documentation warns about: Claude Code with its permission checks turned off, so any command the agent chooses runs without approval.
+# obaaf-expect: OBAAF-GHA-026
+name: Claude on push
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Summarize the change
+        run: claude -p "Summarize the last commit" --dangerously-skip-permissions

@@ -475,9 +475,15 @@ class NoDeclarationIsDroppedWithoutAWordTest(unittest.TestCase):
             path = tmp / "wf.yml"
             path.write_text(wf)
             shown = {row[1]: row[2] for row in checker.lanes(path)}
-            notes = ignored(checker.check(path))
+            result = checker.check(path)
+            notes = ignored(result)
         self.assertEqual(shown, {"first": "agent", "second": "agent"})
-        self.assertEqual(notes, [])
+        # Flagship slice 2d.2f: an action's input named OBAAF_LANE declares nothing and is reported; here
+        # it names the lane the job is in through the shared env, so nothing is lost and it is low. The
+        # input's definition under `workflow_call` is a mapping, not a declaration, and is not reported.
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("Job 'second' sets 'OBAAF_LANE' to 'agent' in 'steps[0].with'", notes[0])
+        self.assertEqual([(f.kind, f.severity) for f in idle(result)], [("elsewhere", "low")])
 
     def test_one_workflow_checked_with_the_repository_configuration(self):
         # The configuration names files from the repository root; a file checked on its own must

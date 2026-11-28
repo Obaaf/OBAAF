@@ -1,0 +1,559 @@
+import contextlib
+import io
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import yaml
+
+from obaaf import cli
+from obaaf.checker import Config, ConfigError
+from obaaf.init import WORKFLOW
+
+
+class InitTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.config = self.root / ".github/obaaf.yml"
+        self.workflow = self.root / WORKFLOW
+
+    def invoke(self, *options):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = cli.main(["init", str(self.root), *options])
+        return status, stdout.getvalue() + stderr.getvalue()
+
+    def test_preview_apply_repeat(self):
+        status, text = self.invoke()
+        self.assertEqual(status, 0, text)
+        self.assertIn("GitHub Agentic Workflows", text)
+        self.assertIn("+++ .github/obaaf.yml", text)
+        self.assertIn("+++ " + WORKFLOW, text)
+        self.assertEqual(list(self.root.iterdir()), [])
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertEqual(Config.load(self.root).lanes, {})
+        workflow = yaml.safe_load(self.workflow.read_bytes())
+        steps = workflow["jobs"]["check"]["steps"]
+        self.assertIn("--fail-on never", steps[-1]["run"])
+        for step in steps:
+            if "uses" in step:
+                self.assertRegex(step["uses"], r"@[0-9a-f]{40}$")
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+        self.assertEqual(self.invoke("--apply")[1].count("Already matches"), 2)
+
+    def test_jobs_secrets_and_ambiguous_environments(self):
+        dest = self.workflow.with_name("jobs.yml")
+        dest.parent.mkdir(parents=True)
+        dest.write_text("""on: push
+jobs:
+  ai:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: openai/codex-action@v1
+        env:
+          OPENAI_API_KEY: ${{ secrets.PRIVATE_MODEL }}
+          DEPLOY: ${{ secrets.DEPLOY_TOKEN }}
+  custom:
+    runs-on: ubuntu-latest
+    env:
+      KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      DEPLOY: ${{ secrets.deploy_token }}
+    steps: []
+""")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        config = Config.load(self.root)
+        self.assertEqual(config.protected_secrets, {"PRIVATE_MODEL": "production"})
+        self.assertEqual(config.lanes, {".github/workflows/jobs.yml#custom": "agent"})
+        self.assertIn("Review DEPLOY_TOKEN", text)
+        self.assertIn("Review ANTHROPIC_API_KEY", text)
+        self.assertIn("codex", text.lower())
+
+    def test_script_agent_with_a_provider_key_keeps_its_inferred_lane(self):
+        workflow = self.workflow.with_name("script.yml")
+        workflow.parent.mkdir(parents=True)
+        (self.root / "review.sh").write_text("codex exec 'review'\n")
+        workflow.write_text("""on: push
+jobs:
+  review:
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - run: bash review.sh
+""")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertEqual(Config.load(self.root).lanes, {})
+        self.assertIn("script.yml#review:", text)
+        self.assertIn("references OPENAI_API_KEY", text)
+        self.assertNotIn("To create an agent workflow", text)
+
+    def lanes_after_check(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = cli.main(["check", str(self.root), "--lanes"])
+        self.assertEqual(status, 0, stdout.getvalue() + stderr.getvalue())
+        return dict(line.split(": ", 1) for line in stdout.getvalue().splitlines() if ": " in line)
+
+    def test_a_lane_is_omitted_only_where_the_checkout_finds_the_agent(self):
+        """Review of #362: a job whose agent the checker finds only in a script the last commit does
+        not hold (untracked, ignored, in a submodule, or edited since) would get no lane from init and
+        none in CI, whose checkout does not hold the script. Init declares it, and says why."""
+        from helpers import git, init_repo
+        init_repo(self.root)
+        workflow = self.workflow.with_name("script.yml")
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("""on: push
+jobs:
+  review:
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - run: bash review.sh
+  direct:
+    steps:
+      - run: claude -p review
+""")
+        script = self.root / "review.sh"
+        script.write_text("codex exec 'review'\n")
+        git(self.root, "add", workflow.relative_to(self.root).as_posix())
+        git(self.root, "commit", "-qm", "workflow")
+        reason = "the files of the last commit outside submodules"
+        status, text = self.invoke()
+        self.assertEqual(status, 0, text)
+        self.assertIn('+  .github/workflows/script.yml#review: agent', text)
+        self.assertNotIn("script.yml#direct: agent", text)
+        self.assertIn(reason, text)
+        self.assertIn("script.yml#review", text.split(reason)[1])
+        (self.root / ".gitignore").write_text("review.sh\n")
+        self.assertIn('+  .github/workflows/script.yml#review: agent', self.invoke()[1])
+        (self.root / ".gitignore").unlink()
+        # Committed as an agent the checker cannot see, edited in the working tree into one it can.
+        script.write_text('A=codex; "$A" exec review\n')
+        git(self.root, "add", "review.sh")
+        git(self.root, "commit", "-qm", "script")
+        script.write_text("codex exec 'review'\n")
+        self.assertIn('+  .github/workflows/script.yml#review: agent', self.invoke()[1])
+        git(self.root, "commit", "-qam", "script")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertEqual(Config.load(self.root).lanes, {})
+        self.assertNotIn(reason, text)
+        lanes = self.lanes_after_check()
+        for job in ("review", "direct"):
+            self.assertTrue(lanes[f".github/workflows/script.yml#{job}"].startswith("agent ("), lanes)
+
+    def test_the_committed_copy_writes_nothing_through_a_link(self):
+        """Review of #362: the copy of the last commit wrote a link and then a file through it, so a
+        commit that lists a link `lnk` to any folder and a file `lnk/x` made a preview write there."""
+        import subprocess
+        from helpers import git, init_repo
+        init_repo(self.root)
+        self.workflow.parent.mkdir(parents=True)
+        self.workflow.with_name("a.yml").write_text("on: push\njobs:\n  review:\n    steps:\n      - run: claude -p review\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-qm", "workflow")
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        def stored(kind, data):
+            path = Path(outside.name).with_suffix(".object")
+            path.write_bytes(data)
+            try:
+                return git(self.root, "hash-object", "-w", "--literally", "-t", kind, str(path))
+            finally:
+                path.unlink()
+        def blob(data):
+            return stored("blob", data)
+        def tree(entries):
+            return stored("tree", b"".join(mode + b" " + name + b"\0" + bytes.fromhex(sha)
+                                           for mode, name, sha in entries))
+        github = git(self.root, "rev-parse", "HEAD:.github")
+        top = tree([(b"40000", b".github", github), (b"120000", b"lnk", blob(outside.name.encode())),
+                    (b"100644", b"lnk/x", blob(b"written by obaaf init\n"))])
+        commit = git(self.root, "commit-tree", top, "-p", "HEAD", "-m", "crafted")
+        git(self.root, "update-ref", "HEAD", commit)
+        self.assertIn("lnk/x", git(self.root, "ls-tree", "-r", "HEAD"))
+        status, text = self.invoke()
+        self.assertEqual(status, 0, text)
+        self.assertEqual(os.listdir(outside.name), [])
+        self.assertIn(".github/workflows/a.yml#review: claude-code", text)
+        self.assertNotIn("+  .github/workflows/a.yml#review: agent", text)
+
+    def test_every_job_init_names_is_an_agent_job_when_checked(self):
+        """Review of #362: the property the change rests on. Each job init lists as an agent job is
+        in the agent lane when the checker runs with what init wrote, declared or not."""
+        from helpers import git, init_repo
+        init_repo(self.root)
+        folder = self.workflow.parent
+        folder.mkdir(parents=True)
+        action = self.root / ".github/actions/assistant/action.yml"
+        action.parent.mkdir(parents=True)
+        action.write_text("name: assistant\nruns:\n  using: composite\n  steps:\n    - uses: openai/codex-action@v1\n")
+        (self.root / "review.sh").write_text("claude -p review\n")
+        (folder / "a.yml").write_text("""on: pull_request
+jobs:
+  action:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+  composite:
+    steps:
+      - uses: ./.github/actions/assistant
+  script:
+    steps:
+      - run: bash review.sh
+  key:
+    steps:
+      - run: python probe.py
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+  call:
+    uses: ./.github/workflows/b.yml
+""")
+        (folder / "b.yml").write_text("on: workflow_call\njobs:\n  inner:\n    steps:\n      - run: npx @openai/codex exec x\n")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-qm", "workflows")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        named = [line.split(":")[0] for line in text.splitlines() if line.startswith(".github/workflows/")]
+        self.assertEqual(sorted(named), sorted(f".github/workflows/{key}" for key in (
+            "a.yml#action", "a.yml#composite", "a.yml#script", "a.yml#key", "b.yml#inner")), text)
+        self.assertEqual(Config.load(self.root).lanes, {".github/workflows/a.yml#key": "agent"})
+        lanes = self.lanes_after_check()
+        for key in named:
+            self.assertTrue(lanes[key].startswith("agent ("), (key, lanes))
+
+    def test_conflicts_in_either_file_stop_both_writes(self):
+        for target, other in [(self.workflow, self.config), (self.config, self.workflow)]:
+            with self.subTest(target=target):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("custom\n")
+                status, text = self.invoke("--apply")
+                self.assertEqual(status, 1, text)
+                self.assertIn("-custom", text)
+                self.assertEqual(target.read_text(), "custom\n")
+                self.assertFalse(other.exists())
+                target.unlink()
+
+    def test_lookalikes_report_the_default_checker_error_without_writing(self):
+        self.config.parent.mkdir()
+        # Init names the resolved folder, so the expected message is the check's on that folder: a
+        # temporary folder reached through a link (macOS's /var) would otherwise differ (review of #415).
+        root = self.root.resolve()
+        for rel in ("obaaf.yaml", ".Obaaf.YML", ".github/.OBAAF.yaml"):
+            with self.subTest(rel=rel):
+                path = self.root / rel
+                path.write_text("lanes: {}\n")
+                self.addCleanup(path.unlink, missing_ok=True)
+                with self.assertRaises(ConfigError) as error:
+                    Config.load(root)
+                for options in ((), ("--apply",)):
+                    status, text = self.invoke(*options)
+                    self.assertEqual(status, 1, text)
+                    self.assertIn(str(error.exception), text)
+                    self.assertEqual(path.read_text(), "lanes: {}\n")
+                    self.assertFalse(self.config.exists())
+                    self.assertFalse(self.workflow.exists())
+                path.unlink()
+
+    def test_a_link_that_only_inits_own_file_resolves_is_a_lookalike(self):
+        # Review of #415: a dangling link named like a configuration, pointing at the workflow init
+        # writes, was no file before init and the first check refused it after.
+        root = self.root.resolve()
+        cases = (("obaaf.yaml", WORKFLOW), (".github/.obaaf.yml", "workflows/obaaf-pipeline-check.yml"))
+        for rel, target in cases:
+            with self.subTest(rel=rel):
+                link = self.root / rel
+                link.parent.mkdir(exist_ok=True)
+                # Native separators: on Windows a relative link target written with `/` does not resolve
+                # once its target exists (found by the lead on native Windows, after #415), which D-122
+                # states as one of the ways `realpath`'s prediction can differ from the system.
+                os.symlink(os.path.normpath(target), link)
+                # Each case is cleaned up even when it fails, so the next does not see its files.
+                try:
+                    for options in ((), ("--apply",)):
+                        status, text = self.invoke(*options)
+                        self.assertEqual(status, 1, text)
+                        self.assertIn(f"{root}: {rel} looks like a checker configuration", text)
+                        self.assertFalse(self.config.exists())
+                        self.assertFalse(os.path.lexists(self.workflow))
+                    # The checker sees the same file once the workflow exists.
+                    self.workflow.parent.mkdir(parents=True, exist_ok=True)
+                    self.workflow.write_text("on: push\n")
+                    with self.assertRaises(ConfigError) as error:
+                        Config.load(root)
+                    self.assertIn(f"{root}: {rel} looks like", str(error.exception))
+                finally:
+                    for path in (self.workflow, self.config, link):
+                        if os.path.lexists(path):
+                            path.unlink()
+
+    def test_a_link_the_system_does_not_resolve_is_not_a_lookalike_once_set_up(self):
+        # Second review of #415: realpath lets `..` cancel a folder that does not exist, where the system
+        # does not. Once init's files exist, the system's answer is the one taken, so a set-up repository
+        # is not refused for a link the check accepts.
+        self.assertEqual(self.invoke("--apply")[0], 0)
+        os.symlink("missing/../" + WORKFLOW, self.root / "obaaf.yaml")
+        self.assertFalse((self.root / "obaaf.yaml").is_file())
+        Config.load(self.root.resolve())
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertNotIn("Conflict", text)
+
+    def test_a_link_to_the_configuration_init_writes_is_not_a_lookalike(self):
+        # The same file as the configuration the checker reads, once init has written it.
+        os.symlink(".github/obaaf.yml", self.root / ".obaaf.yml")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertTrue(self.config.is_file())
+        Config.load(self.root.resolve())
+
+    def test_alias_of_supported_config_is_accepted(self):
+        self.assertEqual(self.invoke("--apply")[0], 0)
+        alias = self.config.with_name("OBAAF.YML")
+        self.config.rename(alias)
+        if not self.config.exists():
+            os.link(alias, self.config)
+        self.workflow.unlink()
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertTrue(self.workflow.is_file())
+        # And the first check after it reads the configuration (review of #415).
+        Config.load(self.root.resolve())
+
+    def test_alternate_config_and_linked_parent(self):
+        alt = self.root / "obaaf.yml"
+        alt.write_text("{}")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 1, text)
+        self.assertIn("--- obaaf.yml", text)
+        self.assertIn("-{}", text)
+        self.assertFalse(self.workflow.exists())
+        self.assertFalse(self.config.exists())
+        alt.write_text("lanes: {}\nprotected_secrets: {}\n")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 1, text)
+        self.assertIn("The contents match", text)
+        self.assertFalse(self.workflow.exists())
+        self.assertFalse(self.config.exists())
+        alt.unlink()
+        with tempfile.TemporaryDirectory() as external:
+            (self.root / ".github").symlink_to(external, target_is_directory=True)
+            self.assertNotEqual(self.invoke("--apply")[0], 0)
+            self.assertEqual(list(Path(external).iterdir()), [])
+
+    def test_second_write_failure_rolls_back_first(self):
+        link = os.link
+
+        def write(source, dest):
+            if dest == self.workflow:
+                raise OSError("test write failure")
+            link(source, dest)
+
+        with patch("obaaf.init.os.link", side_effect=write):
+            self.assertNotEqual(self.invoke("--apply")[0], 0)
+        self.assertFalse(self.config.exists())
+        self.assertFalse(self.workflow.exists())
+
+    def test_dynamic_environment_reusable_secret_and_short_name_require_review(self):
+        dest = self.workflow.with_name("called.yml")
+        dest.parent.mkdir(parents=True)
+        dest.write_text("""on: workflow_call
+jobs:
+  first:
+    environment: production
+    env:
+      TOKEN: ${{ secrets.SERVICE_TOKEN }}
+    steps: []
+  second:
+    environment: ${{ inputs.target }}
+    env:
+      KEY: ${{ secrets.ID }}
+    steps: []
+""")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertIn("Review SERVICE_TOKEN", text)
+        self.assertIn("Review ID", text)
+        self.assertEqual(Config.load(self.root).protected_secrets, {})
+
+    def test_no_final_newline_is_a_visible_conflict(self):
+        self.assertEqual(self.invoke("--apply")[0], 0)
+        self.config.write_bytes(self.config.read_bytes().rstrip(b"\n"))
+        self.workflow.unlink()
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 1, text)
+        self.assertIn("No newline at end of file", text)
+        self.assertFalse(self.workflow.exists())
+
+    def test_unreadable_workflow_blocks_apply(self):
+        path = self.workflow.with_name("invalid.yml")
+        path.parent.mkdir(parents=True)
+        path.write_text("jobs: [")
+        status, text = self.invoke("--apply")
+        self.assertNotEqual(status, 0)
+        self.assertIn("invalid.yml", text)
+        self.assertFalse(self.config.exists())
+        self.assertFalse(self.workflow.exists())
+
+    def test_local_composite_and_workflow_level_renamed_provider_key(self):
+        path = self.workflow.with_name("local.yml")
+        path.parent.mkdir(parents=True)
+        action = self.root / ".github/actions/assistant/action.yml"
+        action.parent.mkdir(parents=True)
+        action.write_text("""name: assistant
+runs:
+  using: composite
+  steps:
+    - uses: openai/codex-action@v1
+""")
+        path.write_text("""on: push
+jobs:
+  named:
+    steps:
+      - uses: ./.github/actions/assistant
+  ordinary:
+    steps: []
+""")
+        path.with_name("provider.yml").write_text("""on: push
+env:
+  INTERNAL_MODEL_CREDENTIAL: ${{ secrets.AZURE_OPENAI_API_KEY }}
+jobs:
+  custom:
+    steps: []
+""")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertIn("local.yml#named: codex", text)
+        self.assertIn("provider.yml#custom: references AZURE_OPENAI_API_KEY", text)
+        self.assertEqual(Config.load(self.root).lanes, {".github/workflows/provider.yml#custom": "agent"})
+        self.assertIn("Review AZURE_OPENAI_API_KEY", text)
+
+    def test_unnamed_access_in_other_environment_keeps_named_secret_for_review(self):
+        path = self.workflow.with_name("two.yml")
+        path.parent.mkdir(parents=True)
+        path.write_text("""on: push
+jobs:
+  named:
+    environment: production
+    env:
+      VALUE: ${{ secrets.SERVICE_TOKEN }}
+    steps: []
+  selected:
+    environment: staging
+    env:
+      VALUE: ${{ secrets[inputs.secret_name] }}
+    steps: []
+""")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertIn("Review SERVICE_TOKEN", text)
+        self.assertIn("review access to unnamed", text)
+        self.assertEqual(Config.load(self.root).protected_secrets, {})
+
+
+    def test_matching_first_destination_is_preserved_when_creating_the_other(self):
+        self.assertEqual(self.invoke("--apply")[0], 0)
+        original = self.config.stat()
+        self.workflow.unlink()
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertIn("Already matches: .github/obaaf.yml", text)
+        self.assertIn("Wrote " + WORKFLOW, text)
+        self.assertEqual(original.st_ino, self.config.stat().st_ino)
+        self.assertEqual(original.st_mtime_ns, self.config.stat().st_mtime_ns)
+
+
+class InitReviewTests(unittest.TestCase):
+    """From the review of #273 (run goosander)."""
+
+    setUp = InitTests.setUp
+    invoke = InitTests.invoke
+
+    def write_workflow(self, name, text):
+        path = self.workflow.with_name(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def test_a_workflow_that_is_not_utf8_is_named(self):
+        self.workflow.parent.mkdir(parents=True)
+        self.workflow.with_name("latin.yml").write_bytes(b"on: push\njobs:\n  j:\n    steps:\n      - run: echo \xff\n")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 2, text)
+        self.assertIn(".github/workflows/latin.yml is not UTF-8 text", text)
+        self.assertFalse(self.config.exists())
+
+    def test_an_environment_on_a_calling_job_is_not_proposed(self):
+        self.write_workflow("called.yml", "on: workflow_call\njobs:\n  x:\n    steps: []\n")
+        self.write_workflow("caller.yml", """on: push
+jobs:
+  mapped:
+    environment: production
+    uses: ./.github/workflows/called.yml
+    secrets:
+      TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+  inherited:
+    environment: production
+    uses: ./.github/workflows/called.yml
+    secrets: inherit
+  plain:
+    environment: production
+    env:
+      VALUE: ${{ secrets.SERVICE_TOKEN }}
+    steps: []
+""")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertIn("Review DEPLOY_TOKEN: no single literal environment", text)
+        self.assertIn("Review SERVICE_TOKEN: no single literal environment", text)
+        self.assertEqual(Config.load(self.root).protected_secrets, {})
+
+    def test_a_name_github_refuses_or_a_short_name_says_why(self):
+        self.write_workflow("names.yml", """on: push
+jobs:
+  j:
+    environment: production
+    env:
+      A: ${{ secrets.AB }}
+      B: ${{ secrets.GITHUB_PAT }}
+      C: ${{ secrets._X_Y }}
+      D: ${{ secrets.SERVICE_TOKEN }}
+    steps: []
+""")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        for name in ("AB", "GITHUB_PAT", "_X_Y"):
+            self.assertIn(f"Review {name}: init proposes rules only for secret names GitHub accepts", text)
+        self.assertEqual(Config.load(self.root).protected_secrets, {"SERVICE_TOKEN": "production"})
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes")
+    def test_written_files_get_the_mode_of_other_new_files(self):
+        old = os.umask(0o022)
+        self.addCleanup(os.umask, old)
+        self.assertEqual(self.invoke("--apply")[0], 0)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(self.workflow.stat().st_mode & 0o777, 0o644)
+
+    def test_the_diff_breaks_lines_only_at_newlines(self):
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text("lanes: {}\u2028\rprotected_secrets: {}\n")
+        status, text = self.invoke()
+        self.assertEqual(status, 1, text)
+        self.assertNotIn("No newline at end of file", text)
+        self.assertEqual(sum(line.startswith("-lanes") for line in text.splitlines()), 1)
+
+    def test_a_folder_inside_a_git_repository_is_named(self):
+        (self.root / ".git").mkdir()
+        inner = self.root / "src"
+        inner.mkdir()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["init", str(inner)]), 0)
+        self.assertIn(f"is inside the Git repository at {self.root.resolve()}", stdout.getvalue())
+        self.assertNotIn("is inside the Git repository", self.invoke()[1])

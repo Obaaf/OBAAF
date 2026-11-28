@@ -537,8 +537,14 @@ class DriftTest(unittest.TestCase):
         expected, live = self.snapshots(REFERENCE_CLASSIC)
         self.assertEqual(expected["settings"]["branch_protection"], live["settings"]["branch_protection"])
         result = drift.compare(expected, live)
-        self.assertFalse(drift.failed(result))
         self.assertEqual(result["outcomes"]["branch_protection"], "matches")
+        # Since slice 2b.9b the reader also records each environment's custom deployment protection rules, which
+        # this earlier snapshot does not hold: its environments are not compared, and that alone fails the check.
+        self.assertEqual({k: v for k, v in result["outcomes"].items() if v not in ("matches", "not covered")},
+                         {"environments": "in part"})
+        self.assertEqual({(e["setting"], e["reason_code"]) for e in result["not_compared"]},
+                         {("environments", "not_recorded")})
+        self.assertEqual(result["differences"], [])
 
     def test_a_field_that_moves_from_one_required_check_to_another_is_drift(self):
         def body(on: str) -> dict:

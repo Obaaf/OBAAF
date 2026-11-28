@@ -1,0 +1,369 @@
+# OBAAF's parity test against zizmor (flagship slice 2d.3b, decision F-19).
+#
+# For the GitHub Actions rules OBAAF shares with zizmor, OBAAF should report what zizmor reports on
+# the same workflow, or say here why it does not. scripts/zizmor_parity.py reads this file:
+#
+# - CI's advisory job `zizmor-parity` installs the zizmor below with the SHA-256 of every file PyPI
+#   publishes for it (zizmor-requirements.txt), runs it on each set, checks that what it reports for
+#   the mapped audits is what zizmor-cases.json records, and compares OBAAF's findings with it;
+# - the ordinary test suite (tests/test_zizmor_parity.py) compares OBAAF's findings with the
+#   recorded cases of every set whose files are in this repository, so a change to OBAAF that makes
+#   it silent where zizmor reports fails without zizmor installed.
+#
+# A case is one (file, job, audit) zizmor reports, in its default persona, with the steps it names.
+# It is answered when OBAAF reports one of the audit's rules, in any state but `fixed`, on the same
+# job (anywhere in the file, where zizmor names no job), and for each step zizmor names, on that
+# step (OBAAF-GHA-006's one `restores` or `capability-restores` finding counts for each cache step
+# of its job); a finding on the job as a whole answers the job, never a step. A case that is not
+# answered fails the test unless an entry under `silent` names it with a reason. Where OBAAF answers
+# part of a case, the entry lists under `steps` the places it explains, numbered from 0 as
+# zizmor-cases.json numbers them ([N], or [N, M] in a parallel group). An entry under `silent` that
+# names no case, a case OBAAF answers, or places other than those OBAAF leaves unanswered, fails
+# too, and so does a file OBAAF could not read, so this file cannot say more than the tools do.
+# zizmor-cases.json also holds the SHA-256 of each file the cases were read from; a changed file fails
+# the test until the cases are recorded again from CI.
+format: obaaf-zizmor-parity/v1
+
+zizmor:
+  # The version pinned in zizmor-requirements.txt, and the one zizmor-cases.json was recorded with.
+  version: 1.32.0
+  # Passed to every run. Offline: zizmor's online audits (impostor commits, known-vulnerable actions,
+  # ref confusion, stale refs) need the network and a token, and are not among the mapped audits.
+  # No configuration and the default persona, as a team running zizmor with no setup would see it.
+  # Strict collection: a file zizmor cannot read stops the run, instead of being skipped with a warning.
+  arguments: [--offline, --no-config, --strict-collection, --no-exit-codes, --no-progress, --format, json-v1]
+
+# zizmor audit -> the OBAAF rules that answer it (landscape.md, "Where OBAAF overlaps").
+audits:
+  template-injection: [OBAAF-GHA-010]
+  unpinned-uses: [OBAAF-GHA-008]
+  excessive-permissions: [OBAAF-GHA-009]
+  artipacked: [OBAAF-GHA-011]
+  # zizmor 1.32.0's cache-poisoning also reports `cache-mode: write` on a job a dangerous trigger starts,
+  # which is OBAAF-GHA-007's subject (a low-trust workflow can write the default branch's cache).
+  cache-poisoning: [OBAAF-GHA-006, OBAAF-GHA-007]
+
+# The workflow files compared. Each is checked by OBAAF on its own, with no configuration
+# (`obaaf check FILE`), as zizmor is run on it with none. Composite actions (action.yml) are left
+# out: OBAAF reads one only through a workflow step that uses it.
+sets:
+  risky:
+    about: OBAAF's published risky workflows, written by OBAAF's authors.
+    root: tests/fixtures/workflows/risky
+    include: ["*.yml"]
+  zizmor-tests:
+    about: >-
+      zizmor's own test workflows for the five mapped audits at its release v1.32.0, written by
+      zizmor's authors (MIT licence). They are not copied into this repository: CI checks them out
+      at the commit below.
+    repository: zizmorcore/zizmor
+    commit: 21bd300700d43d9ba04b0c1fce72a89391ac80b4
+    root: crates/zizmor/tests/integration/test-data
+    include:
+      - template-injection.yml
+      - template-injection/**/*.yml
+      - unpinned-uses.yml
+      - unpinned-uses/**/*.yml
+      - excessive-permissions.yml
+      - excessive-permissions/**/*.yml
+      - artipacked.yml
+      - artipacked/**/*.yml
+      - cache-poisoning.yml
+      - cache-poisoning/**/*.yml
+    exclude:
+      - "**/action.yml"
+      # zizmor configuration files, not workflows.
+      - unpinned-uses/configs/**
+
+# Cases zizmor reports and OBAAF is silent on, each with the reason. `kind` is `narrower` where
+# OBAAF's rule is narrower than zizmor's audit on purpose, and `gap` where OBAAF should report and does
+# not; a gap names the issue that tracks it.
+silent:
+  - set: risky
+    file: clinejection-release.yml
+    job: publish
+    audit: artipacked
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-011 covers agent jobs and jobs an untrusted trigger can start; this release job is
+      neither, and zizmor's artipacked, in its default persona, reports every checkout that keeps
+      the token by default (landscape.md, the GHA-011 row). The release rules OBAAF-GHA-006, 014,
+      016 and 017 report this job.
+  - set: zizmor-tests
+    file: artipacked.yml
+    job: artipacked
+    audit: artipacked
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-011 covers agent jobs and jobs an untrusted trigger can start; this job runs on push
+      and workflow_dispatch, runs no agent, and its token has no permissions (`permissions: {}`).
+  - set: zizmor-tests
+    file: cache-poisoning/caching-opt-in-boolish-toggle.yml
+    job: publish-crate
+    audit: cache-poisoning
+    kind: narrower
+    reason: >-
+      OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
+      an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a release event, only builds wheels with maturin-action and
+      publishes nothing. It is given no secret and no permissions (`permissions: {}`).
+  - set: zizmor-tests
+    file: cache-poisoning/issue-1081-repro.yml
+    job: issue-1081-true-positive
+    audit: cache-poisoning
+    kind: narrower
+    reason: >-
+      OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
+      an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a release event, only sets up uv and publishes nothing. It is
+      given no secret and no permissions (`permissions: {}`).
+  - set: zizmor-tests
+    file: cache-poisoning/issue-1152-repro.yml
+    job: issue-1152-true-positive
+    audit: cache-poisoning
+    kind: narrower
+    reason: >-
+      OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
+      an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a release event, only sets up Node.js and publishes nothing.
+      It is given no secret and no permissions (`permissions: {}`).
+  - set: zizmor-tests
+    file: cache-poisoning/issue-1152-repro.yml
+    job: publish
+    audit: cache-poisoning
+    kind: narrower
+    reason: >-
+      OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
+      an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a release event, checks out and sets up pnpm and Node.js with
+      a registry URL, and runs no publish command. It is given no secret and no permissions
+      (`permissions: {}`).
+  - set: zizmor-tests
+    file: cache-poisoning/issue-2320-repro.yml
+    job: issue-2320-true-positive
+    audit: cache-poisoning
+    kind: narrower
+    reason: >-
+      OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
+      an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a release event, only sets up uv and publishes nothing. It is
+      given no secret and no permissions (`permissions: {}`).
+  - set: zizmor-tests
+    file: cache-poisoning/issue-642-repro.yml
+    job: issue-642-true-positive
+    audit: cache-poisoning
+    kind: narrower
+    reason: >-
+      OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
+      an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor takes docker/build-push-action for a publishing step.
+      Here it is given no `push: true`, so it builds an image and pushes nothing, on a push event.
+      Such a build is not counted as holding what publishing needs, and the job is given no secret
+      and no permissions (`permissions: {}`).
+  - set: zizmor-tests
+    file: cache-poisoning/ramsey-composer-install.yml
+    job: publish
+    audit: cache-poisoning
+    kind: narrower
+    reason: >-
+      OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
+      an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a release event, only installs Composer dependencies and
+      publishes nothing. It is given no secret and no permissions (`permissions: {}`).
+  - set: zizmor-tests
+    file: cache-poisoning/trigger-heuristics/tag-and-branch.yml
+    job: publish
+    audit: cache-poisoning
+    kind: narrower
+    reason: >-
+      OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
+      an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a tag push, a push to a branch named release or a release
+      event, only runs maturin-action builds and publishes nothing. It is given no secret and no
+      permissions (`permissions: {}`).
+  - set: zizmor-tests
+    file: cache-poisoning/trigger-heuristics/tag-only.yml
+    job: publish
+    audit: cache-poisoning
+    kind: narrower
+    reason: >-
+      OBAAF counts a job as a release job when one of its steps uploads or publishes, when it uses
+      an environment whose name says where releases go, or when it is declared one (OBAAF_LANE:
+      release), and OBAAF-GHA-006 is about release jobs and, since flagship slice 2d.14, jobs that
+      hold what publishing needs; zizmor also takes every job a release event or a tag push starts
+      for one. This job, started by a tag push or a push to master, only runs maturin-action
+      builds and publishes nothing. It is given no secret and no permissions (`permissions: {}`).
+  - set: zizmor-tests
+    file: excessive-permissions.yml
+    job: excessive-permissions
+    audit: excessive-permissions
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-009 reports a job whose token permissions are not declared; this job declares
+      `write-all`, which zizmor judges too broad. OBAAF reports a broad token only for agent jobs
+      (OBAAF-GHA-003, 004) and in its release and effect rules (F-19: no new general workflow rule).
+  - set: zizmor-tests
+    file: excessive-permissions/jobs-broaden-permissions.yml
+    job: job1
+    audit: excessive-permissions
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-009 reports a job whose token permissions are not declared; this job declares
+      `read-all`, which zizmor judges too broad. OBAAF reports a broad token only for agent jobs
+      (OBAAF-GHA-003, 004) and in its release and effect rules (F-19: no new general workflow rule).
+  - set: zizmor-tests
+    file: excessive-permissions/jobs-broaden-permissions.yml
+    job: job2
+    audit: excessive-permissions
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-009 reports a job whose token permissions are not declared; this job declares
+      `write-all`, which zizmor judges too broad. OBAAF reports a broad token only for agent jobs
+      (OBAAF-GHA-003, 004) and in its release and effect rules (F-19: no new general workflow rule).
+  - set: zizmor-tests
+    file: excessive-permissions/workflow-read-all.yml
+    audit: excessive-permissions
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-009 reports a job whose token permissions are not declared; this workflow declares
+      `read-all` for every job, which zizmor judges too broad. OBAAF reports a broad token only for
+      agent jobs (OBAAF-GHA-003, 004) and in its release and effect rules (F-19: no new general
+      workflow rule).
+  - set: zizmor-tests
+    file: excessive-permissions/workflow-write-all.yml
+    audit: excessive-permissions
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-009 reports a job whose token permissions are not declared; this workflow declares
+      `write-all` for every job, which zizmor judges too broad. OBAAF reports a broad token only for
+      agent jobs (OBAAF-GHA-003, 004) and in its release and effect rules (F-19: no new general
+      workflow rule).
+  - set: zizmor-tests
+    file: excessive-permissions/workflow-write-explicit.yml
+    audit: excessive-permissions
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-009 reports a job whose token permissions are not declared; this workflow declares
+      `contents`, `id-token` and an unknown permission as write at its top level (the case is that
+      block, lines 7 to 9; a job's own `deployments: write` replaces it for that job and is not part
+      of the case), which zizmor judges too broad. OBAAF reports a broad token only for agent jobs
+      (OBAAF-GHA-003, 004) and in its release and effect rules (F-19: no new general workflow rule).
+  - set: zizmor-tests
+    file: template-injection/addnab-docker-run-action.yml
+    job: some-job
+    audit: template-injection
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-010 reports text an outsider writes; this workflow runs on push, where `github.ref`
+      is a branch or tag name only someone who can push to the repository chooses. OBAAF reads this
+      action's `run` input as a script and not its `options` input, which becomes docker run
+      arguments (#290).
+  - set: zizmor-tests
+    file: template-injection/input-caps.yml
+    job: inject-me
+    audit: template-injection
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-010 follows a reusable workflow's `inputs` to what the callers in the same
+      repository pass (slice 2d.4b3a); this file is checked on its own with no caller, so
+      `inputs.test` is not known to hold an outsider's text. zizmor reports every input of a
+      reusable workflow expanded in a script.
+  - set: zizmor-tests
+    file: template-injection/issue-1903-repro.yml
+    job: repro
+    audit: template-injection
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-010 reports text an outsider writes; the expression is a pull request's or an
+      issue's number. zizmor reports it as informational, with low confidence.
+  - set: zizmor-tests
+    file: template-injection/issue-339-repro.yml
+    job: find-run
+    audit: template-injection
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-010 reports text an outsider writes; the expression is a workflow run's id taken
+      from a GitHub API response. zizmor reports it as informational, with low confidence.
+  - set: zizmor-tests
+    file: template-injection/multiline-expression.yml
+    job: inject-me
+    audit: template-injection
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-010 reports text an outsider writes; the case's expression (lines 19 and 20) names
+      no context GitHub has (`some.ctx`, `foo.bar`, `baz.qux`). zizmor reports it as informational,
+      with low confidence.
+  - set: zizmor-tests
+    file: template-injection/patterns.yml
+    job: inject-me
+    audit: template-injection
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-010 reports text an outsider writes, and does not count label names: a label is
+      created and put on a discussion by people with triage or write access to the repository, not
+      by the discussion's author. zizmor counts a discussion's labels as text anyone may choose.
+      (This job is started by workflow_run, whose payload has no `changes`, so these expressions
+      expand to nothing here; OBAAF does not weigh which event carries a field.)
+  - set: zizmor-tests
+    file: template-injection/pr-317-repro.yml
+    job: PR-317-REPRO
+    audit: template-injection
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-010 reports text an outsider writes; the matrix value holds
+      `github.repository_owner`, the name of the repository's owner, which a pull request does not
+      choose.
+  - set: zizmor-tests
+    file: template-injection/template-injection-dynamic-matrix.yml
+    job: not-ok
+    audit: template-injection
+    kind: narrower
+    reason: >-
+      OBAAF-GHA-010 reports text an outsider writes; the matrix comes from
+      `github.event.client_payload`, which only a repository_dispatch event carries and only a
+      caller with write access can send, and this job is started by issues events.
+
+# OBAAF-GHA-002, 013 and 019 have no matching zizmor audit. They are held to what poutine and CodeQL
+# reported on the same files when they were run for landscape.md (both on 2026-11-11, in parts 1 and
+# 2); those tools are not run here. OBAAF must report one of the rules on the file.
+recorded:
+  - tool: poutine 1.1.6
+    result: untrusted_checkout_exec
+    set: risky
+    file: pwn-request.yml
+    rules: [OBAAF-GHA-002, OBAAF-GHA-019]
+  - tool: poutine 1.1.6
+    result: untrusted_checkout_exec
+    set: risky
+    file: unsafe-checkout-opt-in.yml
+    rules: [OBAAF-GHA-002, OBAAF-GHA-019]
+  - tool: poutine 1.1.6
+    result: pr_runs_on_self_hosted
+    set: risky
+    file: pytorch-self-hosted.yml
+    rules: [OBAAF-GHA-013]
+  - tool: CodeQL 2.27.4, codeql/actions-queries 0.6.39
+    result: actions/untrusted-checkout/critical
+    set: risky
+    file: pwn-request.yml
+    rules: [OBAAF-GHA-002, OBAAF-GHA-019]
+  - tool: CodeQL 2.27.4, codeql/actions-queries 0.6.39
+    result: actions/untrusted-checkout/critical
+    set: risky
+    file: unsafe-checkout-opt-in.yml
+    rules: [OBAAF-GHA-002, OBAAF-GHA-019]

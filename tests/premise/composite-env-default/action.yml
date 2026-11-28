@@ -1,0 +1,15 @@
+# A second local composite action for CI's job `composite-env-premise` (plan slice 2d.19f, #382): what an input's
+# default that reads the env context gives. It is printed, not asserted (F-425), in a step of its own that may fail
+# without failing the job, since GitHub may refuse the manifest if a default may not read env.
+name: OBAAF premise, an input default that reads env
+description: Prints what an input default that reads env gives a composite action's step.
+inputs:
+  defaulted:
+    description: Not given; its default reads env.PREMISE_JOB.
+    default: ${{ env.PREMISE_JOB }}
+runs:
+  using: composite
+  steps:
+    - name: Print the default
+      shell: bash
+      run: echo "inputs.defaulted gave '${{ inputs.defaulted }}' (printed, not asserted)"

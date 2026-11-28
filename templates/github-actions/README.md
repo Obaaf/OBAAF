@@ -15,13 +15,21 @@ One more is optional and not installed: [optional/obaaf-settings-drift.yml](opti
 
 ## Install
 
-From a clone of the OBAAF repository:
+A development build installed from a commit ([how](../../docs/checker-configuration.md#trying-unreleased-checker-changes)) includes the templates. Use the install command below with that same full commit and omit `--source`. For release 0.3.0, copy the templates from a separate checkout at the commit you pin.
 
 ```bash
-obaaf templates install --dest path/to/your/repository \
+git clone https://github.com/Obaaf/OBAAF.git obaaf-src
+git -C obaaf-src checkout <full commit SHA of the OBAAF release>
+obaaf templates install --source obaaf-src/templates/github-actions \
+  --dest path/to/your/repository \
   --obaaf-repo OWNER/obaaf --obaaf-sha <full commit SHA of the OBAAF release> \
   --repository YOU/YOUR-GAME
 ```
+
+For release 0.3.0, `git -C obaaf-src rev-parse 'v0.3.0^{commit}'` prints the full SHA. `OWNER/obaaf` is the
+repository the workflows install OBAAF from, `Obaaf/OBAAF` or your fork of it, keeping its name. `obaaf` does not look for the
+templates in the current directory, so running it inside the clone is not enough: pass `--source`. With OBAAF
+installed from the clone in editable mode (`pip install -e obaaf-src`), `--source` can be left out.
 
 This copies the workflows into `.github/workflows/`, pins the `setup-obaaf` action to that commit, and adds `.github/obaaf-policy.yaml`, `.github/obaaf.yml`, `.github/obaaf/agent.sh` and `obaaf-sources.yaml`. Until you install them, the templates contain the placeholders `OBAAF_OWNER` and an all-zero SHA, which `obaaf check` reports (`OBAAF-GHA-023`) so they cannot run by accident.
 
@@ -50,7 +58,7 @@ The build job runs on GitHub-hosted runners, which start every job on a fresh ma
 
 ## Egress
 
-The agent job declares its policy in `OBAAF_EGRESS` and can turn on a blocking runtime monitor (repository variable `OBAAF_EGRESS_MONITOR: harden-runner`, with `OBAAF_ALLOWED_ENDPOINTS`). A declaration enforces nothing and the monitor is optional, so `obaaf check` reports `OBAAF-GHA-020` (low) for the agent job, with its egress control "not met". Making the monitor unconditional, with `disable-sudo-and-containers: true`, changes that to "cannot tell", not to a pass: whether the repository is one Harden-Runner's tier covers is not in the workflow. Two controls clear the finding, as [the egress control page](../../docs/egress-control.md) explains: GitHub's native egress firewall (`runs-on: ubuntu-24.04-firewall` with `.github/egress-firewall.yaml` in `enforce` mode, a technical preview on Linux runners), and OBAAF's egress action around the agent's command, at a commit OBAAF lists as released (none is listed yet). Whatever else enforces the policy (ephemeral runners behind a network policy, say), record it with an ignore entry in `.github/obaaf.yml` that names an owner, a reason and an expiry date.
+The agent job declares its policy in `OBAAF_EGRESS` and can turn on a blocking runtime monitor (repository variable `OBAAF_EGRESS_MONITOR: harden-runner`, with `OBAAF_ALLOWED_ENDPOINTS`). A declaration enforces nothing and the monitor is optional, so `obaaf check` reports `OBAAF-GHA-020` (low) for the agent job, with its egress control "not met". Making the monitor unconditional, with `disable-sudo-and-containers: true`, changes that to "cannot tell", not to a pass: whether the repository is one Harden-Runner's tier covers is not in the workflow. Two controls clear the finding, as [the egress control page](../../docs/egress-control.md) explains: GitHub's native egress firewall (`runs-on: ubuntu-24.04-firewall` with `.github/egress-firewall.yaml` in `enforce` mode, a technical preview on Linux runners), and OBAAF's egress action around the agent's command, at the [listed action pin](../../docs/egress-control.md#using-it). Neither clears it for this template's agent job as written: since decision D-133 an agent job that may upload an artifact, as this one does, or that runs other scripts or actions beside the agent (`actions/checkout` beside the agent's step, on the firewall), is "cannot tell" at best ([the checker's guide](../../docs/checker-configuration.md#egress-controls)). Whatever else enforces the policy (ephemeral runners behind a network policy, say), record it with an ignore entry in `.github/obaaf.yml` that names an owner, a reason and an expiry date.
 
 ## Other files
 

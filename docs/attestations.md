@@ -76,7 +76,7 @@ Who approved applying the proposal, in which environment, and who requested the 
 
 ## The build record (G7.1, FR4, FR5)
 
-Adds to SLSA provenance what game builds need. Each field says who reported it:
+Adds to SLSA provenance what game builds need. The source, assets, manifest, SDK entries and isolation fields carry reporter labels. The table also identifies where the builder and trigger metadata come from.
 
 | Field | Content | Reported by |
 | --- | --- | --- |
@@ -118,11 +118,56 @@ A record without a patch cannot accompany a commit that changes files. A merge m
 
 `obaaf verify release` and `obaaf verify agent-run` read `.github/obaaf-policy.yaml` ([example](../templates/github-actions/obaaf-policy.example.yaml)) from the default branch. It sets:
 
-- which workflow may sign provenance, and from which refs (required);
+- with `signing: sigstore`, which workflow may sign provenance, and from which refs (required);
 - the allowed isolation tiers;
 - the protected branch the released commit must be on;
 - the release environments, and how many distinct approvers they need;
 - the commit after which agent commits are checked (`agents.since`);
 - where agent records live, and which workflows must sign them.
 
+The policy decides what may ship, so both commands read it strictly. Each field must have its YAML type: text, `true` or `false`, a whole number of 0 or more written in plain decimal digits (`min_approvals`), or a list of non-empty texts, even with one entry (`source_refs: ["refs/tags/v*"]`, not `source_refs: refs/tags/v*`). Booleans follow YAML 1.2, so `no`, `off` and `"false"` are text, not false; a whole number such as `010` or `0x10`, which PyYAML reads as YAML 1.1 does (8 and 16), is refused. These are each an `error:` naming the file, and the command ends with status 2 before it checks anything:
+
+- a value of another type, or an empty list (leaving the key out means no restriction for `approvers` and `runner_environments` and the default for `allowed_tiers`, `environments` and `effect_identities`; `source_refs` with Sigstore and each role under `keys` need an entry);
+- a field written with no value (a section with nothing under it, `keys` included, is read as absent);
+- a key the policy does not define (a misspelling such as `min_aprovals`), and a field only Sigstore checks written with `signing: keys`: that kind of signing checks each record's key and not the workflow, ref, runner or issuer, so `provenance` may hold none of its four fields and `agents` neither `propose_workflow`, `apply_workflow` nor `source_ref`; with `signing: sigstore`, a `keys` section with anything in it;
+- both `release.environment` and `release.environments`;
+- YAML that cannot be read, and a file that is not UTF-8.
+
+The error names the field and its line where it can; an error from the YAML loader names the line where the loader gives one. Remove a key to use its default. `branch: ""` still turns the protected-branch check off, `since: ""` still means not set, and an empty text still gives the other text fields that have a default (`signer_workflow`, `issuer`, `environment`, `records_dir`, the two agent workflows, `source_ref`, where the `signing` allows them) that default.
+
+With `signing: keys`, the policy's `repository` is not checked against the records: the verifier checks that each record is signed with a policy key, not which repository the record says it was built from ([#406](https://github.com/Obaaf/OBAAF/issues/406)). Whoever holds a key can sign a record for any build.
+
 Missing certificate fields fail verification. An attestation that fails the policy is ignored, with a warning, when a valid one exists for the same file.
+
+## The release decision
+
+`obaaf verify release` writes its decision as text by default, or as JSON with `--format json`, and in a GitHub run also to the step summary, as text. The exit status is 0 when nothing it checked blocks and 1 when something does. Where a full verification counts GitHub approvals (`release.min_approvals` above 0, and no Jenkins build's JSON given), an `--approvals` file that is not in the shape GitHub's API gives blocks, and no approval in it is counted: it must be a list of objects, and in each, `environments`, where given, a list of objects whose `name` is text, and `user`, where given, an object whose `login` is text (a missing or null `name`, `user` or `login` counts for nothing). A pre-approval run, and a run whose policy needs no approval, do not read that file.
+
+A run that stops on an error before it has decided writes no decision. It ends with 2, and an `error:` line, for wrong arguments; for a policy it cannot read or whose fields are not valid (see the release policy, above); for an `--approvals` or `--release-run` file it cannot read or that is not JSON; and for a `--revision-file` that does not hold one commit ID. It ends with 1 for an error while it verifies: an `error:` line (a key file it cannot read), or a Python traceback for an input of a shape it does not read, such as a Jenkins build's JSON with `"causes": 5` or a DSSE envelope whose `payload` is a number (#414; not every input has been tried). Once it has decided, it writes the decision to the console or the `--output` file, then the text to the console after a JSON `--output`, then the step summary. If one of these cannot be written, the run ends in a traceback with status 1, and what was written before stays; where the console cannot be written (a closed pipe), it ends instead with status 120 after the rest is written, because Python writes the console's buffer only at exit. Either way a decision that says the checks passed can stand beside a status that is not 0 (#414). A run that stops early leaves an `--output` file from an earlier run as it was. Read a decision only from a run whose status you have checked.
+
+`--pre-approval` skips the approvals, so that the approver can read the rest before approving. On Jenkins it also skips the checks that tie the publishing build to the tag build: that both builds' JSON is given, that the publishing build was started by exactly one build and not by hand, that this build is the one given as `--release-run`, and that it is a tag build of `release.jenkins_project`, which the policy must set. So a Jenkins pre-approval run can pass under a policy without `release.jenkins_project`, which a full verification given a Jenkins build's JSON blocks. Such a run never decides that the upload may proceed: its text report begins `Pre-approval checks: PASSED, release approval is still required` (or `full verification is still required` where `release.min_approvals` is 0) when nothing it checked blocks, and the run that decides the upload is a full verification without `--pre-approval`, after the approval.
+
+The JSON decision, `obaaf-release-decision/v0.2`:
+
+```json
+{
+  "format": "obaaf-release-decision/v0.2",
+  "allowed": false,
+  "checksPassed": true,
+  "preApproval": true,
+  "approvalsRequired": 1,
+  "blocks": [],
+  "warnings": ["approvals were not checked (pre-approval run); the upload job checks them"],
+  "artifacts": [{"name": "game.zip", "sha256": "…", "provenance": "verified", "buildRecord": "verified", "tier": "A"}],
+  "agentCommits": [],
+  "approvals": []
+}
+```
+
+- `allowed`: the upload may proceed. True only for a full verification in which nothing blocks; false for every pre-approval run. A program that decides whether to upload reads this field.
+- `checksPassed`: nothing this run checked blocks, so `blocks` is empty and the exit status is 0. A program that shows a pre-approval result to the approver reads this field.
+- `preApproval`: the run was made with `--pre-approval`.
+- `approvalsRequired`: the policy's `release.min_approvals`, the number of distinct approvers the full verification needs.
+- `blocks` and `warnings`: what blocks, and what does not. `approvals`: the approvers who were counted, empty in a pre-approval run.
+
+In `obaaf-release-decision/v0.1`, written before slice 2d.24 (#394), `allowed` meant what `checksPassed` means now, so a pre-approval run that passed had `"allowed": true`, the same as a full verification that may be uploaded; v0.1 has none of the three new fields.

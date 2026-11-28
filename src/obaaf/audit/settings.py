@@ -93,6 +93,20 @@ CLASSIC_CHECK_FIELDS = ("context", "app_id")
 CLASSIC_CHECKS = "required_status_checks.checks"
 # Every place ``other_fields`` may name.
 CLASSIC_PLACES = tuple(k or CLASSIC_TOP for k in CLASSIC_FIELDS) + (CLASSIC_CHECKS,)
+# An environment's custom deployment protection rules (flagship slice 2b.9b), each a GitHub App that must
+# approve a job that names the environment before the job runs. GitHub lists them on their own,
+# "GET /repos/{owner}/{repo}/environments/{environment_name}/deployment_protection_rules" (REST reference
+# "Deployment protection rules", API version 2026-03-10, read on 2026-11-26): "Gets all custom deployment
+# protection rules that are enabled for an environment. Anyone with read access to the repository can use
+# this endpoint", with the "Actions" repository permission (read), and "without authentication ... if only
+# public resources are requested". The answer is {"total_count", "custom_deployment_protection_rules": [{"id",
+# "node_id", "enabled", "app": {"id", "node_id", "slug", "integration_url"}}]}; the reference lists no paging.
+# The page on environments does not say whether such a rule also appears in an environment's
+# `protection_rules`, so both are read. Each environment of a snapshot this version writes has the field:
+# a list (empty when there is none), or null when it could not be read, with a problem keyed by the
+# environment's name. A snapshot an earlier version wrote has no such field, and that means "not read".
+CUSTOM_RULES = "custom_protection_rules"
+CUSTOM_RULES_KEY = "custom_deployment_protection_rules"
 
 
 @dataclass(frozen=True)
@@ -130,7 +144,8 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("environments", "Environments: reviewers and which branches may deploy",
             '"Actions" repository permission (read)', True,
             ("/repos/{owner}/{repo}/environments",
-             "/repos/{owner}/{repo}/environments/{name}/deployment-branch-policies"),
+             "/repos/{owner}/{repo}/environments/{name}/deployment-branch-policies",
+             "/repos/{owner}/{repo}/environments/{name}/deployment_protection_rules"),
             "whether a job on any branch can reach an environment's secrets"),
     Setting("environment_secrets", "Names of the secrets in each environment",
             '"Environments" repository permission (read)', False,
@@ -574,9 +589,27 @@ class _Reader:
                     env["branch_policies"] = None
                     problems.append(_answer_problem(
                         env["name"], f"the branch and tag patterns of environment {quoted(env['name'])}", answer))
+            self.read_custom_rules(env, problems)
             value.append(env)
         value.sort(key=lambda e: e["name"])
         self.settings["environments"] = _partial(setting, value, problems) if problems else _read(value)
+
+    def read_custom_rules(self, env: dict, problems: list[dict]) -> None:
+        """One environment's custom deployment protection rules (:data:`CUSTOM_RULES`). An answer that fails,
+        or that does not have the documented shape, makes this part of the environment not read (null, with a
+        problem keyed by its name), never "none", and leaves the rest of what was read of it."""
+        what = f"the custom deployment protection rules of environment {quoted(env['name'])}"
+        answer = self.client.get_all(f"{self.base}/environments/{_segment(env['name'])}/deployment_protection_rules",
+                                     key=CUSTOM_RULES_KEY)
+        env[CUSTOM_RULES] = None
+        if not answer.ok:
+            problems.append(_answer_problem(env["name"], what, answer))
+            return
+        try:
+            env[CUSTOM_RULES] = _custom_rules(answer.data, what)
+        except Shape as exc:
+            problems.append(_problem(env["name"], what, "unexpected",
+                                     f"the answer did not have the shape GitHub documents: {plain(exc)}"))
 
     def read_environment_secrets(self) -> None:
         setting = BY_KEY["environment_secrets"]
@@ -942,6 +975,20 @@ def _environment(item: dict) -> dict:
             env["other_protection_rules"].append(kind)
     env["other_protection_rules"].sort()
     return env
+
+
+def _custom_rules(items: list, what: str) -> list[dict]:
+    """Each custom deployment protection rule as the app that runs it and whether it is enabled. GitHub's
+    reference says the list holds the enabled ones; a rule it marks as not enabled is kept as it came, and
+    the settings rules count only one marked enabled."""
+    rules = []
+    for item in items:
+        item = _obj(item, f"a rule in {what}")
+        app = _obj(item.get("app"), f"the app of a rule in {what}")
+        rules.append({"app": _text(app, "slug", f"the app of a rule in {what}"),
+                      "app_id": _number(app, "id", f"the app of a rule in {what}", optional=True),
+                      "enabled": _flag(item, "enabled", f"a rule in {what}")})
+    return sorted(rules, key=lambda r: (r["app"], r["app_id"] if r["app_id"] is not None else -1, r["enabled"]))
 
 
 def check_branches(branches) -> None:

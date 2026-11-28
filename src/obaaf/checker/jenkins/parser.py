@@ -121,6 +121,7 @@ class Opaque(Node):
 @dataclass
 class Block(Node):
     stmts: list
+    params: list = field(default_factory=list)    # a trailing closure's parameters (`list.each { x -> }`)
 
 
 @dataclass
@@ -430,8 +431,8 @@ class Parser:
         nxt, after = at(j), at(j + 1)
         return nxt.kind == "ident" and (after.kind in ("nl", "eof") or after.value in ("=", "(", ";", "}"))
 
-    def skip_type(self) -> None:
-        self.qualified_name()
+    def skip_type(self) -> str:
+        name = self.qualified_name()
         if self.at_op("<"):
             depth = 0
             while not self.at("eof"):
@@ -445,6 +446,8 @@ class Parser:
         while self.at_op("[") and self.peek().value == "]":
             self.advance()
             self.advance()
+            name += "[]"
+        return name
 
     def declaration(self):
         t = self.tok
@@ -543,7 +546,7 @@ class Parser:
             parts = []
             while not (self.tok.kind in ("nl", "eof") or self.at_op(";", "}")):
                 parts.append(self.advance().value)
-            return Import("".join(parts), line=t.line, col=t.col)
+            return Import(" ".join(parts), line=t.line, col=t.col)
         if kw == "if":
             self.expect_op("(")
             self.skip_nl()
@@ -797,8 +800,9 @@ class Parser:
                 self.advance()
             self.skip_nl_in_expr()
             if op in ("instanceof", "!instanceof", "as"):
-                self.skip_type()
+                type_name = self.skip_type()
                 right = Name("type", line=t.line, col=t.col)
+                right.type_name = type_name       # `x as Integer`: OBAAF-JEN-009 reads the type (2d.2)
             elif op == "**":           # right-associative
                 self.enter()
                 try:
@@ -843,9 +847,12 @@ class Parser:
             return self.postfix(node)
         if t.kind == "op" and t.value == "(" and self.is_cast():
             self.advance()
-            self.skip_type()
+            type_name = self.skip_type()
             self.expect_op(")")
-            return self.unary()
+            operand = self.unary()
+            if isinstance(operand, Node):
+                operand.cast_type = type_name      # `(int) x`: OBAAF-JEN-009 reads the type (2d.2)
+            return operand
         return self.postfix(self.primary())
 
     def is_cast(self) -> bool:
@@ -1009,7 +1016,9 @@ class Parser:
                 continue
             if t.kind == "op" and t.value == "{" and self.same_line_as_previous() and isinstance(
                     node, (Name, Prop, Call)):
-                block = self.closure().body
+                closure = self.closure()
+                block = closure.body
+                block.params = list(closure.params)
                 if isinstance(node, Call) and node.closure is None:
                     node.closure = block
                 else:
@@ -1048,7 +1057,9 @@ class Parser:
         self.expect_op(")")
         closure = None
         if self.at_op("{") and self.same_line_as_previous():
-            closure = self.closure().body
+            trailing = self.closure()
+            closure = trailing.body
+            closure.params = list(trailing.params)
         return args, named, closure
 
     def argument(self, args: list, named: list) -> None:

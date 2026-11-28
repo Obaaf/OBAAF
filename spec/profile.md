@@ -136,7 +136,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** The manifest file and the build step that checks it.
 
-**Maps to.** SSDF: PW.4: Reuse Existing, Well-Secured Software When Feasible Instead of Duplicating Functionality; PS.3.2: Collect, safeguard, maintain, and share provenance data for all components of each release. (task, summarized) · SLSA or other (Table 4): S2C2F ingest and inventory · Assessment items: 1.8, 2.6 · Checker rules: `OBAAF-GHA-008`, `OBAAF-JEN-008` · Tools: `obaaf manifest create`, `obaaf manifest check`
+**Maps to.** SSDF: PW.4: Reuse Existing, Well-Secured Software When Feasible Instead of Duplicating Functionality; PS.3.2: Collect, safeguard, maintain, and share provenance data for all components of each release. (task, summarized) · SLSA or other (Table 4): S2C2F ingest and inventory · Assessment items: 1.8, 2.6 · Checker rules: `OBAAF-GHA-008`, `OBAAF-GHA-025`, `OBAAF-JEN-008` · Tools: `obaaf manifest create`, `obaaf manifest check`
 
 ### G2.2 Quarantine third-party assets and plugins
 
@@ -180,7 +180,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Build-agent pool configuration and access settings.
 
-**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · SLSA or other (Table 4): Build L3, isolation · SLSA v1.2 requirements: Build L3: isolated, ephemeral builds · Assessment items: 1.4, 2.1 · Checker rules: `OBAAF-GHA-013`, `OBAAF-GHA-015`, `OBAAF-GHA-002`, `OBAAF-GHA-010`, `OBAAF-GHA-019`, `OBAAF-JEN-002`, `OBAAF-JEN-004`, `OBAAF-JEN-009`, `OBAAF-JEN-015`
+**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · SLSA or other (Table 4): Build L3, isolation · SLSA v1.2 requirements: Build L3: isolated, ephemeral builds · Assessment items: 1.4, 2.1 · Checker rules: `OBAAF-GHA-013`, `OBAAF-GHA-015`, `OBAAF-GHA-002`, `OBAAF-GHA-010`, `OBAAF-GHA-028`, `OBAAF-GHA-019`, `OBAAF-JEN-002`, `OBAAF-JEN-004`, `OBAAF-JEN-009`, `OBAAF-JEN-015`
 
 ### G3.2 Use tiered isolation
 
@@ -442,7 +442,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Workflow permissions for each agent.
 
-**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · Agent controls: R1, R2, R3, R4, R7 · Assessment items: 3.6 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-003`, `OBAAF-GHA-004`, `OBAAF-GHA-005`, `OBAAF-GHA-010`, `OBAAF-GHA-011`, `OBAAF-GHA-020`, `OBAAF-GHA-022`, `OBAAF-JEN-001`, `OBAAF-JEN-003`, `OBAAF-JEN-007`, `OBAAF-JEN-009`
+**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · Agent controls: R1, R2, R3, R4, R7 · Assessment items: 3.6 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-003`, `OBAAF-GHA-004`, `OBAAF-GHA-005`, `OBAAF-GHA-010`, `OBAAF-GHA-028`, `OBAAF-GHA-011`, `OBAAF-GHA-020`, `OBAAF-GHA-022`, `OBAAF-JEN-001`, `OBAAF-JEN-003`, `OBAAF-JEN-007`, `OBAAF-JEN-009`
 
 ### G8.2 Protect agent instructions as code
 

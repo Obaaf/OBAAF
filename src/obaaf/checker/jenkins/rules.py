@@ -10,19 +10,36 @@ it. A finding describes what the file shows; an unknown says what the file canno
 
 from __future__ import annotations
 
+import bisect
+import csv
+import functools
+import itertools
+import posixpath
+import json
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
+
 from obaaf.catalog import Catalog
+from obaaf.checker.jenkins import prefilter
 from obaaf.checker.jenkins import steps as known
 from obaaf.checker.jenkins.model import (
-    CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, GIT_PUSH, SHELL_STEPS, Binding, Pipeline, StepUse,
-    chain_name, first_arg, literal, named_arg, shell_script, source_texts, untrusted_source,
+    COMPUTED_ENV, CONTROLLER_LABELS, CR_NO, CR_POSSIBLE, CR_UNKNOWN, CR_YES, GIT_PUSH, JAVA_TRIM, SHELL_STEPS, Binding,
+    KEY_SEP, Pipeline, StepUse, guard_key, shown,
+    chain_name, children, code_text_arg, find_nodes, first_arg, literal, named_arg, shell_script, source_texts,
+    untrusted_source,
 )
-from obaaf.checker.jenkins.parser import Binary, Call, ListLit, MapLit, Prop, Str, path_of
-from obaaf.checker.rules import Finding
-from obaaf.checker.workflow import declared_lane
+from obaaf.checker.jenkins.parser import (
+    Assign, Binary, Block, Call, ClassDef, Closure, Decl, Import, Index, ListLit, Loop, MapLit, MethodDef, Name, Num,
+    Opaque,
+    Prop, Str, Switch, Unary,
+    callee_name, path_of,
+)
+from obaaf.checker.rules import Finding, steers
+from obaaf.checker.workflow import _script_tokens, _strip_comment, binding_commands, declared_lane
 
 RULES = ("OBAAF-JEN-001", "OBAAF-JEN-002", "OBAAF-JEN-003", "OBAAF-JEN-004", "OBAAF-JEN-005", "OBAAF-JEN-006",
          "OBAAF-JEN-007", "OBAAF-JEN-008", "OBAAF-JEN-009", "OBAAF-JEN-010", "OBAAF-JEN-011", "OBAAF-JEN-012",
@@ -32,14 +49,10 @@ ALL = "*"
 # post conditions (and Scripted catch/finally blocks) that run when the build failed, was aborted, or
 # is unstable: a publish there can run after a failed or skipped check.
 FAILURE_PATHS = {"always", "changed", "regression", "aborted", "failure", "unstable", "unsuccessful", "cleanup",
-                 "catch/finally"}
+                 "notBuilt", "catch/finally"}   # notBuilt: flagship slice 2d.2o
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"@sha256:[0-9a-f]{64}\b")
-CHECKSUM_VERIFY = re.compile(r"(^|[\s;&|(])(sha256sum|sha512sum|shasum)\b[^\n]*\s(-c|--check)\b"
-                             r"|(^|[\s;&|(])cosign\s+verify|(^|[\s;&|(])obaaf\s+verify\b", re.M)
 INSTALLER = re.compile(r"\b(npm|pnpm|yarn|bun|npx|bunx|pip3?|pipx|uv|uvx)\b")
-AGENT_INSTALL_SCRIPT = re.compile(r"\bcurl\b[^\n|]*\b(claude|gemini|codex|opencode|aider|copilot)\b[^\n|]*\|\s*(ba|z)?sh\b",
-                                  re.I)
 # Commands that run code from the checkout: build tools, test runners, package scripts, and scripts
 # by path. Best effort; anything else is treated as a fixed tool, one severity level lower.
 REPO_CODE = re.compile(
@@ -50,32 +63,800 @@ REPO_CODE = re.compile(
     r"bundle|composer|php|xcodebuild|swift|flutter|dart|tsc|jest|ctest|yetus|test-patch|docker\s+build|"
     r"docker\s+compose|docker-compose|buildah|kaniko|terraform|ansible-playbook|UnrealBuildTool|RunUAT|"
     r"Unity|godot)\b", re.M)
+# Steps that read a file in the workspace: a value read from one is the change's own for a change request.
+WORKSPACE_READ = re.compile(r"\b(readFile|readJSON|readYaml|readProperties|readCSV|readMavenPom|findFiles)\b")
 MUTABLE_SELECTORS = {"lastSuccessful", "lastCompleted", "latestSavedBuild", "permalink", "lastWithArtifacts",
                      "workspace", "buildParameter"}
+# Flagship slice 2d.2m: the copyartifact plugin's selector classes, for `step([$class: 'CopyArtifact', selector:
+# [$class: ...]])` and a selector map, by the symbol each has in Pipeline.
+SELECTOR_CLASSES = {"StatusBuildSelector": "lastSuccessful", "LastCompletedBuildSelector": "lastCompleted",
+                    "SavedBuildSelector": "latestSavedBuild", "PermalinkBuildSelector": "permalink",
+                    "WorkspaceSelector": "workspace", "ParameterizedBuildSelector": "buildParameter",
+                    "SpecificBuildSelector": "specific", "TriggeredBuildSelector": "upstream",
+                    "DownstreamBuildSelector": "downstream", "LastWithArtifactsBuildSelector": "lastWithArtifacts"}
+# A Jenkins URL of another job's artifacts (`.../job/b/lastSuccessfulBuild/artifact/app.jar`), with folders.
+PERMALINK_ARTIFACT = re.compile(r"(?<![\w.-])job/(?P<job>[^/\s'\"]+(?:/job/[^/\s'\"]+)*)/(?P<ref>[^/\s'\"]+)/artifact/")
+JENKINS_PERMALINKS = {"lastBuild", "lastStableBuild", "lastSuccessfulBuild", "lastFailedBuild", "lastUnstableBuild",
+                      "lastUnsuccessfulBuild", "lastCompletedBuild"}
+# A digest check at the start of a command (flagship slice 2d.2m): what it compares against is not known.
+FETCH_DIGEST_CHECK = re.compile(r"(sha1sum|sha224sum|sha256sum|sha384sum|sha512sum|shasum|b2sum|md5sum)\b.*\s"
+                                r"(-c|--check)\b|cosign\s+verify|gpg\s+--verify|minisign\s+-V")
+UNREAD = object()      # an argument a spread map (`*: m`) may set
+# A condition on the build's parameters alone, as a condition's label shows it: `if params.RELEASE`, with `!`,
+# digits, true or false. A word that could be a string or a variable makes the condition one that may change.
+PARAMS_ONLY_GUARD = re.compile(r"if(?: (?:!|params\.\w+|\d+|true|false))+")
+SELECTOR_POSITIONAL = {"specific": "buildNumber", "permalink": "id"}   # a selector's one unnamed argument
 
-# Docker run options and pod settings that reach the host (JEN-006).
-DOCKER_HOST_ARGS = [
-    (re.compile(r"--privileged\b"), "--privileged"),
-    (re.compile(r"(-v|--volume|--mount)[=\s][^\s]*docker\.sock"), "a mount of the Docker socket"),
-    (re.compile(r"(-v|--volume)[=\s]/:"), "a mount of the host root file system"),
-    (re.compile(r"--(net|network)[=\s]host\b"), "host networking"),
-    (re.compile(r"--pid[=\s]host\b"), "the host PID namespace"),
-    (re.compile(r"--ipc[=\s]host\b"), "the host IPC namespace"),
-    (re.compile(r"--userns[=\s]host\b"), "the host user namespace"),
-    (re.compile(r"--cap-add[=\s](ALL|SYS_ADMIN|SYS_PTRACE|NET_ADMIN|DAC_READ_SEARCH)\b", re.I), "extra capabilities"),
-    (re.compile(r"--security-opt[=\s](seccomp|apparmor)[=:]unconfined"), "an unconfined security profile"),
-]
+
+# A provenance check named in a script (flagship slice 2d.2n): `obaaf verify release`, `gh attestation verify`,
+# `cosign verify-attestation` or `verify-blob-attestation`, `slsa-verifier verify`, also by a path to `obaaf`.
+CHECK_NAMED = re.compile(r"(\S*/)?obaaf['\"]?\s+verify\s+release\b|gh\s+attestation\s+verify\b"
+                         r"|cosign\s+verify-(blob-)?attestation\b|slsa-verifier\s+verify")
+# A condition on the build's result, as in `post { always { if (currentBuild.currentResult == 'SUCCESS') {...} } }`.
+RESULT_GUARD = re.compile(r"\b(currentResult|currentBuild\s*\.\s*result|resultIsBetterOrEqualTo|resultIsWorseOrEqualTo)\b")
+# The same on `currentBuild` only, for OBAAF-JEN-011 (flagship slice 2d.2o): a local variable named `currentResult` is
+# no guard on the build's result.
+RESULT_GUARD_SET = re.compile(r"\bcurrentBuild\s*\.\s*(currentResult|result|resultIsBetterOrEqualTo|resultIsWorseOrEqualTo)\b")
+# Words after which the next word names a command, as the shell reads a line.
+COMMAND_START = frozenset({";", "&&", "||", "|", "&", "!", "(", "{", "then", "do", "else", "if", "elif", "while",
+                           "until", "time"})
+
+
+def _asks_help(words) -> bool:
+    """Whether a command asks for help or the version, as argparse reads its options (`--hel` is `--help`)."""
+    return any((w.startswith("-h") and not w.startswith("--"))
+               or (len(w) >= 3 and ("--help".startswith(w) or "--version".startswith(w))) for w in words)
+
+
+# Flagship slice 2d.2o: the programs whose commands OBAAF-JEN-011 counts as a check that should stop a publish, read
+# from a command's words rather than searched for in the script's text.
+_CHECK_NAMES = r"(obaaf|gh|cosign|slsa-verifier|sha(?:1|224|256|384|512)sum|shasum|b2sum|gpgv?2?)(?:\.exe)?"
+# Searched for in a script: a program's name, wherever it is (a prefilter, linear in the text's length).
+_CHECK_PROGRAM = re.compile(_CHECK_NAMES + r"['\"]?(?=[\s;&|)'\",\]]|$)", re.I)
+# The first place a check's name appears, for where a step's check is (flagship slice 2d.2o).
+_CHECK_NAME_ANYWHERE = re.compile(r"(?<![\w.-])" + _CHECK_NAMES + r"(?![\w-])", re.I)
+# Matched against one word: the name, after any path.
+_CHECK_WORD = re.compile(r"(?:.*[/\\])?" + _CHECK_NAMES + r"['\"]?", re.I | re.S)
+_SUM_PROGRAMS = frozenset({"sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "shasum", "b2sum"})
+
+
+def check_words(words: list[str]) -> str | None:
+    """Whether a command, as its words from the command's name on, is a check OBAAF-JEN-011 counts: "check", "path"
+    when the program is named by a path (which program runs depends on the workspace), or None. The checks are the
+    provenance checks of OBAAF-JEN-012 and digest and signature checks: `obaaf verify ...`, `gh attestation verify`,
+    `cosign verify...`, `slsa-verifier verify...`, `sha256sum -c` and its kin, `gpg --verify` (or `--verify-files`)
+    and `gpgv FILE`, also as `NAME.exe` (flagship slice 2d.2o; before it the rule searched the script's text with two
+    patterns and read only the first for a failure it ignores). Only the first 64 words are read."""
+    if not words:
+        return None
+    program = words[0].replace("\\", "/").rsplit("/", 1)[-1]
+    if program.lower().endswith(".exe"):
+        program = program[:-4].lower()        # Windows: a program's name is not case-sensitive
+    rest = words[1:64]
+    hit = ((program == "obaaf" and rest[:1] == ["verify"])
+           or (program == "gh" and rest[:2] == ["attestation", "verify"])
+           or (program in ("cosign", "slsa-verifier") and bool(rest) and rest[0].startswith("verify"))
+           or (program in _SUM_PROGRAMS and any(w == "--check" or re.fullmatch(r"-[a-zA-Z0-9]*c[a-zA-Z0-9]*", w)
+                                                for w in rest))
+           or (program in ("gpg", "gpg2") and any(w in ("--verify", "--verify-files") for w in rest))
+           or (program == "gpgv" and any(not w.startswith("-") for w in rest)))
+    if not hit:
+        return None
+    return "path" if "/" in words[0] or "\\" in words[0] else "check"
+
+
+# What can change how OBAAF-JEN-011 reads the lines after it, or holds a command it compares (flagship slice 2d.2o). A
+# line with a quote may open a string that runs over several lines, so it is read too.
+_STATE_WORDS = re.compile(r"\b(set|trap|if|elif|while|until|for|case|function|fi|done|esac|wait|exit|return|exec|shopt"
+                          r"|source)\b|(^|[;&|][^\S\n]*)\.[^\S\n]"
+                          r"|[(){}'\"`\\]|<<|\$\?|\$\{\?\}|\$!|PIPESTATUS")
+# Either of the two, searched once over a whole script.
+_LINE_WANTED = re.compile(_STATE_WORDS.pattern + "|(?i:" + _CHECK_PROGRAM.pattern + ")", re.M)
+
+
+# A line that holds a command that cannot change the reading (flagship slice 2d.2o), shared by every such line.
+_PLACEHOLDER = ["\u2026"]
+_PLACEHOLDER_LINE = [(_PLACEHOLDER, None)]
+# A line that holds something other than blanks and a comment.
+_COMMAND_LINE = re.compile(r"^[^\S\n]*[^\s#]", re.M)       # as `raw.lstrip()` reads a line: any whitespace first
+
+
+def _commands_of(tokens: list[tuple[str, bool]]) -> list[tuple[list[str], str | None]]:
+    """A line's commands as (words, the operator after it), split where the shell starts a new command."""
+    out, command = [], []
+    for word, quoted in tokens:
+        if not quoted and word in COMMAND_START:
+            out.append((command, word))
+            command = []
+        else:
+            command.append(word)
+    out.append((command, None))
+    return out
+
+
+# Words before a command's name that run it (`sudo cosign verify`, `timeout 600 sha256sum -c`, `env X=1 obaaf ...`).
+_CHECK_WRAPPERS = frozenset({"sudo", "env", "timeout", "nice", "nohup", "time", "command", "exec", "stdbuf", "ionice",
+                             "chronic", "xargs", "doas"})
+
+
+def _check_at(command: list[str]) -> tuple[str | None, int]:
+    """Whether a command runs a check, and where its program is: ("check" or "path", index) when it is the command's
+    name or follows wrapper words and their options and assignments; ("unread", -1) when a program that runs another
+    command runs it (`uv run obaaf verify ...`, `docker run img cosign verify ...`, `ssh host cosign verify ...`,
+    `kubectl exec pod -- ...`), or a quoted string given to `-c` or to `ssh` or `eval` holds it (`bash -c "cd d &&
+    obaaf ..."`), where what runs it is not read; (None, -1) when it only prints the name (`echo`, `printf`, `:`,
+    `command -v`), names the program as an argument (`apt-get install gpgv`, `git commit -m "cosign verify ok"`), or
+    asks for help. Linear in the command's length."""
+    if not command or command[0] in ("echo", "printf", ":"):
+        return None, -1
+    if command[0] == "command" and any(w in ("-v", "-V") for w in command[1:3]):
+        return None, -1
+    prefix, runs = True, command[0].rsplit("/", 1)[-1] in _CHECK_RUNNERS | _CHECK_WRAPPERS
+    for k, word in enumerate(command):
+        if k == 0 or _CHECK_WORD.fullmatch(word):
+            found = check_words(command[k:k + 64])
+            if found:
+                if _asks_help(command[k:k + 64]):
+                    return None, -1
+                if prefix:
+                    return found, k
+                return ("unread", -1) if runs else (None, -1)
+        if prefix and not (word in _CHECK_WRAPPERS or word.startswith("-")
+                           or re.fullmatch(r"[A-Za-z_]\w*=.*|[\d.]+[smhd]?(?:\d+[smhd]?)*", word)):
+            prefix = False
+        if word in ("run", "exec", "--") or (_shell_c(word) and k and command[k - 1].rsplit("/", 1)[-1] in _SHELLS):
+            runs = True
+        elif k and "=" not in word and word.rsplit("/", 1)[-1] in _NOT_RUNNERS and (
+                not command[k - 1].startswith("-")
+                or ("-y" in command[k + 1:k + 8] and word.rsplit("/", 1)[-1] in _PACKAGE_MANAGERS)
+                or next((w for w in command[k + 1:k + 8] if not w.startswith("-")), "") in _PM_VERBS):
+            # `sudo apt-get install gpgv`, `sudo -E apk add gpgv`: what runs is the package manager; not `sudo -u git`
+            runs = False
+    for j, w in enumerate(command[1:], 1):
+        if " " in w and _CHECK_PROGRAM.search(w) and (
+                (_shell_c(command[j - 1]) and j >= 2 and command[j - 2].rsplit("/", 1)[-1] in _SHELLS)
+                or command[0] in ("ssh", "eval")):
+            words = re.findall(r"[^\s;&|()`'\"]+", w)
+            if any(_CHECK_WORD.fullmatch(x) and check_words(words[i:i + 64]) for i, x in enumerate(words)):
+                return "unread", -1
+    return None, -1
+
+
+def _shell_c(word: str) -> bool:
+    """A shell's option that takes a script, alone or with others (`-c`, `-lc`, `-ec`); linear in the word."""
+    return len(word) > 1 and word[0] == "-" and word[1:].isalpha() and word[1:].isascii() and "c" in word
+# Programs that take a check's name as an argument rather than run it (`sudo apt-get install gpgv`).
+_NOT_RUNNERS = frozenset({"apt-get", "apt", "yum", "dnf", "apk", "zypper", "pacman", "dpkg", "rpm", "snap", "brew",
+                          "choco", "winget", "scoop", "pip", "pip3", "pipx", "npm", "pnpm", "yarn", "gem", "cargo", "go",
+                          "which", "type", "whereis", "man", "git", "curl", "wget", "install", "cp", "mv", "ln", "chmod",
+                          "echo", "printf", "grep", "test", "ls", "cat"})
+# Package managers, whose `-y` says they are the program run (`sudo -E apt-get -y purge gpgv`).
+_PACKAGE_MANAGERS = frozenset({"apt-get", "apt", "yum", "dnf", "apk", "zypper", "pacman", "snap", "brew", "choco",
+                               "winget", "scoop", "pip", "pip3", "npm", "pnpm", "yarn", "gem", "cargo", "dpkg", "rpm"})
+# What follows a package manager's name when it is the program run (`apk add`, `pip install`).
+_PM_VERBS = frozenset({"install", "add", "i", "get", "update", "upgrade", "remove", "del", "uninstall", "search", "info",
+                       "show", "fetch", "download", "clone", "commit", "purge", "reinstall", "autoremove", "dist-upgrade",
+                       "full-upgrade", "build-dep", "source", "list", "-y"})
+# Shells whose `-c` takes a script (flagship slice 2d.2o).
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "mksh", "busybox", "su", "fish"})
+# Programs that run the command given in their other words (flagship slice 2d.2o).
+_CHECK_RUNNERS = frozenset({"sudo", "doas", "su", "ssh", "eval", "xargs", "parallel", "retry", "watch", "flock", "script",
+                            "gosu", "su-exec", "fakeroot", "unbuffer", "setpriv", "chpst", "tini", "dumb-init", "proot",
+                            "torsocks", "proxychains", "proxychains4", "catchsegv", "systemd-run",
+                      "nix-shell", "devbox", "pixi", "npx", "uvx", "pipx", "chroot", "unshare", "nsenter", "bwrap",
+                      "firejail", "strace", "ltrace", "valgrind", "faketime", "setsid", "runuser", "with-contenv"})
+
+
+def _names_check(command: list[str]) -> str | None:
+    """`_check_at` without the position."""
+    return _check_at(command)[0]
+
+
+def _text_method(node) -> bool:
+    """Whether a script argument is passed through `.trim()`, `.stripIndent()` or the like, which may change where
+    its first line starts."""
+    if node is None:
+        return False
+    return next(find_nodes(node, lambda n: isinstance(n, Call) and isinstance(n.callee, Prop)
+                           and n.callee.name in ("trim", "stripIndent", "stripMargin", "replaceAll", "denormalize",
+                                                 "strip", "stripLeading")), None) is not None
+
+
+def call_entries(call: Call, positional: str | None) -> dict:
+    """A step's arguments by name, as Groovy builds them (flagship slice 2d.2m): the named arguments, or a map given
+    as the only argument; the last of a repeated key wins; a spread map (`*: m`) may set any key it comes after or
+    that is not written later, which reads as UNREAD; a single positional argument is `positional`."""
+    entries = list(call.named)
+    if call.args:
+        if len(call.args) == 1 and isinstance(call.args[0], MapLit) and not call.named:
+            entries = [(k if isinstance(k, str) else (literal(k) or "*"), v) for k, v in call.args[0].entries]
+        elif len(call.args) == 1 and positional:
+            entries = [(positional, call.args[0])] + entries
+        else:
+            entries = [("*", None)] + entries
+    out: dict = {}
+    spread = False
+    for key, value in entries:
+        if key == "*":
+            spread = True
+            out = {k: UNREAD for k in out}
+        else:
+            out[key] = value
+    if spread:
+        return _SpreadDict(out)
+    return out
+
+
+class _SpreadDict(dict):
+    """Arguments after a spread map: a key not written after it may be in the map."""
+    def get(self, key, default=None):
+        return super().get(key, UNREAD)
+
+
+# A permalink's artifacts wherever the URL starts (`${JOB_URL}../b/lastSuccessfulBuild/artifact/x`), a job's
+# workspace (`job/b/ws/app.jar`), and a `..` in a URL to artifacts, which curl removes before it asks.
+PERMALINK_ANYWHERE = re.compile(r"(?<![\w-])(?P<ref>" + "|".join(sorted(JENKINS_PERMALINKS)) + r")/artifact/")
+WORKSPACE_URL = re.compile(r"(?<![\w.-])job/(?P<job>[^/\s'\"]+(?:/job/[^/\s'\"]+)*)/ws/")
+DOT_ARTIFACT = re.compile(r"/\.\./\S*/(artifact|ws)/|/(artifact|ws)/\S*/\.\./")
+
+
+def artifact_urls(text: str) -> list[tuple[str, str]]:
+    """How a text fetches another job's artifacts through Jenkins URLs (flagship slice 2d.2m)."""
+    out = []
+    for m in PERMALINK_ARTIFACT.finditer(text):
+        ref, job = m.group("ref"), m.group("job")
+        if ref in JENKINS_PERMALINKS:
+            out.append(("moving", f"job '{job}' by its permalink {ref} (a URL)"))
+        elif not (ref.isascii() and ref.isdigit()):
+            out.append(("unknown", f"job '{job}' by the build reference '{ref}' in a URL"))
+    if not out:
+        for m in PERMALINK_ANYWHERE.finditer(text):
+            out.append(("moving", f"a job by its permalink {m.group('ref')} (a URL)"))
+    for m in WORKSPACE_URL.finditer(text):
+        out.append(("moving", f"the workspace of job '{m.group('job')}' (a URL)"))
+    if not out and DOT_ARTIFACT.search(text):
+        out.append(("unknown", "a URL to another build's artifacts with a `..` in it"))
+    return out
+
+
+def text_or_expr(node) -> str:
+    """A string's text, with interpolation shown as ${...}, or "" for anything else."""
+    return node.text() if isinstance(node, Str) else ""
+
+# Docker run options that reach the host (JEN-006). Flagship slice 2d.2j replaced a list of patterns, which
+# missed `-v/var/run/docker.sock`, `-itv`, `--mount type=bind,source=/`, a quoted `"/:/host"`, `CAP_SYS_ADMIN`
+# and `--device`, and took `--privileged=false` for privileged, with a reader of the options as docker does.
+_HOST_CAPS = {"ALL", "SYS_ADMIN", "SYS_PTRACE", "NET_ADMIN", "DAC_READ_SEARCH", "SYS_MODULE", "SYS_RAWIO",
+              "SYS_BOOT", "DAC_OVERRIDE", "SYS_CHROOT", "MKNOD", "BPF", "PERFMON", "SYSLOG"}
+# Host folders whose mount gives a container the host, written or read: the root, the kernel's file systems,
+# the container runtimes' state and sockets (rootless Docker's under /run/user). Their subfolders count too.
+_HOST_TREES = ("/proc", "/sys", "/var/lib/docker", "/var/lib/containerd", "/var/lib/kubelet", "/run/containerd",
+               "/run/docker", "/var/run/docker", "/run/podman", "/var/run/podman", "/run/crio", "/var/run/crio",
+               "/run/user", "/var/run/user")
+# The controller's home in the Debian and Red Hat packages and in the official image (secrets, jobs, plugins,
+# init scripts run at the next start, the Git plugin's mirrors under `caches`), and an agent's root (every job's
+# workspace): each counts whole and in every part but the caches and tools a build keeps there.
+_JENKINS_HOMES = ("/var/lib/jenkins", "/var/jenkins_home", "/home/jenkins/agent", "/home/jenkins/workspace")
+_CACHE_DIRS = (".m2", ".gradle", ".cache", ".npm", ".ivy2", ".sbt", ".pip", ".yarn", ".pnpm-store", "tools")
+# Files that hold credentials for other hosts and registries, wherever they are.
+_CREDENTIAL_FILES = (".netrc", ".git-credentials", ".npmrc", ".pypirc", ".dockercfg")
+# Folders whose whole mount does, but whose subfolders are ordinary (`/etc/localtime`, `/root/.m2`, `/dev/shm`):
+# the runtime sockets' folders, devices, configuration, homes (a user's home holds its keys and, for the agent's
+# user, every job's workspace), the controller's home, the system's programs.
+_HOST_FOLDERS = ("/run", "/var/run", "/dev", "/etc", "/root", "/home", "/boot", "/usr", "/bin", "/sbin", "/lib",
+                 "/lib64", "/var", "/var/lib", "/opt")
+# Of those, the ones only programs live in: reading them gives nothing, so a read-only mount of them is ordinary.
+_READ_ONLY_HARMLESS = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/boot")
+# Folders inside a home that hold credentials for other hosts and registries.
+_CREDENTIAL_DIRS = (".ssh", ".docker", ".kube", ".aws", ".gnupg", ".azure", ".config/gcloud")
+_HOST_NAMESPACES = {"--pid": "the host PID namespace", "--ipc": "the host IPC namespace",
+                    "--userns": "the host user namespace", "--uts": "the host UTS namespace",
+                    "--cgroupns": "the host cgroup namespace"}
+# Short options of docker run that take no value, and those that take one.
+_SHORT_BOOL = set("dtiP")
+_SHORT_VALUE = set("vewhlmpuca")
+# Go's strconv.ParseBool, which docker's flags use: anything else is an error, so only these are false.
+_FALSE = {"0", "f", "F", "false", "FALSE", "False"}
+_WINDOWS_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _clean(path: str) -> str:
+    """A host path as docker cleans it: repeated slashes, `.` and `..` resolved (Go's filepath.Clean)."""
+    if path.startswith("/"):
+        return posixpath.normpath("/" + path.lstrip("/"))
+    return path
+
+
+def _host_path(source: str, readonly: bool = False) -> str | None:
+    """What mounting this host path gives a container, or None for an ordinary folder."""
+    path = source.strip().strip("'\"")
+    low = path.lower().replace("\\", "/")
+    if "docker_engine" in low or low.endswith("docker.sock") or "/docker.sock" in low:
+        return "a mount of the Docker socket"
+    if low.endswith(".sock") or "/pipe/" in low:
+        return "a mount of a container runtime socket"
+    if _WINDOWS_PATH.match(path):
+        rest = path[2:].replace("\\", "/").strip("/")
+        if not rest or rest.lower() in ("windows", "programdata/docker", "windows/system32"):
+            return "a mount of the host root file system" if not rest else f"a mount of the host's {path}"
+        return None
+    if not path.startswith("/"):
+        if ".." in path.replace("\\", "/").split("/"):
+            return "a mount of a host path outside the workspace"
+        return None
+    norm = _clean(path)
+    if norm == "/":
+        return "a mount of the host root file system"
+    if readonly and (norm == "/sys/fs/cgroup" or norm.startswith("/sys/fs/cgroup/")):
+        return None            # read-only cgroups, which systemd in a container reads
+    if any(norm == p or norm.startswith(p + "/") for p in _HOST_TREES):
+        return f"a mount of the host's {norm}"
+    for home in _JENKINS_HOMES:
+        if norm == home or (norm.startswith(home + "/") and norm[len(home) + 1:].split("/")[0] not in _CACHE_DIRS):
+            return (f"a mount of the controller's home ({norm})" if home.startswith(("/var/lib", "/var/jenkins"))
+                    else f"a mount of the agent's workspaces ({norm})")
+    name = norm.rsplit("/", 1)[-1]
+    if name in _CREDENTIAL_FILES:
+        return f"a mount of the host's credentials ({norm})"
+    if norm in _HOST_FOLDERS and not (readonly and norm in _READ_ONLY_HARMLESS):
+        return f"a mount of the host's {norm}"
+    parts = norm.strip("/").split("/")
+    if len(parts) == 2 and parts[0] == "home":
+        return f"a mount of the host's {norm}"          # a user's whole home
+    if any(f"/{d}/" in norm + "/" for d in _CREDENTIAL_DIRS) and name not in ("known_hosts", "known_hosts2"):
+        return f"a mount of the host's credentials ({norm})"
+    return None
+
+
+def _split_options(args: str) -> tuple[list[list[str]], list[str]]:
+    """The ways the options may be split, and why that is not certain. Jenkins splits `args` itself, and not
+    exactly as a shell does (a backslash is read differently), so the words a shell would see and the words
+    between blanks are both read, and anything either finds counts (the second review of slice 2d.2j)."""
+    unread: list[str] = []
+    readings = [[w.strip("'\"") for w in args.split()]]
+    try:
+        readings.insert(0, shlex.split(args, comments=False, posix=True))
+    except ValueError:
+        unread.append("docker run options could not be split as the shell would")
+    if "\\" in args:
+        unread.append("docker run options hold a backslash, which Jenkins and a shell split differently")
+    return readings, unread
+
+
+def _mount_fields(value: str) -> dict:
+    """`--mount` fields as docker reads them: comma-separated values with CSV quoting, keys in any case."""
+    try:
+        row = next(csv.reader([value]))
+    except (csv.Error, StopIteration):
+        row = value.split(",")
+    fields = {}
+    for item in row:
+        key, eq, val = item.partition("=")
+        fields[key.strip().lower()] = val if eq else "true"
+    return fields
+
+
+def _read_words(words: list[str], problems: list, unread: list, networks: list, mounts: list) -> None:
+    i = 0
+    while i < len(words):
+        w = words[i]
+        i += 1
+        if w.startswith("--"):
+            flag, eq, value = w.partition("=")
+            takes = flag in _DOCKER_VALUE or flag in ("--mount", "--volumes-from", "--device", "--cap-add",
+                                                      "--security-opt", "--network", "--net", "--device-cgroup-rule")
+            if not eq and takes and flag not in _DOCKER_BOOL:
+                value = words[i] if i < len(words) else ""
+                i += 1
+            if flag == "--privileged":
+                if not eq or value.strip() not in _FALSE:
+                    problems.append("--privileged")
+            elif flag == "--use-api-socket":
+                if not eq or value.strip() not in _FALSE:
+                    problems.append("a mount of the Docker socket")
+            elif flag == "--volume":
+                _volume(value, problems, mounts)
+            elif flag == "--mount":
+                fields = _mount_fields(value)
+                source = fields.get("source") or fields.get("src") or ""
+                kind = fields.get("type", "volume").lower()
+                if kind == "bind" or source.startswith("/") or _WINDOWS_PATH.match(source):
+                    mounts.append(source)
+                    ro = fields.get("readonly", fields.get("ro", "false")).strip() not in _FALSE
+                    found = _host_path(source, ro)
+                    if found:
+                        problems.append(found)
+            elif flag == "--volumes-from":
+                unread.append(f"--volumes-from {value} mounts what another container holds, which the file does "
+                              "not show (a controller running in a container passes its own volumes this way)")
+                mounts.append(f"the volumes of {value}")
+            elif flag in ("--network", "--net"):
+                networks.append(value)
+                if value == "host":
+                    problems.append("host networking")
+            elif flag in _HOST_NAMESPACES and value == "host":
+                problems.append(_HOST_NAMESPACES[flag])
+            elif flag == "--cap-add":
+                caps = {c.strip().upper().removeprefix("CAP_") for c in value.split(",")}
+                if caps & _HOST_CAPS:
+                    problems.append("extra capabilities")
+            elif flag in ("--device", "--device-cgroup-rule"):
+                problems.append("a host device")
+            elif flag == "--security-opt":
+                v = value.replace(":", "=", 1)
+                if v in ("seccomp=unconfined", "apparmor=unconfined", "label=disable", "systempaths=unconfined") \
+                        or v.startswith("label=type"):
+                    problems.append("an unconfined security profile")
+            continue
+        if w.startswith("-") and len(w) > 1:
+            # Short options, possibly grouped (-itv /x:/y, -v/x:/y): docker's parser reads them one by one.
+            for k, ch in enumerate(w[1:], start=1):
+                if ch in _SHORT_BOOL:
+                    continue
+                if ch in _SHORT_VALUE:
+                    value = w[k + 1:].lstrip("=") if k + 1 < len(w) else (words[i] if i < len(words) else "")
+                    if k + 1 >= len(w):
+                        i += 1
+                    if ch == "v":
+                        _volume(value, problems, mounts)
+                    break
+                unread.append(f"docker run option -{ch} is not one the checker reads")
+                break
+
+
+def _volume(value: str, problems: list, mounts: list) -> None:
+    """`-v SOURCE:TARGET[:OPTIONS]`. One field is an anonymous volume at that path in the container; a source
+    without a slash is a named volume."""
+    if _WINDOWS_PATH.match(value):
+        cut = value.find(":", 2)
+        source, rest = (value, "") if cut == -1 else (value[:cut], value[cut + 1:])
+    elif value.startswith("\\\\") or value.startswith("//./"):
+        cut = value.find(":")
+        source, rest = (value, "") if cut == -1 else (value[:cut], value[cut + 1:])
+    else:
+        source, sep, rest = value.partition(":")
+        if not sep:
+            return
+    if not (source.startswith(("/", ".", "~", "$", "\\")) or _WINDOWS_PATH.match(source)):
+        return
+    mounts.append(source)
+    ro = "ro" in rest.rsplit(":", 1)[-1].split(",") if ":" in rest else False
+    found = _host_path(source, ro)
+    if found:
+        problems.append(found)
+
+
+def docker_options(args: str) -> tuple[list[str], list[str], list[str]]:
+    """(what reaches the host, why the options cannot all be read, the networks named) for docker run options
+    written in a Jenkinsfile. A value the file does not fix, or text that cannot be split for certain, is a
+    reason, never a pass."""
+    found = _docker_read(args)
+    return list(found[0]), list(found[1]), list(found[2])
+
+
+def docker_bind_sources(args: str) -> list[str]:
+    """The host paths that docker run options bind into a container; named volumes are not host paths."""
+    return list(_docker_read(args)[3])
+
+
+@functools.lru_cache(maxsize=512)
+def _docker_read(args: str) -> tuple[list, list, list, list]:
+    problems: list[str] = []
+    unread: list[str] = []
+    networks: list[str] = []
+    mounts: list[str] = []
+    if "${" in args or "$(" in args or "`" in args:
+        unread.append("docker run options are computed at run time")
+    readings, why = _split_options(args)
+    unread += why
+    for n, words in enumerate(readings):
+        nets: list[str] = []
+        _read_words(words, problems, unread if n == 0 else [], nets, mounts)
+        if n == 0:
+            networks = nets
+        elif nets != networks:
+            networks = networks + ["(read differently)"]
+    return (list(dict.fromkeys(problems)), list(dict.fromkeys(unread)), networks, list(dict.fromkeys(mounts)))
+
+
+def pod_settings(text: str) -> tuple[list[str], str | None, bool, list[str]]:
+    found, account, no_token, unread = _pod_settings(text)
+    return list(found), account, no_token, list(unread)
+
+
+@functools.lru_cache(maxsize=256)
+def _pod_settings(text: str) -> tuple:
+    """(what reaches the host, the service account named, whether the token is not mounted, why the spec could
+    not all be read) for a pod spec. The spec is read as YAML, which JSON also is (flagship slice 2d.2j: a JSON
+    spec's `"privileged": true` was missed by the line patterns); text that does not parse falls back to the
+    patterns and says so. Only the first document is the pod; a later one is reported, not read."""
+    unread: list[str] = []
+    depth = max((len(m.group(0)) for m in re.finditer(r"[\[{]+|^[ \t]+", text, re.M)), default=0)
+    docs = None
+    if depth > 400:
+        unread.append("the pod spec is nested too deeply to read")
+    elif text.strip():
+        try:
+            docs = [d for d in yaml.safe_load_all(text) if d is not None]
+        except Exception:      # not YAML (or a tag safe_load refuses): the patterns below still read it
+            docs = None
+    else:
+        docs = []
+    if docs is None or any(not isinstance(d, dict) for d in docs):
+        if text.strip() and depth <= 400:
+            unread.append("the pod spec could not be read as YAML")
+        found = [label for rx, label in POD_HOST_SETTINGS if rx.search(text)]
+        account = re.search(r"[\"']?serviceAccount(?:Name)?[\"']?\s*:\s*['\"]?([\w.-]+)", text)
+        no_token = bool(re.search(r"[\"']?automountServiceAccountToken[\"']?\s*:\s*['\"]?false", text)) and \
+            "serviceAccountToken" not in text.replace("automountServiceAccountToken", "")
+        return found, account.group(1) if account else None, no_token, unread
+    if len(docs) > 1:
+        unread.append("the pod spec holds more than one YAML document; only the first is read for the token")
+    found: list[str] = []
+    account = None
+    no_token = False
+    projected = False
+    for n, doc in enumerate(docs):
+        stack: list = [doc]
+        seen = 0
+        while stack:
+            seen += 1
+            if seen > 50_000:
+                unread.append("the pod spec is too large to read in full")
+                break
+            node = stack.pop()
+            if isinstance(node, list):
+                stack += node
+                continue
+            if not isinstance(node, dict):
+                continue
+            for key, value in node.items():
+                key = str(key)
+                true = value is True or (isinstance(value, int) and not isinstance(value, bool) and value != 0) or (
+                    isinstance(value, str) and value.strip().lower() in ("true", "yes", "on", "1"))
+                if key == "privileged" and true:
+                    found.append("a privileged container")
+                elif key == "allowPrivilegeEscalation" and true:
+                    found.append("allowPrivilegeEscalation: true")
+                elif key in ("hostNetwork", "hostPID", "hostIPC") and true:
+                    found.append({"hostNetwork": "host networking", "hostPID": "the host PID namespace",
+                                  "hostIPC": "the host IPC namespace"}[key])
+                elif key == "hostPath":
+                    path = value.get("path", "") if isinstance(value, dict) else str(value or "")
+                    found.append("a mount of the Docker socket" if "docker.sock" in str(path) else
+                                 "a mount of the host root file system" if _clean(str(path)) == "/" else
+                                 "a hostPath volume")
+                elif key == "add" and isinstance(value, list) and {str(c).upper().removeprefix("CAP_")
+                                                                    for c in value} & _HOST_CAPS:
+                    found.append("extra capabilities")
+                elif key == "serviceAccountToken":
+                    projected = True          # a projected token volume mounts a token whatever automount says
+                elif n == 0 and key in ("serviceAccountName", "serviceAccount") and isinstance(value, str) \
+                        and account is None:
+                    account = value
+                elif n == 0 and key == "automountServiceAccountToken" and (
+                        value is False or (isinstance(value, str) and value.strip().lower() == "false")):
+                    no_token = True
+                stack.append(value)
+    return list(dict.fromkeys(found)), account, no_token and not projected, list(dict.fromkeys(unread))
+
+
 POD_HOST_SETTINGS = [
-    (re.compile(r"^\s*privileged:\s*true\b", re.M), "a privileged container"),
-    (re.compile(r"^\s*allowPrivilegeEscalation:\s*true\b", re.M), "allowPrivilegeEscalation: true"),
-    (re.compile(r"^\s*hostNetwork:\s*true\b", re.M), "host networking"),
-    (re.compile(r"^\s*hostPID:\s*true\b", re.M), "the host PID namespace"),
-    (re.compile(r"^\s*hostIPC:\s*true\b", re.M), "the host IPC namespace"),
+    (re.compile(r"[\"']?privileged[\"']?[ \t]*:[ \t]*[\"']?true\b", re.M), "a privileged container"),
+    (re.compile(r"[\"']?allowPrivilegeEscalation[\"']?[ \t]*:[ \t]*[\"']?true\b", re.M),
+     "allowPrivilegeEscalation: true"),
+    (re.compile(r"[\"']?hostNetwork[\"']?[ \t]*:[ \t]*[\"']?true\b", re.M), "host networking"),
+    (re.compile(r"[\"']?hostPID[\"']?[ \t]*:[ \t]*[\"']?true\b", re.M), "the host PID namespace"),
+    (re.compile(r"[\"']?hostIPC[\"']?[ \t]*:[ \t]*[\"']?true\b", re.M), "the host IPC namespace"),
     (re.compile(r"docker\.sock"), "a mount of the Docker socket"),
-    (re.compile(r"^\s*-?\s*hostPath:", re.M), "a hostPath volume"),
+    (re.compile(r"[\"']?hostPath[\"']?[ \t]*:", re.M), "a hostPath volume"),
     (re.compile(r"\b(SYS_ADMIN|SYS_PTRACE|NET_ADMIN)\b"), "extra capabilities"),
 ]
-POD_IMAGE = re.compile(r"^\s*-?\s*image:\s*['\"]?([^'\"\s#]+)", re.M)
+
+
+# OBAAF-JEN-008 (flagship slice 2d.2k).
+PINNED_IMAGE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+EXACT_NPM = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+EXACT_PIP = re.compile(r"^\d+(?:\.\d+)*(?:(?:a|b|rc|\.post|\.dev)\d+)*(?:\+[0-9A-Za-z.]+)?$")
+# ${env.NAME} (Groovy reading the environment), ${NAME}, $NAME.
+_REF = re.compile(r"\$\{env\.([A-Za-z_]\w*)\}|\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)")
+# Commands of a script line: a line is cut at `&&`, `||` and `;`; a pipe stays inside its command.
+_SEGMENTS = re.compile(r"&&|\|\||;")
+# Commands that set variables other than by NAME=value (read, for, declare, printf -v, mapfile, unset), and
+# those that may set any (eval, and source or `.` of a file not plainly outside the checkout): what they set
+# is not a fixed value (the third and sixth reviews of 2d.2k).
+_OTHER_ASSIGN = re.compile(r"^[ \t]*(?:(?:then|do|else|elif|\{|\()[ \t]+)*"
+                           r"(read|for|select|declare|typeset|mapfile|readarray|unset|printf[ \t]+-v|source|\.|eval)"
+                           r"(?=[ \t]|$)(.*)$")
+# A shell assignment at the start of a command (after `then`, `do`, `else`, `{`): its literal value, single
+# quoted (never expanded), double quoted or bare; any other value makes the variable unknown.
+_ASSIGN_START = re.compile(r"^[ \t]*(?:(?:then|do|else|elif|\{|\()[ \t]+)*(?:export[ \t]+|local[ \t]+|readonly[ \t]+)?"
+                           r"([A-Za-z_]\w*)=")
+_SHELL_ASSIGN = re.compile(r"^[ \t]*(?:(?:then|do|else|elif|\{|\()[ \t]+)*(?:export[ \t]+|local[ \t]+|readonly[ \t]+)?"
+                           r"([A-Za-z_]\w*)=(?:'([^']*)'|\"([^\"$`\\]*)\"|([^\s'\"$`;&|\\]*))[ \t]*$")
+# Subcommands of npm, pnpm, yarn, bun, pip, pipx and uv, by what they do with a package named after them.
+_SUBCOMMAND = re.compile(r"(?:(?<=\s)|^)([a-z]+)(?=\s|$)")
+_INSTALL_WORDS = {"install", "i", "add", "a", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal",
+                  "isntall", "dlx", "x", "exec", "run", "inject", "global", "tool"}
+_UPDATE_WORDS = {"update", "upgrade", "up"}
+_OTHER_WORDS = {"uninstall", "remove", "rm", "r", "un", "unlink", "ls", "list", "la", "ll", "view", "info", "show",
+                "outdated", "why", "explain", "search", "audit", "cache", "config", "help", "download", "freeze",
+                "check", "prune", "dedupe", "pack", "publish", "root", "prefix", "bin", "docs", "home", "repo",
+                "fund", "wheel", "hash", "inspect", "uninject"}
+_RUNNERS = {"npx", "bunx", "uvx", "pnpx"}
+# Subcommands of npm, pnpm, yarn and bun that install what a package.json asks for.
+_MANIFEST_INSTALLS = {"install", "i", "ci", "add", "in", "ins", "inst", "insta", "instal", "isnt", "isnta",
+                      "isntal", "isntall", "clean-install", "install-clean", "it", "install-test", "cit"}
+_INSTALLER_NAMES = {"npm", "pnpm", "yarn", "bun", "npx", "bunx", "pip", "pip3", "pipx", "uv", "uvx", "pnpx"}
+_AGENT_SELF_UPDATE = re.compile(r"^(?:\S*/)?claude[ \t]+(?:update|upgrade)\b")
+# What may stand before a command in the same segment: keywords, assignments, and wrappers that run the
+# rest (sudo, env, timeout, nohup, exec, time, nice, stdbuf, xargs, bash -c "..."), each with its options.
+_COMMAND_PREFIX = re.compile(
+    r"^[ \t]*(?:(?:then|do|else|elif|if|while|until|!|\{|\()(?=[ \t])|[A-Za-z_]\w*=(?:'[^']*'|\"[^\"]*\"|\S*)|"
+    r"sudo(?:[ \t]+(?:-[ugCDhprtUT][ \t]+\S+|--[\w-]+=\S+|-[A-Za-z]+|--[\w-]+))*|"
+    r"env(?:[ \t]+(?:-[uCS][ \t]*\S+|--(?:unset|chdir|split-string)[= ]\S+|-\S+|[A-Za-z_]\w*=\S*))*|"
+    r"timeout(?:[ \t]+(?:-[ks][ \t]*\S+|--(?:kill-after|signal)[= ]\S+|-\S+))*[ \t]+\S+|"
+    r"xargs(?:[ \t]+(?:-[IEdLnPsa][ \t]*\S+|--\S+|-\S+))*|"
+    r"nohup|exec|time|nice(?:[ \t]+-n[ \t]*\S+)?|stdbuf(?:[ \t]+-\S+)*|"
+    r"(?:\S*/)?(?:ba|z|da)?sh[ \t]+-c[ \t]+[\"']?|[\"'])")
+# docker, podman and nerdctl run, create and pull, where a command starts: the start of a line, after a
+# separator, `$(`, a quote (bash -c "..."), sudo, exec, time or nohup; global options before the subcommand.
+_CONTAINER_CMD = re.compile(
+    r"^(?:[\w./-]*/)?(docker|podman|nerdctl)"
+    r"((?:[ \t]+--?[A-Za-z][\w-]*(?:=\S*|[ \t]+(?!(?:run|create|pull|container|image)\b)[^\s-]\S*)?)*)"
+    r"[ \t]+(?:(?:container|image)[ \t]+)?(run|create|pull)(?=[ \t]|$)", re.I)
+_BUILD_CMD = re.compile(r"^(?:\S*/)?(?:docker|podman|nerdctl|buildah)(?:[ \t]+(?:image|buildx))?[ \t]+(?:build|bud)\b")
+_TAG_OPTION = re.compile(r"(?:^|\s)(?:-t|--tag)(?:[ \t]+|=)(['\"]?)([^\s'\"]+)\1")
+_TAG_CMD = re.compile(r"^(?:\S*/)?(?:docker|podman|nerdctl)(?:[ \t]+image)?[ \t]+tag[ \t]+\S+[ \t]+(['\"]?)([^\s'\"]+)\1")
+# Where a command ends and another starts in a script.
+_COMMAND_SPLIT = re.compile(r"&&|\|\||[;&|\n(`]|\$\(")
+_DOCKER_BOOL = {"--rm", "-d", "--detach", "-i", "--interactive", "-t", "--tty", "--privileged", "--init",
+                "--read-only", "-P", "--publish-all", "-q", "--quiet", "--no-healthcheck", "--oom-kill-disable",
+                "--sig-proxy", "--disable-content-trust", "--all-tags", "--help", "--use-api-socket"}
+_DOCKER_VALUE = {"--add-host", "--annotation", "--attach", "--blkio-weight", "--cap-add", "--cap-drop",
+                 "--cgroup-parent", "--cgroupns", "--cidfile", "--cpu-period", "--cpu-quota", "--cpu-shares", "-c",
+                 "--cpus", "--cpuset-cpus", "--cpuset-mems", "--device", "--device-cgroup-rule", "--dns",
+                 "--dns-option", "--dns-search", "--domainname", "--entrypoint", "-e", "--env", "--env-file",
+                 "--expose", "--gpus", "--group-add", "--health-cmd", "--health-interval", "--health-retries",
+                 "--health-start-period", "--health-timeout", "-h", "--hostname", "--ip", "--ip6", "--ipc",
+                 "--isolation", "--kernel-memory", "-l", "--label", "--label-file", "--link", "--log-driver",
+                 "--log-opt", "--mac-address", "-m", "--memory", "--memory-reservation", "--memory-swap",
+                 "--memory-swappiness", "--mount", "--name", "--network", "--net", "--network-alias", "--pid",
+                 "--pids-limit", "--platform", "-p", "--publish", "--pull", "--restart", "--runtime",
+                 "--security-opt", "--shm-size", "--stop-signal", "--stop-timeout", "--storage-opt", "--sysctl",
+                 "--tmpfs", "--ulimit", "-u", "--user", "--userns", "--uts", "-v", "--volume", "--volume-driver",
+                 "--volumes-from", "-w", "--workdir", "--detach-keys"}
+# docker build options: those that take a value, and those that do not; any other makes the Dockerfile unknown.
+_BUILD_VALUE = {"-t", "--tag", "--build-arg", "--target", "--label", "--platform", "--network", "--cache-from",
+                "--cache-to", "--secret", "--ssh", "--add-host", "--iidfile", "--progress", "--shm-size", "--ulimit",
+                "--cpuset-cpus", "--cpu-shares", "-m", "--memory", "--memory-swap", "--isolation", "--output", "-o",
+                "--build-context", "--metadata-file", "--provenance", "--sbom", "--allow", "--annotation",
+                "--cgroup-parent", "--builder"}
+_BUILD_BOOL = {"-q", "--quiet", "--no-cache", "--pull", "--rm", "--force-rm", "--squash", "--compress", "--load",
+               "--push", "--disable-content-trust", "--check"}
+_PIP_INSTALL = re.compile(r"(?<![\w-])(?:pip3?|uv[ \t]+pip|python3?[ \t]+-m[ \t]+pip)(?:[ \t]+-\S+)*[ \t]+install\b")
+_REQUIREMENT_FLAG = re.compile(r"(?:^|\s)(?:-r|--requirement|-c|--constraint)(?:[ \t]+|=)?(['\"]?)([^\s'\";&|]+)\1")
+_CD_WORKSPACE = re.compile(r"^(?:cd|pushd)[ \t]+[\"']?\$(?:\{(?:env\.)?WORKSPACE\}|WORKSPACE(?![\w]))"
+                           r"(?:/([^\s\"']*))?[\"']?$")
+_CD = re.compile(r"^[ \t]*(?:cd|pushd)[ \t]+(['\"]?)([^\s'\";&|]+)\1[ \t]*$")
+_NPM_PREFIX = re.compile(r"(?:--prefix|-C|--cwd|--dir)(?:[ \t]+|=)(['\"]?)([^\s'\";&|]+)\1")
+# Options of npm, pip and uv before the subcommand that take a value (`npm --loglevel info install`).
+_INSTALLER_VALUE_OPTIONS = {"--loglevel", "--registry", "--prefix", "--cache", "--userconfig", "--globalconfig",
+                            "--workspace", "-w", "--tag", "--cache-dir", "--index-url", "-i", "--extra-index-url",
+                            "--find-links", "-f", "--target", "-t", "--python", "-p", "--proxy", "--cert",
+                            "--client-cert", "--log", "--src", "--root", "--upgrade-strategy", "--trusted-host",
+                            "--timeout", "--retries", "--platform", "--python-version", "--implementation", "--abi",
+                            "--directory", "--project", "--config-file", "--cwd", "-C", "--dir", "--filter",
+                            "--default-index", "--index", "--color", "--progress-bar"}
+_NPM_INSTALL = re.compile(r"(?<![\w-])(?:npm[ \t]+(?:install|i|ci|add)|pnpm[ \t]+(?:install|i|add)|"
+                          r"yarn(?:[ \t]+install)?|bun[ \t]+(?:install|i))(?=$|[ \t;&|])", re.M)
+LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock")
+_DOWNLOAD = re.compile(r"(?<![\w-])(curl|wget|irm|iwr|Invoke-WebRequest|Invoke-RestMethod)(?![\w-])", re.I)
+# `[^\s|]`, not `\S`, before the shell's name: `\S*` ran on through every later `|` of the line, so a line of
+# many pipes was quadratic (the review of slice 2d.5a: 400 KB took 97 s). A path holds no `|`.
+_TO_SHELL = re.compile(r"\|[ \t]*(?:sudo[ \t]+(?:-[^\s|]+[ \t]+)*)?(?:[^\s|]*/)?(?:ba|z|da|k)?sh\b|\|[ \t]*iex\b|"
+                       r"(?:ba|z)?sh[ \t]+<\(|(?:ba|z)?sh[ \t]+-c[ \t]+[\"']?\$\(", re.I)
+_HEREDOC = re.compile(r"(?:^|(?<=\s))<<(-?)[\"']?([A-Za-z_]\w*)[\"']?")
+
+
+def _shown(text: str, limit: int = 120) -> str:
+    """Text from a file, as a finding shows it: quotes, backslashes and control characters escaped, so it
+    cannot end the quoted part of a message or start a new line (the review of 2d.2k), and cut short."""
+    out = []
+    for c in str(text):
+        if c in "'\\`":
+            out.append("\\" + c)
+        elif not c.isprintable():
+            out.append(f"\\x{ord(c):02x}" if ord(c) < 256 else f"\\u{ord(c):04x}")
+        else:
+            out.append(c)
+    shown = "".join(out)
+    return shown if len(shown) <= limit else shown[:limit] + "..."
+
+
+def _global_update(command: str) -> bool:
+    """`npm update -g` (pnpm, bun), with any options, and no package named: every global package moves."""
+    words = re.split(r"[ \t]\d*(?:[<>]|&>)", " " + command)[0].split()     # `> /dev/null 2>&1` is not a word
+    if not words or words[0].rsplit("/", 1)[-1] not in ("npm", "pnpm", "bun"):
+        return False
+    rest, i, verb = [], 1, None
+    while i < len(words):
+        w = words[i]
+        if w.startswith("-"):
+            rest.append(w)
+            i += 2 if w in _INSTALLER_VALUE_OPTIONS else 1
+            continue
+        if verb is None:
+            verb = w
+        else:
+            return False
+        i += 1
+    return verb in _UPDATE_WORDS and any(w in ("-g", "--global") or w.startswith("--location=global") for w in rest)
+
+
+def _exact_version(ver: str) -> bool:
+    """An exact version after a package name: `@1.2.3` (npm) or `==1.2.3`/`===x` (pip, spaces allowed);
+    not a range, a tag, a wildcard or a value set at run time."""
+    ver = ver.strip()
+    if "$" in ver:
+        return False
+    if ver.startswith("@"):
+        return bool(EXACT_NPM.match(ver[1:]))
+    if ver.startswith("==="):
+        return len(ver[3:].strip()) > 0
+    if ver.startswith("=="):
+        return bool(EXACT_PIP.match(ver[2:].strip()))
+    return False
+
+
+def _build_options(options: str) -> tuple:
+    """(Dockerfile, build args) for docker.build's options: `-f`/`--file`, else Dockerfile in the build
+    context; `--build-arg NAME=VALUE`. The Dockerfile is "?" when it cannot be told (an option the checker
+    does not know, a value set at run time)."""
+    try:
+        words = shlex.split(options)
+    except ValueError:
+        return "?", {}
+    file, context, args, i = None, ".", {}, 0
+    while i < len(words):
+        w = words[i]
+        flag, eq, value = w.partition("=")
+        if flag in ("-f", "--file"):
+            file = value if eq else (words[i + 1] if i + 1 < len(words) else None)
+            i += 1 if eq else 2
+            continue
+        if flag == "--build-arg":
+            value = value if eq else (words[i + 1] if i + 1 < len(words) else "")
+            name, _, val = value.partition("=")
+            args[name] = val
+            i += 1 if eq else 2
+            continue
+        if w.startswith("-"):
+            if flag in _BUILD_BOOL or (eq and flag in _BUILD_VALUE):
+                i += 1
+            elif flag in _BUILD_VALUE:
+                i += 2
+            else:
+                return "?", args
+            continue
+        context = w
+        i += 1
+    if file is None:
+        file = context.rstrip("/") + "/Dockerfile" if context not in (".", "./") else "Dockerfile"
+    if "$" in file or "$" in context:
+        return "?", args
+    return (file[2:] if file.startswith("./") else file), args
+
+
+def _build_dockerfile(options: str) -> str:
+    return _build_options(options)[0]
+
+
+def _join(folder: str, rel: str) -> str:
+    """`rel` inside the folder dir() moved into; "?" when that folder is computed."""
+    if folder == "?":
+        return "?"
+    return "/".join(x for x in (folder, rel) if x and x != ".") if folder else rel
 
 
 @dataclass
@@ -118,6 +899,95 @@ class Info:
 # Steps that copy files to another host. They are not counted as publishing on their own, because
 # they mostly copy reports and logs; in a stage declared a release lane they are the upload.
 TRANSFER_STEPS = ("sshPublisher", "ftpPublisher")
+
+
+# Names in an interpolated expression, outside quoted text, that are not called (`f(`, `tool "x"`).
+_QUOTED = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'")
+_NAME_IN_EXPR = re.compile(r"(?<![.\w$])[A-Za-z_]\w*\b(?!\s*\(|\s+(?!(?:as|in|instanceof)\b)[\"'\w$])")
+
+
+def _skip_quoted(expr: str, i: int, depth: int = 0) -> int:
+    """The index just after the quoted text that starts at `i`, following `${...}` inside double quotes."""
+    n = len(expr)
+    triple = expr.startswith(expr[i] * 3, i)
+    q = expr[i] * 3 if triple else expr[i]
+    j = i + len(q)
+    while j < n and not expr.startswith(q, j):
+        if expr[j] == "\\":
+            j += 2
+        elif q[0] == '"' and expr.startswith("${", j) and depth < 50:
+            j = _skip_braces(expr, j + 2, depth + 1)
+        else:
+            j += 1
+    return min(j + len(q), n)
+
+
+def _skip_braces(expr: str, k: int, depth: int = 0) -> int:
+    """The index just after the `}` that closes a `${` whose body starts at `k`."""
+    n, level = len(expr), 1
+    while k < n and level:
+        ch = expr[k]
+        if ch == "\\":
+            k += 2
+            continue
+        if ch in "\"'" and depth < 50:
+            k = _skip_quoted(expr, k, depth + 1)
+            continue
+        level += 1 if ch == "{" else -1 if ch == "}" else 0
+        k += 1
+    return k
+
+
+_DOLLAR_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
+
+
+@functools.lru_cache(maxsize=4096)
+def _unquoted(expr: str, depth: int = 0) -> str:
+    """The expression with each quoted text replaced by what it interpolates (`"a-${v}"` and `"a-$v"` by `v`,
+    each read the same way again), and text that interpolates nothing by a placeholder; quotes and `${...}` are
+    followed together, so a quote inside `${...}` does not end the text (the third to fifth reviews of
+    2d.2i). Past 50 levels the rest is left as it is, so its names are still read."""
+    if depth > 50:
+        return expr
+    out: list[str] = []
+    i, n = 0, len(expr)
+    while i < n:
+        c = expr[i]
+        if c == "'":
+            # A placeholder that reads as an argument: `tool 'maven'` is a step called with one.
+            i = _skip_quoted(expr, i, depth)
+            out.append(" _q_ ")
+            continue
+        if c == '"':
+            q = '"""' if expr.startswith('"""', i) else '"'
+            j = i + len(q)
+            parts: list[str] = []
+            while j < n and not expr.startswith(q, j):
+                if expr[j] == "\\":
+                    j += 2
+                elif expr.startswith("${", j):
+                    k = _skip_braces(expr, j + 2, depth + 1)
+                    body = expr[j + 2:k - 1] if k <= n and expr[k - 1:k] == "}" else expr[j + 2:k]
+                    parts.append(_unquoted(body, depth + 1))
+                    j = k
+                elif expr[j] == "$" and j + 1 < n and (expr[j + 1].isalpha() or expr[j + 1] == "_"):
+                    m = _DOLLAR_NAME.match(expr, j + 1)      # in place: no copy of the rest of the text
+                    parts.append(m.group(0))
+                    j = m.end()
+                else:
+                    j += 1
+            i = min(j + len(q), n)
+            # What it interpolates, ended by `;` so a name after it is not read as a step call; a text that
+            # interpolates nothing reads as an argument, as above.
+            out.append(" " + " ; ".join(parts) + " ; " if parts else " _q_ ")
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+# Names a Jenkinsfile can read without defining them, which hold no secret of a binding.
+_JENKINS_GLOBALS = {"env", "params", "currentBuild", "scm", "docker", "pipeline", "manager", "build", "true", "false",
+                    "null", "this", "steps", "binding", "args", "out", "jenkins", "hudson", "Jenkins", "workspace",
+                    "new", "in", "as", "instanceof", "def", "return"}
 
 
 def stage_label(stage: tuple) -> str:
@@ -170,6 +1040,11 @@ def base_stage(stage: tuple) -> tuple:
     return tuple(out)
 
 
+def guard_keys(step) -> set:
+    """The conditions a step runs under, as they are compared (flagship slice 2d.2l)."""
+    return {guard_key(g) for g in step.ctx.guards}
+
+
 def concurrent(a, b) -> bool:
     """Whether two steps are in different branches of the same parallel block."""
     for x, y in zip(a.branch, b.branch):
@@ -178,6 +1053,131 @@ def concurrent(a, b) -> bool:
         if x != y:
             return False
     return False
+
+
+# Terms and operators of a Jenkins label expression (flagship slice 2d.2j). A label may hold `-` (built-in) but
+# not the `->` operator.
+_LABEL_TOKEN = re.compile(r"&&|\|\||<->|->|!|\(|\)|\"[^\"]*\"|[^\s&|!()<>\"-]+(?:-(?!>)[^\s&|!()<>\"-]*)*|-")
+
+
+def _label_tree(label: str):
+    """A Jenkins label expression as a tree, by its operators from tightest to loosest: `!`, `&&`, `||`, `->`,
+    `<->`, with brackets. None when it cannot be read (flagship slice 2d.2j)."""
+    tokens = _LABEL_TOKEN.findall(label)
+    if "".join(tokens) != re.sub(r"\s+", "", label) or not tokens:
+        return None
+    pos = 0
+
+    def peek():
+        return tokens[pos] if pos < len(tokens) else None
+
+    def binary(op, lower):
+        nonlocal pos
+        left = lower()
+        while peek() == op:
+            pos += 1
+            left = (op, left, lower())
+        return left
+
+    def unary():
+        nonlocal pos
+        tok = peek()
+        if tok == "!":
+            pos += 1
+            return ("!", unary())
+        if tok == "(":
+            pos += 1
+            inner = binary("<->", lambda: binary("->", lambda: binary("||", lambda: binary("&&", unary))))
+            if peek() != ")":
+                raise ValueError(label)
+            pos += 1
+            return inner
+        if tok is None or tok in ("&&", "||", "->", "<->", ")", "-"):
+            raise ValueError(label)
+        pos += 1
+        return ("atom", tok.strip('"'))
+
+    try:
+        tree = binary("<->", lambda: binary("->", lambda: binary("||", lambda: binary("&&", unary))))
+    except (ValueError, RecursionError):
+        return None
+    return tree if pos == len(tokens) else None
+
+
+def _required(tree) -> set:
+    """The labels every agent the expression selects must carry."""
+    op = tree[0]
+    if op == "atom":
+        return {tree[1]}
+    if op == "&&":
+        return _required(tree[1]) | _required(tree[2])
+    if op == "||":
+        return _required(tree[1]) & _required(tree[2])
+    return set()           # `!a`, `a -> b` (`!a || b`), `a <-> b` (both false holds) require nothing
+
+
+def _positive(tree, sign: bool = True) -> set:
+    """The labels the expression names where a match can require them: under no negation, or two, on the
+    right of `->`, on either side of `<->`."""
+    op = tree[0]
+    if op == "atom":
+        return {tree[1].lower()} if sign else set()
+    if op == "!":
+        return _positive(tree[1], not sign)
+    if op == "->":
+        return _positive(tree[1], not sign) | _positive(tree[2], sign)
+    if op == "<->":
+        return set().union(*(_positive(t, b) for t in tree[1:] for b in (True, False)))
+    return _positive(tree[1], sign) | _positive(tree[2], sign)
+
+
+def _possible_on(tree, present: set) -> set:
+    """Truth values on the built-in node when it carries the controller labels in `present` and not the others,
+    with any other label it may also carry."""
+    op = tree[0]
+    if op == "atom":
+        name = tree[1].lower()
+        if name in CONTROLLER_LABELS:
+            return {name in present}
+        return {True, False}
+    if op == "!":
+        return {not v for v in _possible_on(tree[1], present)}
+    a, b = _possible_on(tree[1], present), _possible_on(tree[2], present)
+    combine = {"&&": lambda x, y: x and y, "||": lambda x, y: x or y, "->": lambda x, y: (not x) or y,
+               "<->": lambda x, y: x == y}[op]
+    return {combine(x, y) for x in a for y in b}
+
+
+def controller_label(label: str) -> str | None:
+    """"exact" for the built-in node's own label; "expression" for a label expression that names it and can
+    hold on it (`built-in || linux`, `linux -> built-in`); None otherwise, also when it cannot be read."""
+    text = label.strip()
+    if text.lower() in CONTROLLER_LABELS:
+        return "exact"
+    tree = _label_tree(text)
+    if tree is None or not (_positive(tree) & CONTROLLER_LABELS):
+        return None
+    # The built-in node carries `built-in` since Jenkins 2.307, `master` before it, and both where an
+    # administrator kept the old label: an expression that names one of them where a match can require it, and
+    # holds on any of these, can place work there (the third review of 2d.2j: `built-in && !master`).
+    holds = any(True in _possible_on(tree, set(labels)) for labels in ({"built-in"}, {"master"}, CONTROLLER_LABELS))
+    return "expression" if holds else None
+
+
+@functools.lru_cache(maxsize=4096)
+def _label_terms(label: str) -> frozenset | None:
+    tree = _label_tree(label)
+    if tree is None:
+        return None
+    return frozenset(_required(tree)) or None
+
+
+def label_terms(label: str) -> set | None:
+    """The labels a label expression requires every agent it selects to carry; None when it requires none
+    (`!windows`, `docker -> linux`, `linux || !linux`) or cannot be read, which selects like `agent any`.
+    Whitespace, brackets and quotes do not make two expressions different."""
+    terms = _label_terms(label)
+    return set(terms) if terms is not None else None
 
 
 def _last_command(script: str, start: int) -> bool:
@@ -195,6 +1195,7 @@ class JenkinsRules:
         self.path = path
         self.p = pipeline
         self.catalog = catalog
+        self._script_texts: dict[int, tuple] = {}     # id(call) -> (call, the script as the shell reads it)
         self.detection = catalog.detection
         self.root = root
         extra_agents = extra_agents or {}
@@ -206,8 +1207,28 @@ class JenkinsRules:
         self.upload_steps = set(self.detection.get("jenkins_upload_steps", []))
         self.verify_cmds = [re.compile(x, re.M) for x in self.detection.get("verify_commands", [])]
         self.release_verify = [re.compile(x) for x in self.detection.get("release_verify_commands", [])]
-        self.packages = [(pkg, re.compile(r"(?<![\w@/-])" + re.escape(pkg) + r"(?P<ver>(@|==|===)[^\s;&|'\"]+)?"
-                                          r"(?=[\s;&|'\"]|$)")) for pkg in self.detection.get("agent_packages", [])]
+        # A package name, its extras (`aider-chat[playwright]`) and any version after it, in npm's form
+        # (`@1.2.3`, `@^1`, `@latest`) or PEP 440's (`==`, `~=`, `>=`, ..., spaces allowed). A name without a
+        # scope matches as pip compares names, ignoring case and runs of `-`, `_` and `.` (flagship slice 2d.2k).
+        def name_pattern(pkg: str) -> str:
+            if pkg.startswith("@"):
+                return re.escape(pkg)
+            return "(?i:" + r"[-_.]+".join(re.escape(x) for x in re.split(r"[-_.]+", pkg)) + ")"
+        self.packages = [(pkg, re.compile(r"(?<![\w@/.-])" + name_pattern(pkg) + r"(?:\[[^\]\s'\"]*\])?"
+                                          r"(?P<ver>@[^\s;&|'\"]*|[ \t]*(?:===|==|~=|!=|>=|<=|>|<)[ \t]*[^\s;&|'\"]*)?"
+                                          r"(?=[\s;&|'\",)]|$)"))
+                         for pkg in self.detection.get("agent_packages", [])]
+        self.agent_package_names = set(self.detection.get("agent_packages", []))
+        self.install_urls = [re.compile(x, re.I) for x in self.detection.get("agent_install_urls", [])]
+        self._line = 1                 # the step whose script OBAAF-JEN-008 is reading, for its unknowns
+        self._agent_installed = False  # an earlier step installed an agent CLI (for `npm update -g`)
+        self._local_images: set = set()  # tags the job builds itself
+        self._pod_cache: dict = {}
+        self._dockerfile_cache: dict = {}
+        self._script_cache: dict = {}
+        self._req_cache: dict = {}
+        self._package_cache: dict = {}
+        self._agent_words = re.compile(r"(?<![\w-])(claude|gemini|codex|opencode|aider|copilot|qodo)(?![\w])", re.I)
         self.lane_overrides = lane_overrides or {}
         self.findings: list[Finding] = []
         self.unknowns: list[Unknown] = []
@@ -218,6 +1239,7 @@ class JenkinsRules:
         self.by_agent: dict[int, list[Info]] = {}
         self.by_stage: dict[tuple, list[Info]] = {}
         self.publishing_stages: set = set()
+        self._elsewhere: set | None = None
 
     # ------------------------------------------------------------------ plumbing
     def add(self, rule: str, line: int, message: str, stage: tuple | None = None, severity: str | None = None,
@@ -261,28 +1283,43 @@ class JenkinsRules:
     # ------------------------------------------------------------------ classification
     def classify(self) -> None:
         defined = self.p.local_names
+        # A method of the file called many times records the same step once per call; what a step is
+        # depends only on its call, so it is worked out once (flagship slice 2d.2i: a 2.9 KB file of
+        # nested calls took 7.5 seconds).
+        seen: dict[int, tuple] = {}
         for index, use in enumerate(self.p.steps):
             info = Info(use, index)
             call = use.call
             name = use.name
             if name in SHELL_STEPS:
                 info.shell = True
-                info.script, info.exprs, info.dynamic = script_parts(shell_script(call))
                 if _truthy(step_arg(call, "returnStatus")):
                     info.swallowed = "returnStatus: true"
             if use.ctx.swallowed:
                 info.swallowed = use.ctx.swallowed
-            info.ai = self._ai(info)
-            info.publish = self._publish(info)
-            info.verify = self._verify(info)
-            info.push = bool(info.shell and GIT_PUSH.search(info.script))
+            hit = seen.get(id(call))
+            if hit is not None and hit[0] is call and hit[1] == name:
+                info.script, info.exprs, info.dynamic, info.ai, info.publish, info.verify, info.push = hit[2:]
+            else:
+                if info.shell:
+                    info.script, info.exprs, info.dynamic = script_parts(shell_script(call))
+                info.ai = self._ai(info)
+                info.publish = self._publish(info)
+                info.verify = self._verify(info)
+                info.push = bool(info.shell and GIT_PUSH.search(info.script))
+                seen[id(call)] = (call, name, info.script, info.exprs, info.dynamic, info.ai, info.publish,
+                                  info.verify, info.push)
             if name == "build":
                 job = named_arg(call, "job") or first_arg(call)
                 info.trigger = literal(job) or "a computed job name"
             # A call the file does not define and the checker does not know: most likely a shared-library
             # step, whose code is not in this file. Method calls on a step's result (sh(...).trim()) and
             # on local variables are not steps.
-            receiver_is_call = isinstance(call.callee, Prop) and isinstance(call.callee.target, Call)
+            receiver_is_call = isinstance(call.callee, Prop) and (
+                isinstance(call.callee.target, Call) or (
+                    # 'a,b'.split(','), "x".take(20): a method of a literal is not a step (flagship slice 2d.2);
+                    # .execute() starts a process and stays unknown code for the other rules.
+                    isinstance(call.callee.target, (Str, Num, ListLit, MapLit)) and call.callee.name != "execute"))
             base = name.split(".")[0]
             if name and not receiver_is_call and not name.startswith("new ") and name not in known.KNOWN_STEPS \
                     and base not in defined and base not in known.KNOWN_OBJECTS and name not in self.agent_steps \
@@ -331,13 +1368,16 @@ class JenkinsRules:
             return f"step {info.use.name} is declared an agent in the checker configuration"
         if not info.shell:
             return None
+        # The script as the shell reads it: continued lines joined, literal variables of this file put in
+        # (flagship slice 2d.2i: `sh cmd` and `claude \\` + `-p` on the next line were not recognised).
+        script = self.script_text(info)
         for rx in self.agent_cmds:
-            m = rx.search(info.script)
+            m = prefilter.search(rx, script)
             if m:
                 return f"runs an agent CLI ({m.group(0).strip()})"
         for rel in self._scripts(info.script):
             text = self._read(rel)
-            if text and any(rx.search(text) for rx in self.agent_cmds):
+            if text and any(prefilter.search(rx, text) for rx in self.agent_cmds):
                 return f"runs an agent in the script {rel}"
         return None
 
@@ -351,7 +1391,7 @@ class JenkinsRules:
                 return "docker push"
         if info.shell:
             for rx in self.upload_cmds:
-                m = rx.search(info.script)
+                m = prefilter.search(rx, info.script)
                 if m:
                     return m.group(0).strip()
         return None
@@ -372,7 +1412,7 @@ class JenkinsRules:
             errexit = True
         pipefail = bool(re.search(r"set\s+(-[a-z]*o\s+pipefail|-o\s+pipefail)", text))
         for pattern in self.verify_cmds:
-            for m in pattern.finditer(text):
+            for m in prefilter.finditer(pattern, text):
                 end = text.find("\n", m.end())
                 rest = text[m.end(): None if end == -1 else end]
                 before = text[: m.start()]
@@ -438,7 +1478,7 @@ class JenkinsRules:
         is not in a failure path or a sibling parallel branch, and every condition that could skip the
         check also guards the target."""
         return (check.index < target.index and not check.swallowed and check.ctx.post not in FAILURE_PATHS
-                and not concurrent(check.ctx, target.ctx) and set(check.ctx.guards) <= set(target.ctx.guards))
+                and not concurrent(check.ctx, target.ctx) and guard_keys(check) <= guard_keys(target))
 
     def bindings(self) -> dict[Binding, list[Info]]:
         out: dict[Binding, list[Info]] = {}
@@ -538,6 +1578,19 @@ class JenkinsRules:
         shown = ", ".join(f"'{o}'" for o in others[:3]) + (f" and {len(others) - 3} more" if len(others) > 3 else "")
         return f" The same binding also reaches stage(s) {shown}."
 
+    def _reviewed_text(self, node) -> bool:
+        """Code text the reviewed Jenkinsfile fixes: a string literal with no interpolation, a variable that
+        holds one, or text read with readTrusted or libraryResource (whose pin is OBAAF-JEN-008's)."""
+        if isinstance(node, Str):
+            return not node.interpolated
+        if isinstance(node, Name) and node.name in self.p.literals:
+            return not self.p.literals[node.name].interpolated and node.name not in self.p.nonliteral_names
+        if isinstance(node, Call):
+            name = chain_name(node.callee) or ""
+            return name.split(".")[-1] in ("readTrusted", "libraryResource") and \
+                not name.startswith(("new ", "Eval."))
+        return False
+
     def runs_repo_code(self, info: Info) -> bool:
         if info.ai or info.use.name.startswith("docker.build") or info.unresolved:
             return True
@@ -550,18 +1603,21 @@ class JenkinsRules:
         labels: dict[str, list] = {}
         for agent, ctx in self.p.agents:
             under = self.under(agent)
-            label = (agent.label or "").strip().lower()
-            if label in CONTROLLER_LABELS:
+            on_controller = controller_label(agent.label or "") if agent.kind != "kubernetes" else None
+            if on_controller:
                 risky = [i for i in under if i.ai or i.ctx.cr in (CR_YES, CR_POSSIBLE)]
                 severity = "high" if risky or not under else "medium"
                 why = ("steps that change requests or an AI agent can steer" if risky else
                        "steps from branches without change requests")
+                where = ("runs on the controller (label '{}')" if on_controller == "exact" else
+                         "can run on the controller (label expression '{}')").format(agent.label)
                 self.add("OBAAF-JEN-002", agent.line,
-                         f"Stage '{stage_label(ctx.stage)}' runs on the controller (label '{agent.label}'), with "
+                         f"Stage '{stage_label(ctx.stage)}' {where}, with "
                          f"{why}. Code on the built-in node can read $JENKINS_HOME, including the keys that decrypt "
                          "every stored credential.", ctx.stage, severity=severity)
             elif agent.kind in ("any", "unknown") or (agent.kind in ("label", "node") and (
-                    not agent.label or "${" in agent.label)):
+                    not agent.label or "${" in agent.label or label_terms(agent.label) is None)):
+                # A label expression that requires no label (`!windows`) selects like `agent any` (2d.2j).
                 floating.append((agent, ctx))
             elif agent.kind in ("label", "node") and agent.label:
                 labels.setdefault(agent.label, []).append((agent, ctx, under))
@@ -576,57 +1632,346 @@ class JenkinsRules:
         if floating:
             agent, ctx = floating[0]
             self.unknown("OBAAF-JEN-002", agent.line,
-                         f"{len(floating)} agent selection(s) (agent any, node without a label, or a computed label) "
+                         f"{len(floating)} agent selection(s) (agent any, node without a label, a computed label, or a label "
+                         "expression that requires none) "
                          "can place work on any agent, including the built-in node if it has executors; which agents "
                          "exist and who else uses them is controller configuration")
         # One persistent agent label shared by change-request work and privileged work.
-        for label, uses in labels.items():
-            untrusted = [(a, c) for a, c, under in uses if any(
-                i.runs_code and i.ctx.cr in (CR_YES, CR_POSSIBLE) for i in under)]
-            privileged = [(a, c) for a, c, under in uses if any(
-                i.ctx.cr == CR_NO and (i.ctx.creds or i.publish) for i in under)]
-            if untrusted and privileged:
-                a, c = privileged[0]
-                self.add("OBAAF-JEN-002", a.line,
-                         f"Agents labelled '{label}' run both work that change requests reach (stage "
-                         f"'{stage_label(untrusted[0][1].stage)}') and stage '{stage_label(c.stage)}', which holds "
-                         "credentials or publishes. Code from a change request can leave files or processes on a "
-                         "persistent agent that the privileged stage then uses.", c.stage, severity="medium")
+        # An AI agent is steered by the text it reads, so its work counts like a change request's (flagship slice
+        # 2d.2j, as the rule's own description and the unknown above already said). Work an agent alone steers
+        # pairs only with another allocation: the agent's own stage holding a credential is OBAAF-JEN-001's.
+        # Labels pair when they are the same text or require a common label (`linux && docker`, `linux`).
+        entries = [(label, label_terms(label), a, c, under) for label, uses in labels.items() for a, c, under in uses]
+        privileged = [e for e in entries if any(i.ctx.cr == CR_NO and (i.ctx.creds or i.publish) for i in e[4])]
+        if not privileged:
+            return
+        # Indexed, so a file of thousands of allocations is not compared pair by pair.
+        by_change: dict = {}
+        by_agent: dict = {}
+        term_index: dict = {}
+        for e in entries:
+            lu, tu, au, _, under = e
+            if lu not in by_change and any(i.runs_code and i.ctx.cr in (CR_YES, CR_POSSIBLE) for i in under):
+                by_change[lu] = e
+            if any(i.ai for i in under):
+                kept = by_agent.setdefault(lu, [])
+                if len(kept) < 2 and all(x[2] is not au for x in kept):
+                    kept.append(e)
+            for term in tu or ():
+                term_index.setdefault(term, set()).add(lu)
+        done: set = set()
+        for steer, table in (("change requests", by_change), ("an AI agent", by_agent)):
+            for lp, tp, ap, cp, _ in privileged:
+                if (lp, ap.line) in done:
+                    continue
+                candidates = [lp] + sorted({x for t in tp or () for x in term_index.get(t, ())} - {lp})
+                for lu in candidates:
+                    hit = table.get(lu)
+                    if hit is None:
+                        continue
+                    u = hit if steer == "change requests" else next((x for x in hit if x[2] is not ap), None)
+                    if u is None:
+                        continue
+                    tu, cu = u[1], u[3]
+                    common = (tu & tp) if tu and tp else set()
+                    done.add((lp, ap.line))
+                    labelled = (f"Agents labelled '{lp}'" if lp == lu else
+                                f"Agents labelled '{lu}' and '{lp}', which can be the same machines (both require "
+                                f"{', '.join(repr(x) for x in sorted(common))}),")
+                    if steer == "change requests":
+                        self.add("OBAAF-JEN-002", ap.line,
+                                 f"{labelled} run both work that change requests reach (stage "
+                                 f"'{stage_label(cu.stage)}') and stage '{stage_label(cp.stage)}', which holds "
+                                 "credentials or publishes. Code from a change request can leave files or processes on "
+                                 "a persistent agent that the privileged stage then uses.", cp.stage, severity="medium")
+                    else:
+                        self.add("OBAAF-JEN-002", ap.line,
+                                 f"{labelled} run both an AI agent (stage '{stage_label(cu.stage)}') and stage "
+                                 f"'{stage_label(cp.stage)}', which holds credentials or publishes. An agent steered by "
+                                 "what it reads can leave files or processes on a persistent agent that the privileged "
+                                 "stage then uses.", cp.stage, severity="medium")
+                    break
 
     # ------------------------------------------------------------------ JEN-003
+    def ws_key(self, info: Info) -> tuple:
+        """What a step shares files with (flagship slice 2d.2j): the node its workspace is on, since ws() on the
+        same node is written by the same user; when the model knows no workspace for the step, its stage and
+        that stage's post blocks, as the rule read every step before 2d.2j."""
+        if info.ctx.ws:
+            machine = self.p.workspaces[self.p.workspaces[info.ctx.ws].machine]
+            if machine.kind == "kubernetes" and machine.custom and machine.custom.startswith(("claim:", "nfs:")):
+                return ("volume", machine.custom)    # pods on one named claim share its directory
+            return ("machine", machine.id)
+        return ("stage", base_stage(info.ctx.stage))
+
+    @staticmethod
+    def may_follow(first: Info, later: Info) -> bool:
+        """Whether `later` can run after `first` in the same build: later in the file's order, in a sibling
+        parallel branch, or inside a loop, retry or waitUntil around both."""
+        if later.index > first.index or concurrent(first.ctx, later.ctx):
+            return True
+        loops = {g for g in first.ctx.guards if g.startswith("loop ")} | set(first.ctx.repeats)
+        return bool(loops & (set(later.ctx.guards) | set(later.ctx.repeats)))
+
+    @staticmethod
+    def stash_name(info: Info) -> tuple:
+        """What a stash or unstash step names, ("stash", name) with "?" for a name the file does not fix; the
+        build's own archived artifacts, which unarchive brings back, are ("archive", "?")."""
+        if info.use.name in ("archiveArtifacts", "archive", "unarchive"):
+            return ("archive", "?")
+        call = info.use.call
+        node = step_arg(call, "name")
+        if node is None and call.args and not isinstance(call.args[0], MapLit):
+            node = call.args[0]
+        return ("stash", literal(node) if node is not None and literal(node) is not None else "?")
+
+    def _where(self, info: Info) -> str:
+        w = self.p.workspaces.get(info.ctx.ws)
+        return w.how if w else "the same stage"
+
+    def _cleaned(self, agent: Info, effect: Info) -> bool:
+        """Whether the workspace is emptied between what the agent leaves in it and the effect of a later build:
+        cleanWs() or deleteDir() at its root, before the effect and certain to run, or in a post always or
+        cleanup block after the agent."""
+        for info in self._cleans.get(effect.ctx.ws, ()):
+            if self.gates(info, effect) or (info.ctx.post in ("always", "cleanup") and self.may_follow(agent, info)):
+                return True
+        return False
+
+    @staticmethod
+    def full_clean(info: Info) -> bool:
+        """deleteDir(), a checkout that wipes the workspace first, or cleanWs() (or the WsCleanup step) that empties
+        the whole workspace whatever the build's result: no patterns,
+        no external command, no condition left false (the review of slice 2d.2j: `cleanWs(patterns: ...)` and
+        `cleanWhenSuccess: false` keep `.git`)."""
+        if info.ctx.dir:
+            return False
+        if info.use.name == "deleteDir":
+            return True
+        call = info.use.call
+        entries_all = list(call.named) + ([(k, v) for k, v in call.args[0].entries]
+                                          if call.args and isinstance(call.args[0], MapLit) else [])
+        if info.use.name == "checkout":
+            # extensions: [[$class: 'WipeWorkspace']] (or wipeWorkspace()) deletes the workspace before checkout;
+            # CleanBeforeCheckout runs `git clean`, which keeps .git.
+            return any(literal(n) == "WipeWorkspace" or (isinstance(n, Call) and callee_name(n) == "wipeWorkspace")
+                       for _, v in entries_all for n in find_nodes(v, lambda x: isinstance(x, (Str, Call)), 500))
+        if info.use.name == "step":
+            if not any((k if isinstance(k, str) else literal(k)) == "$class" and literal(v) in (
+                    "WsCleanup", "hudson.plugins.ws_cleanup.WsCleanup") for k, v in entries_all):
+                return False
+        elif info.use.name != "cleanWs":
+            return False
+        for key, value in entries_all:
+            key = key if isinstance(key, str) else literal(key)
+            if key in ("patterns", "externalDelete"):
+                return False
+            if key == "skipWhenFailed" and path_of(value) != "false":
+                return False
+            if (key or "").startswith("cleanWhen") and path_of(value) != "true":
+                return False
+        return True
+
+    def _may_share_machine(self, a: Info, b: Info) -> bool:
+        """Whether two steps in separate allocations may still run on the same agent, where Jenkins keeps a
+        job's workspace directory between allocations: neither is a pod of its own, and their labels do not
+        tell their agents apart (the same label, any agent, or one the file does not fix)."""
+        if not a.ctx.ws or not b.ctx.ws:
+            return False
+        wa = self.p.workspaces[self.p.workspaces[a.ctx.ws].machine]
+        wb = self.p.workspaces[self.p.workspaces[b.ctx.ws].machine]
+        if wa.id == wb.id:
+            return False       # one allocation: decided above, not a question of which agent
+        kinds = {wa.kind, wb.kind}
+        if "closure" in kinds:
+            return False
+        if "kubernetes" in kinds:
+            # A pod is the build's own, unless its workspace volume outlives it and another pod mounts the same.
+            return kinds == {"kubernetes"} and bool(wa.custom and wb.custom) and (
+                wa.custom == wb.custom or "?" in (wa.custom, wb.custom))
+        if kinds & {"any", "unknown", "context"}:
+            return True
+        if wa.custom and wa.custom == wb.custom:
+            return True
+        da, db = self.p.workspaces[a.ctx.ws], self.p.workspaces[b.ctx.ws]
+        if da.kind == db.kind == "ws" and (da.custom == db.custom or "?" in (da.custom, db.custom)):
+            return True        # ws() with the same path
+        la, lb = wa.label, wb.label
+        if la is None or lb is None or "${" in la or "${" in lb:
+            return True
+        ta, tb = label_terms(la), label_terms(lb)
+        # Expressions that share a label they require (`linux && docker`, `linux`) can select the same agent.
+        return ta is None or tb is None or bool(ta & tb)
+
+    def redundant(self, info: Info) -> bool:
+        """A step read where its closure is written, when the closure is also read where it is called (flagship
+        slice 2d.2j): the call is where it runs, so the reading where it is written adds nothing."""
+        w = self.p.workspaces.get(info.ctx.ws)
+        if w is None or w.kind != "closure":
+            return False
+        if self._elsewhere is None:
+            self._elsewhere = {id(i.use.call) for i in self.infos
+                               if self.p.workspaces.get(i.ctx.ws) is None
+                               or self.p.workspaces[i.ctx.ws].kind != "closure"}
+        return id(info.use.call) in self._elsewhere
+
     def agent_effects(self) -> None:
-        # A stage and its own post blocks share a workspace.
-        groups: dict[tuple, list[Info]] = {}
+        ai = [i for i in self.infos if i.ai and not self.redundant(i)]
+        if not ai:
+            return
+        self.applicable.add("OBAAF-JEN-003")
+        self._cleans: dict[int, list] = {}
         for info in self.infos:
-            groups.setdefault(base_stage(info.ctx.stage), []).append(info)
-        for stage, infos in groups.items():
-            ai = [i for i in infos if i.ai]
-            if not ai:
-                continue
-            self.applicable.add("OBAAF-JEN-003")
-            for info in infos:
-                if info.ai and not (info.push or info.trigger or info.publish):
+            if self.full_clean(info):
+                self._cleans.setdefault(info.ctx.ws, []).append(info)
+        # Where what an agent wrote may be: the workspace it ran in, from that step on, and any workspace that
+        # unstashes a stash taken there after the agent ran, or unarchives what was archived there (flagship
+        # slice 2d.2j). Each source is (key, from step, agent, via), indexed by key.
+        sources: list[tuple] = [(self.ws_key(i), i, i, None) for i in ai]
+        by_key: dict[tuple, list] = {}
+        for item in sources:
+            by_key.setdefault(item[0], []).append(item)
+        stashes: dict[tuple, list] = {}
+        for i in self.infos:
+            if i.use.name in ("stash", "archiveArtifacts", "archive"):
+                stashes.setdefault(self.ws_key(i), []).append(i)
+        unstashes = [i for i in self.infos if i.use.name in ("unstash", "unarchive")]
+        seen = {(key, src.index) for key, src, _, _ in sources}
+        queue = list(sources)
+        while queue:
+            key, src, agent, _ = queue.pop()
+            for st in stashes.get(key, ()):
+                if not (st is src or self.may_follow(src, st)):
                     continue
-                effect = ("pushes to the repository" if info.push else
-                          f"starts job {info.trigger} (as SYSTEM unless build authorization is configured)"
-                          if info.trigger else f"publishes ({info.publish})" if info.publish else None)
-                if effect:
+                kind, name = self.stash_name(st)
+                for un in unstashes:
+                    other_kind, other = self.stash_name(un)
+                    if kind != other_kind or (name != other and "?" not in (name, other)) or \
+                            not self.may_follow(st, un):
+                        continue
+                    target = self.ws_key(un)
+                    if (target, un.index) in seen:
+                        continue
+                    seen.add((target, un.index))
+                    item = (target, un, agent, (st, un))
+                    by_key.setdefault(target, []).append(item)
+                    queue.append(item)
+        shared_cache: dict[tuple, bool] = {}
+        # One AI step for each workspace stands for the others in the question of which machine it may be.
+        ai_by_machine = list({i.ctx.ws: i for i in reversed(ai) if i.ctx.ws}.values())[::-1]
+        for info in self.infos:
+            if not (info.push or info.trigger or info.publish) or self.redundant(info):
+                continue
+            effect = ("pushes to the repository" if info.push else
+                      f"starts job {info.trigger} (as SYSTEM unless build authorization is configured)"
+                      if info.trigger else f"publishes ({info.publish})")
+            key = self.ws_key(info)
+            here = by_key.get(key, [])
+            stage = base_stage(info.ctx.stage)
+            if key[0] == "stage":
+                # No workspace known: every agent of the stage counts, in any order, as before slice 2d.2j.
+                direct = [s for s in here if s[3] is None]
+                if direct:
                     self.add("OBAAF-JEN-003", info.line,
-                             f"Stage '{stage_label(stage)}' runs an AI agent at line {ai[0].line} and the step at line "
-                             f"{info.line} {effect}, in the same workspace. What the agent wrote or was told can reach "
-                             "that effect without review.", stage, severity="high")
+                             f"Stage '{stage_label(stage)}' runs an AI agent at line {direct[0][2].line} and the step at "
+                             f"line {info.line} {effect}, in the same workspace. What the agent wrote or was told can "
+                             "reach that effect without review.", stage, severity="high")
+                    continue
+            after = [s for s in here if s[1] is info or self.may_follow(s[1], info)]
+            direct = [s for s in after if s[3] is None]
+            if direct:
+                agent = direct[0][2]
+                if base_stage(agent.ctx.stage) == stage and agent.ctx.ws == info.ctx.ws:
+                    message = (f"Stage '{stage_label(stage)}' runs an AI agent at line {agent.line} and the step at line "
+                               f"{info.line} {effect}, in the same workspace.")
+                elif key[0] == "volume" and agent.ctx.ws != info.ctx.ws:
+                    kind, _, name = key[1].partition(":")
+                    shown = f"claim '{name}'" if kind == "claim" else f"NFS export '{name}'"
+                    message = (f"The step at line {info.line} in stage '{stage_label(stage)}' {effect} in a pod whose "
+                               f"workspace is the same volume ({shown}) as the AI agent's at line {agent.line} in stage "
+                               f"'{stage_label(base_stage(agent.ctx.stage))}'.")
+                elif agent.ctx.ws == info.ctx.ws:
+                    message = (f"The step at line {info.line} in stage '{stage_label(stage)}' {effect}, in the same "
+                               f"workspace as the AI agent at line {agent.line} in stage "
+                               f"'{stage_label(base_stage(agent.ctx.stage))}' ({self._where(agent)}).")
+                else:
+                    message = (f"The step at line {info.line} in stage '{stage_label(stage)}' {effect} in another "
+                               f"workspace ({self._where(info)}) on the same node as the AI agent at line {agent.line} in "
+                               f"stage '{stage_label(base_stage(agent.ctx.stage))}', which runs as the same user and can "
+                               "write into it.")
+                self.add("OBAAF-JEN-003", info.line, message + " What the agent wrote or was told can reach that effect "
+                         "without review.", stage, severity="high")
+                continue
+            if after:
+                _, un, agent, (st, _) = after[0]
+                kind, name = self.stash_name(st)
+                what = (f"stash '{name}', taken" if kind == "stash" and name != "?" else
+                        "a stash whose name the file does not fix, taken" if kind == "stash" else "artifacts archived")
+                self.add("OBAAF-JEN-003", info.line,
+                         f"The step at line {info.line} in stage '{stage_label(stage)}' {effect}, after {un.use.name} at "
+                         f"line {un.line} brings in {what} at line {st.line} after the AI agent at line {agent.line} in "
+                         f"stage '{stage_label(base_stage(agent.ctx.stage))}' ran in that workspace. What the agent "
+                         "wrote can reach that effect without review.", stage, severity="high")
+                continue
+            before = [s for s in here if s[3] is None]
+            fresh = info.ctx.ws and self.p.workspaces[info.ctx.ws].kind == "kubernetes" and \
+                not self.p.workspaces[info.ctx.ws].custom
+            kept = [s for s in before if not fresh and not self._cleaned(s[2], info)]
+            if kept:
+                agent = kept[0][2]
+                self.add("OBAAF-JEN-003", info.line,
+                         f"The step at line {info.line} in stage '{stage_label(stage)}' {effect} before the AI agent at "
+                         f"line {agent.line} in stage '{stage_label(base_stage(agent.ctx.stage))}' runs in the same "
+                         "workspace. Jenkins keeps that workspace between builds, so what the agent leaves there (a Git "
+                         "hook, .git/config, a script the step runs) is in place for this step in the next build, "
+                         "unless the step runs after cleanWs() or deleteDir() or in a fresh pod.", stage,
+                         severity="medium")
+                continue
+            for agent in ai_by_machine:
+                pair = (agent.ctx.ws, info.ctx.ws)
+                if pair not in shared_cache:
+                    if len(shared_cache) > 200_000:
+                        self.unknown("OBAAF-JEN-003", 1, "the file has too many allocations to compare each AI "
+                                     "agent's with each effect's")
+                        break
+                    shared_cache[pair] = self._may_share_machine(agent, info)
+                if shared_cache[pair]:
+                    self.unknown("OBAAF-JEN-003", info.line,
+                                 f"the AI agent at line {agent.line} (stage '{stage_label(base_stage(agent.ctx.stage))}') "
+                                 f"and the step at line {info.line} that {effect.split(' (')[0]} run in separate "
+                                 "allocations that may be the same agent, where Jenkins keeps the job's workspace "
+                                 "directory between allocations; which agents carry which labels is controller "
+                                 "configuration")
+                    break
 
     # ------------------------------------------------------------------ JEN-004
     def pipeline_code(self) -> None:
         self.applicable.add("OBAAF-JEN-004")
         for lib in self.p.libraries:
+            shown = _shown(lib.name + (f"@{lib.version}" if lib.version else ""))
+            if lib.retriever == "self":
+                self.add("OBAAF-JEN-004", lib.line,
+                         f"Library '{shown}' is loaded with legacySCM(scm), from the build's own checkout. For a "
+                         "change request that is the change's own code, so its author chooses the library code that "
+                         "runs.", None, severity="high")
+            elif lib.retriever == "computed":
+                source = lib.retriever_source
+                self.add("OBAAF-JEN-004", lib.line,
+                         f"Library '{shown}' is fetched by a retriever built from "
+                         + (f"{source[0]}, so whoever sets that value chooses" if source else
+                            "values computed at run time, so the reviewed Jenkinsfile does not fix")
+                         + " where the library's code comes from.", None,
+                         severity="high" if source else "medium")
             if lib.name == "?":
                 self.unknown("OBAAF-JEN-004", lib.line, f"{lib.how} names a library computed at run time")
                 continue
             if lib.dynamic:
                 what = "a name" if "${" in lib.name else "a version"
                 source = untrusted_source(list(lib.exprs), self.p)
-                shown = lib.name + (f"@{lib.version}" if lib.version else "")
+                if source is None and any(WORKSPACE_READ.search(x) or set(re.findall(r"[A-Za-z_]\w*", x)) &
+                                          self.p.workspace_vars for x in lib.exprs):
+                    # A file in the workspace is the change's own for a change request (flagship slice 2d.2k).
+                    source = ("a file in the workspace", "high")
                 if source:
                     self.add("OBAAF-JEN-004", lib.line,
                              f"Library '{shown}' is loaded with {what} taken from {source[0]}, so whoever sets that "
@@ -636,28 +1981,49 @@ class JenkinsRules:
                     self.add("OBAAF-JEN-004", lib.line,
                              f"Library '{shown}' is loaded with {what} computed at run time, so the reviewed "
                              "Jenkinsfile does not fix which code runs.", None, severity="medium")
-        for info in self.infos:
-            if info.use.name not in ("load", "evaluate"):
+        # Every call that runs Groovy the file does not hold, on any receiver (flagship slice 2d.2k).
+        for kind, name, call, ctx, certain in self.p.code_loads:
+            if not certain:
+                # props.load(...), xpath.evaluate(...): a receiver that may not be the script or a Groovy shell.
+                self.unknown("OBAAF-JEN-004", call.line, f"{name}() at line {call.line} may run Groovy text or a "
+                             "file from the workspace; the checker cannot tell what its receiver is")
                 continue
-            arg = first_arg(info.use.call)
-            if info.use.name == "evaluate":
-                inner = chain_name(arg.callee) if isinstance(arg, Call) else None
-                if inner == "readTrusted" or isinstance(arg, Str):
+            arg = code_text_arg(kind, name, call)
+            if kind == "jobDsl":
+                if named_arg(call, "targets") is None and arg is not None and self._reviewed_text(arg):
                     continue
-            cr = info.ctx.cr
-            what = (f"loads Groovy from the workspace ({literal(arg) or 'a computed path'})"
-                    if info.use.name == "load" else "evaluates Groovy text read at run time")
+                what = ("runs Job DSL scripts from the workspace on the controller"
+                        if named_arg(call, "targets") is not None or arg is None else
+                        "runs Job DSL script text read at run time on the controller")
+            elif kind == "evaluate":
+                if arg is not None and self._reviewed_text(arg):
+                    continue
+                what = f"evaluates Groovy text read at run time ({name})"
+            else:
+                what = f"loads Groovy from the workspace ({_shown(literal(arg)) if literal(arg) else 'a computed path'})"
+            cr = ctx.cr
+            source = untrusted_source(source_texts(arg), self.p) if kind != "load" and arg is not None else None
+            if source is not None:
+                # Text built from a parameter or a change's text: whoever sets it writes the code, on any
+                # branch (flagship slice 2d.2k: `evaluate("${params.GROOVY}")` was only "unknown").
+                self.add("OBAAF-JEN-004", call.line,
+                         f"Stage '{stage_label(ctx.stage)}' runs Groovy built from {source[0]} ({name}), so whoever "
+                         "sets that value writes pipeline code.", ctx.stage,
+                         severity="high" if source[1] == "high" or kind == "jobDsl" else "medium")
+                continue
             if cr in (CR_YES, CR_POSSIBLE):
-                privileged = bool(info.ctx.creds) or self.stage_publishes(info.ctx.stage)
-                self.add("OBAAF-JEN-004", info.line,
-                         f"Stage '{stage_label(info.ctx.stage)}' {what}. For a change request the workspace holds the "
+                privileged = bool(ctx.creds) or self.stage_publishes(ctx.stage) or kind == "jobDsl"
+                self.add("OBAAF-JEN-004", call.line,
+                         f"Stage '{stage_label(ctx.stage)}' {what}. For a change request the workspace holds the "
                          "change's own files, so its author controls this pipeline code even when Jenkins takes the "
                          "Jenkinsfile from a trusted branch" + (", and the code runs where credentials are bound."
-                                                               if privileged else "."),
-                         info.ctx.stage, severity="high" if privileged or cr == CR_YES else "medium")
+                                                               if ctx.creds or self.stage_publishes(ctx.stage) else
+                                                               ", and Job DSL can create and change jobs."
+                                                               if kind == "jobDsl" else "."),
+                         ctx.stage, severity="high" if privileged or cr == CR_YES else "medium")
             elif cr == CR_UNKNOWN:
-                self.unknown("OBAAF-JEN-004", info.line,
-                             f"{info.use.name} at line {info.line} runs under a condition the checker cannot evaluate")
+                self.unknown("OBAAF-JEN-004", call.line,
+                             f"{name} at line {call.line} runs under a condition the checker cannot evaluate")
         if self.p.libraries:
             self.unknown("OBAAF-JEN-004", self.p.libraries[0].line,
                          "whether each library is trusted (global, outside the sandbox) or untrusted (folder), and "
@@ -668,25 +2034,76 @@ class JenkinsRules:
                          "credentials; whether that permission is restricted is controller configuration")
 
     # ------------------------------------------------------------------ JEN-005
+    def approval_gates(self, check: Info, target: Info) -> bool:
+        """Whether an input step stops `target` until someone approves (flagship slice 2d.2l): it runs before
+        it on every path that reaches it, and an abort stops the build or skips the target. As `gates`, except
+        that an input in the same catchError or try block as the target, before it, still skips it when
+        aborted; and an input read where a closure or an uncalled method is written does not count."""
+        if check.ctx.deferred or check.index >= target.index or target.ctx.post in FAILURE_PATHS:
+            return False      # a publish in a failure path runs when the input is aborted
+        if check.swallowed and not (check.swallowed == check.ctx.swallowed and check.ctx.swallow_id
+                                    and check.ctx.swallow_id == target.ctx.swallow_id):
+            return False      # caught, unless the abort skips the rest of the very block the publish is in
+        return (check.ctx.post not in FAILURE_PATHS and not concurrent(check.ctx, target.ctx)
+                and guard_keys(check) <= guard_keys(target))
+
     def approvals(self) -> None:
         publishes = [i for i in self.infos if i.publish]
         if publishes or self.p.approvals:
             self.applicable.add("OBAAF-JEN-005")
         for approval in self.p.approvals:
+            names = [n.strip(JAVA_TRIM) for n in (approval.submitter or "").split(",")]
             if approval.submitter is None:
                 self.add("OBAAF-JEN-005", approval.line,
-                         f"The input step at line {approval.line} sets no submitter, so any user with Build permission "
-                         "on the job can approve it, including the person who started the build.",
-                         approval.ctx.stage, severity="medium")
+                         f"The input step at line {approval.line} sets no submitter (or a blank one), so any user "
+                         "with Build permission on the job can approve it, including the person who started the "
+                         "build.", approval.ctx.stage, severity="medium")
             elif approval.submitter == "?":
                 self.unknown("OBAAF-JEN-005", approval.line, "the input step's submitter list is computed at run time")
-        if publishes:
-            first = publishes[0]
-            gates = [i for i in self.infos if i.use.name == "input" and i.index < first.index]
-            if not gates:
-                self.add("OBAAF-JEN-005", first.line,
-                         f"Stage '{stage_label(first.ctx.stage)}' publishes ({first.publish}) with no input step before "
-                         "it, so no person approves the release in the pipeline.", first.ctx.stage,
+            elif any(n.casefold() == "authenticated" for n in names):
+                self.add("OBAAF-JEN-005", approval.line,
+                         f"The input step at line {approval.line} names the group 'authenticated' as a submitter, "
+                         "which every signed-in user is in, so the person who started the build can approve it.",
+                         approval.ctx.stage, severity="medium")
+        inputs = [i for i in self.infos if i.use.name == "input"]
+        # A step the checker could not read, or a call it did not expand, may hold the input.
+        incomplete = bool(self.p.opaque)
+        reported: set = set()
+        for target in publishes:
+            if target.ctx.stage in reported or any(self.approval_gates(i, target) for i in inputs):
+                continue
+            label = stage_label(target.ctx.stage)
+            if target.ctx.deferred:
+                # Read where the closure or method is written; where it runs (after an input or not) is not read.
+                if not any(t.use.call is target.use.call and not t.ctx.deferred for t in publishes):
+                    self.unknown("OBAAF-JEN-005", target.line,
+                                 f"the publish at line {target.line} is in {target.ctx.deferred}; whether an input "
+                                 "step stops it until someone approves depends on where that code runs")
+                continue
+            if target.ctx.post in FAILURE_PATHS:
+                where = "a catch or finally block" if target.ctx.post == "catch/finally" else \
+                    f"a post {{ {target.ctx.post} }} block"
+                reported.add(target.ctx.stage)
+                self.add("OBAAF-JEN-005", target.line,
+                         f"Stage '{label}' publishes ({target.publish}) in {where}, which runs when an approval "
+                         "is aborted or a step fails, so no input step stops it.", target.ctx.stage,
+                         severity="medium")
+            elif incomplete:
+                self.unknown("OBAAF-JEN-005", target.line,
+                             f"the publish at line {target.line} has no input step before it that the checker "
+                             "read, but part of the file was not read, and it may hold one")
+            elif [i for i in inputs if i.index < target.index]:
+                reported.add(target.ctx.stage)
+                self.add("OBAAF-JEN-005", target.line,
+                         f"Stage '{label}' publishes ({target.publish}) and no input step stops it on every path: "
+                         "each input before it is caught when aborted, may be skipped by a condition, runs in "
+                         "another parallel branch or a failure path, or is in code that may not run there.",
+                         target.ctx.stage, severity="medium")
+            else:
+                reported.add(target.ctx.stage)
+                self.add("OBAAF-JEN-005", target.line,
+                         f"Stage '{label}' publishes ({target.publish}) with no input step before "
+                         "it, so no person approves the release in the pipeline.", target.ctx.stage,
                          severity="medium")
         if self.p.approvals:
             self.unknown("OBAAF-JEN-005", self.p.approvals[0].line,
@@ -701,19 +2118,26 @@ class JenkinsRules:
             self.applicable.add("OBAAF-JEN-006")
             problems: list[str] = []
             if agent.args:
-                problems += [label for rx, label in DOCKER_HOST_ARGS if rx.search(agent.args)]
-                if "${" in agent.args:
-                    self.unknown("OBAAF-JEN-006", agent.line, "docker run options are computed at run time")
+                found, unread, _ = docker_options(agent.args)
+                problems += found
+                for reason in unread:
+                    self.unknown("OBAAF-JEN-006", agent.line, reason)
             pod = self.pod_spec(agent, "OBAAF-JEN-006")
             under = self.under(agent)
-            if pod:
-                problems += [label for rx, label in POD_HOST_SETTINGS if rx.search(pod)]
-                account = re.search(r"^\s*serviceAccount(?:Name)?:\s*['\"]?([\w.-]+)", pod, re.M)
+            problems += agent.pod_settings
+            if pod is None and agent.kind == "kubernetes" and not (agent.yaml_ref is not None or agent.yaml_file
+                                                                   or agent.inherit):
+                pod = ""      # no pod spec at all: the plugin's default pod, which mounts the token (2d.2j)
+            if pod is not None:
+                settings, account, no_token, unread = pod_settings(pod)
+                problems += settings
+                for reason in unread:
+                    self.unknown("OBAAF-JEN-006", agent.line, reason)
                 if account:
                     self.unknown("OBAAF-JEN-006", agent.line,
-                                 f"the pod runs as service account '{account.group(1)}', whose permissions are cluster "
+                                 f"the pod runs as service account '{account}', whose permissions are cluster "
                                  "configuration")
-                elif any(i.ai for i in under) and not re.search(r"automountServiceAccountToken:\s*false", pod):
+                elif any(i.ai for i in under) and not no_token:
                     problems.append("the namespace's service account token, mounted by default")
             if agent.inherit:
                 shown = f"'{agent.inherit}'" if agent.inherit != "?" else "computed at run time"
@@ -750,13 +2174,41 @@ class JenkinsRules:
         return None
 
     # ------------------------------------------------------------------ JEN-007
+    @staticmethod
+    def no_network(info: Info) -> bool | list:
+        """Whether a step's process runs inside a container started with no network (flagship slice 2d.2j): a
+        shell step under a docker or dockerfile agent, or docker.image().inside, whose run options fix one
+        network, `none`, and hold nothing that reaches the host (OBAAF-JEN-006's reading), so the process cannot
+        give itself a route out. Docker Pipeline puts only the processes a step launches in the container: a
+        step the plugin runs itself (aiAgent) is not in it. Host paths mounted besides the workspace may hold a
+        socket, a way out whatever the network: then the list of those paths, for the message."""
+        agent = info.ctx.agent
+        if not info.shell or agent is None or agent.kind not in ("docker", "dockerfile") or not agent.args:
+            return False
+        problems, unread, networks = docker_options(agent.args)
+        if networks != ["none"] or problems or unread:
+            return False
+        mounts = docker_bind_sources(agent.args)
+        return mounts or True
+
     def agent_egress(self) -> None:
         declared = "OBAAF_EGRESS" in self.p.env_values
         for stage, infos in self.stages().items():
-            ai = [i for i in infos if i.ai]
+            ai = [i for i in infos if i.ai and not self.redundant(i)]
             if not ai:
                 continue
             self.applicable.add("OBAAF-JEN-007")
+            states = [self.no_network(i) for i in ai]
+            if all(state is True for state in states):
+                continue
+            if all(states):
+                mounts = sorted({m for state in states if isinstance(state, list) for m in state})
+                shown = ", ".join(mounts[:3]) + (f" and {len(mounts) - 3} more" if len(mounts) > 3 else "")
+                self.add("OBAAF-JEN-007", ai[0].line,
+                         f"The AI agent in stage '{stage_label(stage)}' runs in a container started with --network "
+                         f"none, but host paths are mounted into it ({shown}). A socket there is a way out whatever "
+                         "the network, and what listens on it is not in the Jenkinsfile.", stage)
+                continue
             note = (" OBAAF_EGRESS declares a policy, but a declaration is not enforcement." if declared else "")
             self.add("OBAAF-JEN-007", ai[0].line,
                      f"Nothing in the Jenkinsfile limits the network access of the AI agent in stage "
@@ -764,6 +2216,627 @@ class JenkinsRules:
                      f"the agent's network (for example a Kubernetes NetworkPolicy).{note}", stage)
 
     # ------------------------------------------------------------------ JEN-008
+    def _resolve(self, text: str, shell_vars: dict | None = None, groovy: bool = False, env: bool = True) -> str:
+        """`${env.NAME}`, `${NAME}` and `$NAME` replaced by what the file fixes (flagship slice 2d.2k): a
+        variable the script set earlier to one literal (`shell_vars`; None there means the script sets it
+        otherwise, and a "*" entry that it ran eval or sourced a file that may set anything); else, for `${NAME}` when Groovy
+        interpolates the text (`groovy`), a variable of the file; else, when `env`, an environment value.
+        `${env.NAME}` is always the environment value. A name the file assigns anything but one literal,
+        anywhere (two different literals included), is not put in. What is left with a `$` is computed.
+        Bounded: three passes, and no pass adds more than 100,000 characters."""
+        shell_vars = shell_vars or {}
+
+        def from_node(node):
+            return node.text() if isinstance(node, Str) and not node.interpolated else None
+
+        def value(m):
+            if m.group(1):
+                name = m.group(1)
+                return None if name in self.p.nonliteral_names else from_node(self.p.env_values.get(name))
+            name, braced = m.group(2) or m.group(3), bool(m.group(2))
+            if name in shell_vars:
+                return shell_vars[name]
+            if "*" in shell_vars or name in self.p.nonliteral_names:
+                return None       # after eval or a sourced file, or a name given more than one value
+            if braced and groovy and name in self.p.literals:
+                return from_node(self.p.literals[name])
+            return from_node(self.p.env_values.get(name)) if env else None
+
+        for _ in range(3):
+            budget = [100_000]
+
+            def sub(m):
+                got = value(m)
+                if got is None or len(got) > budget[0]:
+                    return m.group(0)
+                budget[0] -= len(got)
+                return got
+
+            changed = _REF.sub(sub, text)
+            if changed == text:
+                break
+            text = changed
+        return text
+
+    def _env_vars(self) -> dict:
+        """The environment values the file sets once to a literal, as a script's starting variables: a
+        command of the script that sets one again, or sources a file, overrides them in order."""
+        return {name: node.text() for name, node in self.p.env_values.items()
+                if isinstance(node, Str) and not node.interpolated and name not in self.p.nonliteral_names}
+
+    @staticmethod
+    def _prepared(text: str, shell: str = "sh") -> str:
+        """A script as its shell reads it: full-line comments dropped first (a comment's last character does
+        not continue it, the second review of 2d.2k), then lines continued with the shell's own character
+        joined: a backslash for sh, `^` for bat, a backtick for PowerShell."""
+        comment = "rem" if shell == "bat" else "#"
+        lines = [x for x in text.splitlines()
+                 if not (x.lstrip().lower().startswith(comment) or (shell == "bat" and x.lstrip().startswith("::")))]
+        joiner = {"bat": "^", "powershell": "`", "pwsh": "`"}.get(shell, "\\")
+        # Only an odd run of the character continues a line: `echo done\\` ends with an escaped backslash.
+        return re.sub("(" + re.escape(joiner) + r"+)\r?\n[ \t]*",
+                      lambda m: m.group(1)[:-1] + " " if len(m.group(1)) % 2 else m.group(0), "\n".join(lines))
+
+    def _pin_script(self, info: Info) -> str:
+        """The step's script for OBAAF-JEN-008: as the shell reads it, with what the file fixes put in.
+        Groovy's own variables go in only when Groovy interpolates the script (a double-quoted string)."""
+        node = shell_script(info.use.call)
+        interpolated = isinstance(node, Str) and node.interpolated
+        return self._resolve(self._prepared(info.script, info.use.name), groovy=interpolated, env=False)
+
+    def _image(self, ref, line: int, stage: tuple | None, where: str, severity: str, groovy: bool = True) -> None:
+        """One image reference: pinned to a digest, computed (unknown), or a finding. `groovy` is False for
+        an image a shell command names, where the file's Groovy variables are not seen."""
+        self.applicable.add("OBAAF-JEN-008")
+        if ref is None:
+            self.unknown("OBAAF-JEN-008", line, f"an image {where} is not written as text")
+            return
+        if "$" in ref:
+            ref = self._resolve(ref, groovy=groovy)
+        if "$" in ref or not ref.strip() or ref == "?":
+            self.unknown("OBAAF-JEN-008", line, f"image reference '{_shown(ref)}' {where} is computed at run time")
+        elif not PINNED_IMAGE.match(ref.strip()):
+            self.add("OBAAF-JEN-008", line, f"Image '{_shown(ref)}' {where} is not pinned to a sha256 digest.", stage,
+                     severity=severity)
+
+    def _pod_images(self, text: str) -> list | None:
+        """Every `image` a pod spec names, read as YAML (flagship slice 2d.2k: a line pattern missed flow
+        mappings, JSON, quoted keys and `image :`, and took a block scalar's `>-` for the image). None when
+        the text is not YAML the checker can read; an image that is not text is None in the list. Read once
+        per text."""
+        if text in self._pod_cache:
+            return self._pod_cache[text]
+        self._pod_cache[text] = None
+        try:
+            docs = list(yaml.load_all(text, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader)))
+        except Exception:      # any parse failure is "cannot read", never "no images"
+            return None
+        out: list = []
+        stack, seen, visits = list(docs), set(), 0
+        while stack:
+            node = stack.pop()
+            visits += 1
+            if visits > 50_000:
+                return None
+            if isinstance(node, (dict, list)):
+                if id(node) in seen:       # an alias: the same object, read once
+                    continue
+                seen.add(id(node))
+            if isinstance(node, dict):
+                for key, item in node.items():
+                    if key == "image":
+                        out.append(item if isinstance(item, str) else None)
+                    else:
+                        stack.append(item)
+            elif isinstance(node, list):
+                stack.extend(node)
+        self._pod_cache[text] = out
+        return out
+
+    def _dockerfile_refs(self, rel: str, build_args: dict | None) -> list:
+        """What a Dockerfile in the repository pulls in (flagship slice 2d.2k: `dockerfile true` and
+        docker.build were never read): ("image", ref), ("unknown", why) and ("install", message) entries,
+        read once per file and build arguments. ARGs before the first FROM, with build arguments over their
+        defaults, feed FROM lines; a stage's ARG and ENV values feed its RUN lines; heredoc bodies belong to
+        their instruction; a stage name is not an image."""
+        key = (rel, tuple(sorted((build_args or {}).items())))
+        if key in self._dockerfile_cache:
+            return self._dockerfile_cache[key]
+        out: list = []
+        self._dockerfile_cache[key] = out
+        text = self._read(rel) if rel != "?" else None
+        if text is None:
+            out.append(("unknown", "the Dockerfile " + (f"'{_shown(rel)}' is not in the repository checkout"
+                                                       if rel != "?" else "is named at run time")))
+            return out
+        build_args = build_args or {}
+        # Comment lines go before continuations are joined, as BuildKit does; `# escape=` sets the character.
+        escape = "\\"
+        for first in text.splitlines():              # parser directives: leading `# key=value` lines
+            directive = re.match(r"[ \t]*#[ \t]*([A-Za-z]+)[ \t]*=[ \t]*(\S*)", first)
+            if not directive:
+                break
+            if directive.group(1).lower() == "escape" and directive.group(2):
+                escape = directive.group(2)[0]
+        kept = [x for x in text.splitlines() if not x.lstrip().startswith("#")]
+        lines = re.sub(re.escape(escape) + r"[ \t]*\r?\n", " ", "\n".join(kept)).splitlines()
+        aliases: set = set()
+        global_args: dict = {}
+        stage_vars: dict = {}
+        env_names: set = set()
+        seen_from = False
+        i = 0
+        while i < len(lines):
+            raw = lines[i]
+            i += 1
+            m = re.match(r"[ \t]*([A-Za-z]+)[ \t]+(.*)", raw)
+            if not m or raw.lstrip().startswith("#"):
+                continue
+            word, rest = m.group(1).upper(), m.group(2).strip()
+            body = []
+            for doc in (_HEREDOC.finditer(rest) if word in ("RUN", "COPY", "ADD") else ()):
+                strip_tabs, end_word = doc.group(1) == "-", doc.group(2)
+                while i < len(lines):
+                    got = lines[i]
+                    i += 1
+                    if (got.lstrip("\t") if strip_tabs else got) == end_word:
+                        break
+                    body.append(got)
+            if word == "ARG":
+                name, eq, default = rest.partition("=")
+                name = name.strip()
+                value = build_args.get(name, default.strip().strip("'\"") if eq else None)
+                if not seen_from:
+                    global_args[name] = value
+                elif name not in env_names:          # an ENV of the same name wins over an ARG
+                    stage_vars[name] = value if value is not None else global_args.get(name)
+                continue
+            if word == "ENV":
+                pairs = [(em.group(1), em.group(2).strip("'\"")) for em in
+                         re.finditer(r"([A-Za-z_]\w*)=(\"[^\"]*\"|'[^']*'|\S*)", rest)]
+                if "=" not in rest and len(rest.split(None, 1)) == 2:
+                    pairs = [tuple(x.strip() for x in rest.split(None, 1))]
+                for name, value in pairs:
+                    stage_vars[name] = value
+                    env_names.add(name)
+                continue
+            if word == "RUN" and rest.startswith("["):
+                try:                                  # exec form: RUN ["npm", "install", ...]
+                    rest = " ".join(str(x) for x in json.loads(rest))
+                except (ValueError, TypeError, RecursionError):
+                    pass
+            if word == "RUN":
+                for mount in re.finditer(r"--mount=\S*?\bfrom=([^,\s]+)", rest):
+                    if mount.group(1).lower() not in aliases and not mount.group(1).isdigit():
+                        out.append(("image", mount.group(1)))
+                known = {k: v for k, v in stage_vars.items() if v is not None and "$" not in v}
+                for message in self._install_problems(rest + "\n" + "\n".join(body), shell_vars=known):
+                    out.append(("install", f"{message} (in {_shown(rel)})"))
+                continue
+            if word in ("COPY", "ADD"):
+                for fm in re.finditer(r"--from=(\S+)", rest):
+                    ref = fm.group(1)
+                    if ref.lower() not in aliases and not ref.isdigit():
+                        out.append(("image", ref))
+                continue
+            if word != "FROM":
+                continue
+            seen_from = True
+            stage_vars = {}
+            env_names = set()
+            tokens = [t for t in rest.split() if not t.startswith("--")]
+            if not tokens:
+                continue
+
+            def arg(a):
+                got = global_args.get(a.group(1))
+                return got if got is not None else a.group(0)
+            image = re.sub(r"\$\{?([A-Za-z_]\w*)\}?", arg, tokens[0])
+            if "$" in image or any("$" in (build_args.get(n) or "") for n in re.findall(r"\$\{?(\w+)", tokens[0])):
+                out.append(("unknown", f"the base image '{_shown(tokens[0])}' in '{_shown(rel)}' is set at build "
+                                       "time"))
+            elif image.lower() != "scratch" and image.lower() not in aliases:
+                out.append(("base", image))
+            if len(tokens) >= 3 and tokens[1].lower() == "as":
+                aliases.add(tokens[2].lower())
+        return out
+
+    def _dockerfile(self, rel: str, line: int, stage: tuple | None, severity: str, build_args=None) -> None:
+        self.applicable.add("OBAAF-JEN-008")
+        self._line = line
+        if build_args == "?":
+            self.unknown("OBAAF-JEN-008", line, "the build arguments of the Dockerfile are computed at run time")
+            build_args = {}
+        for kind, value in self._dockerfile_refs(rel, build_args):
+            if kind == "unknown":
+                self.unknown("OBAAF-JEN-008", line, value)
+            elif kind == "install":
+                self.add("OBAAF-JEN-008", line, value + ".", stage, severity="high")
+            elif not PINNED_IMAGE.match(value):
+                what = "Base image" if kind == "base" else "Image copied from"
+                self.add("OBAAF-JEN-008", line, f"{what} '{_shown(value)}' in '{_shown(rel)}' is not pinned to a "
+                         "sha256 digest.", stage, severity=severity)
+
+    @staticmethod
+    def _commands(text: str):
+        """Each command of a script, with what may stand before it (keywords, assignments, sudo, env,
+        timeout, `bash -c "`) taken off: (command, the segment it came from). Linear in the text."""
+        for segment in _COMMAND_SPLIT.split(text):
+            command = segment
+            for _ in range(8):
+                m = _COMMAND_PREFIX.match(command)
+                if not m or not m.group(0).strip():
+                    break
+                command = command[m.end():]
+            yield command.strip(), segment
+
+    def _assignments(self, text: str, variables: dict, depth: int = 0) -> None:
+        """Record the variables a script line sets: one literal value, or None when the script sets it to
+        anything else or to two different values."""
+        for segment in _COMMAND_SPLIT.split(text):
+            # `IFS= read -r VER`, `if read VER`: the verb after keywords, assignments and wrappers.
+            other = _OTHER_ASSIGN.match(segment) or _OTHER_ASSIGN.match(next(self._commands(segment), ("", ""))[0])
+            if other:
+                verb, rest = other.group(1), other.group(2)
+                if verb in ("source", "."):
+                    # A file plainly outside the checkout (an absolute path, ~, $HOME or $NVM_DIR: nvm, a
+                    # tool's profile) or a virtual environment's bin/activate is not the change's, so the
+                    # variables keep their values (the fifth review of 2d.2k). Any other file may set anything:
+                    # every variable becomes unknown, as for eval (the sixth review: reading the file in place
+                    # was wrong in folders and slow).
+                    target = (rest.split() or [""])[0].strip("'\"")
+                    if "<(" not in rest and (re.match(r"(/|~|\$\{?(HOME|NVM_DIR)\b)", target) or re.search(
+                            r"(^|/)bin/activate$", target)):
+                        continue          # outside the checkout, or a virtual environment's activate script
+                    for key in list(variables):
+                        variables[key] = None
+                    variables["*"] = None
+                elif verb == "eval":
+                    for key in list(variables):
+                        variables[key] = None
+                    variables["*"] = None
+                else:
+                    for word in rest.split():
+                        if re.fullmatch(r"[A-Za-z_]\w*", word.split("=")[0]) and word != "in":
+                            variables[word.split("=")[0]] = None
+                continue
+            plus = re.match(r"^[ \t]*([A-Za-z_]\w*)\+=", segment)
+            if plus:
+                variables[plus.group(1)] = None
+                continue
+            start = _ASSIGN_START.match(segment)
+            if not start:
+                continue
+            full = _SHELL_ASSIGN.match(segment)
+            name = start.group(1)
+            if full is None:
+                variables[name] = None
+                continue
+            single, double, bare = full.group(2), full.group(3), full.group(4)
+            value = single if single is not None else self._resolve(double if double is not None else bare or "",
+                                                                    variables, env=False)
+            if "$" in value and single is None or len(value) > 10_000:
+                value = None
+            if name in variables and variables[name] != value:
+                value = None
+            variables[name] = value
+
+    def _substituted(self, text: str, start: dict | None = None) -> str:
+        """The script with each variable it sets put into the commands after it (`IMAGE=node:20; docker run
+        $IMAGE`), as _install_problems reads it, for the container commands."""
+        if "$" not in text or len(text) > 400_000:
+            return text
+        variables: dict = dict(start or {})
+        return "\n".join(self._resolve_line(line, variables) for line in text.splitlines())
+
+    def _resolve_line(self, line: str, variables: dict) -> str:
+        """One script line with each command's variables put in from the assignments before it, on this line
+        or earlier ones, and the assignments it makes recorded."""
+        parts = re.split(r"(&&|\|\||;)", line)
+        for k in range(0, len(parts), 2):
+            original = parts[k]
+            if "$" in original and variables:
+                parts[k] = self._resolve(original, variables, env=False)
+            self._assignments(original, variables)
+        return "".join(parts)
+
+    def _shell_images(self, text: str) -> list:
+        """(image or None, command) for each `docker`/`podman`/`nerdctl` run, create or pull that a script
+        runs as a command (after keywords, assignments, sudo, env, timeout or `bash -c`; not inside echo or a
+        comment). None when an option the checker does not know stands before the image, so it cannot tell
+        which word is the image (flagship slice 2d.2k: images in shell steps were never checked). At most 200
+        are read; ("cut", ...) says the rest were not."""
+        out = []
+        for command, _ in self._commands(text):
+            m = _CONTAINER_CMD.match(command)
+            if not m:
+                continue
+            if len(out) >= 200:
+                out.append(("cut", "more than 200 container commands"))
+                break
+            sub = m.group(3).lower()
+            rest = command[m.end(): m.end() + 4000]
+            try:
+                words = shlex.split(rest)
+            except ValueError:
+                words = [w.strip("\"'") for w in rest.split()]
+            image, i = None, 0
+            while i < len(words):
+                w = words[i]
+                if w == "--":
+                    image = words[i + 1] if i + 1 < len(words) else None
+                    break
+                if not w.startswith("-") or w == "-":
+                    image = w
+                    break
+                flag = w.split("=", 1)[0]
+                if flag in ("-a", "--attach"):
+                    i += 1 if sub == "pull" or "=" in w else 2
+                elif "=" in w or flag in _DOCKER_BOOL:
+                    i += 1
+                elif flag in _DOCKER_VALUE:
+                    i += 2
+                elif re.fullmatch(r"-[ditPq]+", w):
+                    i += 1
+                else:
+                    image = "?"
+                    break
+            out.append((None if image in (None, "?") else image, sub))
+        return out
+
+    def _install_problems(self, text: str, where: str = "", shell_vars: dict | None = None) -> list:
+        """What in a script installs an agent CLI at a version that can move (flagship slice 2d.2k): a
+        downloaded install script, a package without an exact version (a range, a tag, a version set at run
+        time), a package named at run time, or an update. `text` is the script as its shell reads it (see
+        _prepared). Read command by command; a variable the script sets is put into the commands after it,
+        and the subcommand after the installer decides whether a package is installed. Marks the rule
+        applicable when an agent CLI is installed at all, pinned or not."""
+        out: list = []
+        if len(text) > 400_000:
+            return ["An agent CLI may be installed in a script too long to read" + where] \
+                if self._agent_words.search(text) else []
+        variables = dict(shell_vars or {})
+        for line in text.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            seg_line = self._resolve_line(line, variables)
+            for segment in _SEGMENTS.split(seg_line):
+                agent = self._agent_words.search(segment)
+                if _DOWNLOAD.search(segment) and agent and _TO_SHELL.search(segment):
+                    self.applicable.add("OBAAF-JEN-008")
+                    out.append("An agent CLI is installed by piping a downloaded script into a shell, which "
+                               "installs whatever version the script fetches" + where)
+                elif any(rx.search(segment) for rx in self.install_urls):
+                    self.applicable.add("OBAAF-JEN-008")
+                    out.append("An agent CLI is installed by a downloaded install script, which installs "
+                               "whatever version the script chooses" + where)
+                for command in segment.split("|"):
+                    found = self._package_problems(command, where)
+                    if found is not None:
+                        self._agent_installed = True
+                        out += found
+                for command, _ in self._commands(segment):
+                    if _AGENT_SELF_UPDATE.match(command):
+                        self.applicable.add("OBAAF-JEN-008")
+                        out.append("An agent CLI updates itself to the newest version (claude update)" + where)
+                    elif self._agent_installed and _global_update(command):
+                        out.append("Agent CLIs installed globally are updated to the newest version (an update "
+                                   "of every global package)" + where)
+        return out
+
+    @staticmethod
+    def _non_options(words: list):
+        """The words that are not options, skipping the values of options that take one."""
+        j = 0
+        while j < len(words):
+            w = words[j]
+            if w.startswith("-"):
+                j += 2 if w in _INSTALLER_VALUE_OPTIONS else 1
+                continue
+            if re.match(r"\d*(?:[<>]|&>)", w):
+                break
+            yield w
+            j += 1
+
+    def _installer_action(self, words: list, k: int) -> str:
+        """What the installer at words[k] does with the packages after it: install (or run), update or
+        other, from its first word that is not an option (options that take a value skip it). A runner
+        (npx) runs; a word the checker does not know is taken for install."""
+        base = words[k].rsplit("/", 1)[-1]
+        if base in _RUNNERS:
+            return "install"
+        j = k + 1
+        while j < len(words):
+            w = words[j]
+            if w.startswith("-"):
+                j += 2 if w in _INSTALLER_VALUE_OPTIONS else 1
+                continue
+            if w in ("tool", "pip", "global", "-m"):      # uv tool install, uv pip install, yarn global add
+                j += 1
+                continue
+            if w in _UPDATE_WORDS:
+                return "update"
+            if w in _OTHER_WORDS:
+                return "other"
+            return "install"
+        return "other"
+
+    def _package_problems(self, command: str, where: str) -> list | None:
+        """Problems of one command that installs or runs an agent CLI from a registry; None when it names
+        none. The last installer before a package decides, by its subcommand, what the command does."""
+        if not INSTALLER.search(command):
+            return None
+        # Shell quotes are not part of a word: @anthropic-ai/claude-code@"1.0.17" is @1.0.17 (fifth review).
+        command = re.sub(r"[\"']", "", command)
+        tokens = [(m.start(), m.group(0)) for m in re.finditer(r"\S+", command)]
+        words = [w.strip("'\"") for _, w in tokens]
+        installer_at = [i for i, w in enumerate(words) if w.rsplit("/", 1)[-1] in _INSTALLER_NAMES]
+        if not installer_at:
+            return None
+        actions = {k: self._installer_action(words, k) for k in installer_at}
+        starts = [tokens[k][0] for k in installer_at]
+        lowered = command.lower()
+        out: list | None = None
+        for pkg, rx in self.packages:
+            if pkg.split("/")[-1].split("-")[0].lower() not in lowered:
+                continue
+            for m in rx.finditer(command):
+                n = bisect.bisect_right(starts, m.start()) - 1
+                if n < 0 or tokens[installer_at[n]][0] == m.start():
+                    continue
+                action = actions[installer_at[n]]
+                if action == "other":
+                    continue
+                self.applicable.add("OBAAF-JEN-008")
+                out = out if out is not None else []
+                ver = (m.group("ver") or "").strip()
+                if action == "update":
+                    out.append(f"Agent CLI {pkg} is updated to the newest version" + where)
+                elif not _exact_version(ver):
+                    shown = f" ({_shown(ver)})" if ver else ""
+                    reason = " at a version set at run time" if "$" in ver else " without a fixed version"
+                    out.append(f"Agent CLI {pkg} is installed{reason}{shown}" + where)
+        # A package named at run time, given to an installer that installs it.
+        for n_at, k in enumerate(installer_at):
+            if actions[k] != "install":
+                continue
+            # By position, not `installer_at.index(k)`, which made a line of many installers quadratic (the
+            # review of slice 2d.5a: 75,000 `npm` words took 35 s).
+            following = installer_at[n_at + 1] if n_at + 1 < len(installer_at) else len(words)
+            named = []
+            args = words[k + 1: following]
+            for n, w in enumerate(args):
+                if w.startswith("-"):
+                    if "=" in w:
+                        named.append(w.split("=", 1)[1])
+                    elif w in ("-p", "--package") and n + 1 < len(args):
+                        named.append(args[n + 1])
+                else:
+                    named.append(w)
+            if any("$" in w or "`" in w for w in named):
+                self.applicable.add("OBAAF-JEN-008")
+                self.unknown("OBAAF-JEN-008", self._line, f"a package is named at run time in "
+                             f"`{_shown(command.strip(), 80)}`, so whether it is an agent CLI at a fixed version "
+                             "is not checked")
+                break
+        return out
+
+    def _manifests(self, text: str, folder: str, builds: list | None = None, builds_only: bool = False) -> list:
+        """Agent CLIs that pip requirements files and package.json ask for, where a script installs from
+        them: `pip install -r FILE` (every -r and -c, `-rFILE` too) and `npm install` with no lockfile beside
+        package.json, in the folder the command runs in (`cd DIR`, `--prefix DIR`, dir()). With `builds`, each
+        `docker build` (podman, nerdctl, buildah, buildx) is added to it as (Dockerfile, build arguments,
+        tags), in that folder."""
+        out: list = []
+        parts = re.split(r"(&&|\|\||[;&|\n(`]|\$\()", text)
+        stack: list = []
+        # One stack for `(`, `$(` and backticks: a cd inside a subshell or a command substitution ends with it.
+        # A `)` drops any open backticks above it, then closes the innermost `(` or `$(` (the sixth and seventh
+        # reviews of 2d.2k); an unmatched `)`, such as a case pattern's, closes one too early.
+        openers: list = []
+        previous = folder
+        for k in range(0, len(parts), 2):
+            if k > 0 and parts[k - 1] in ("(", "$("):
+                openers.append((parts[k - 1], folder))
+            elif k > 0 and parts[k - 1] == "`":
+                if openers and openers[-1][0] == "`":
+                    folder = openers.pop()[1]
+                else:
+                    openers.append(("`", folder))
+            closes = parts[k].count(")") - parts[k].count("(")
+            command = next(self._commands(parts[k]), ("", ""))[0]
+            command = re.split(r"[ \t]\d*(?:[<>]|&>)", " " + command)[0].strip()    # `pushd x > /dev/null`
+            command = re.sub(r"\)+[ \t]*$", "", command)                            # `npm install)`
+            words = [w.strip("\"'") for w in command.split()]
+            restore = None
+            for _ in range(max(closes, 0)):
+                while openers and openers[-1][0] == "`":
+                    openers.pop()
+                if openers:
+                    restore = openers.pop()[1]
+            try:
+                if words and words[0] == "pushd":
+                    stack.append(folder)               # every pushd pushes, whatever its folder (ninth review)
+                if words and words[0] in ("cd", "pushd") and k + 1 < len(parts) and parts[k + 1] in ("$(", "`"):
+                    previous, folder = folder, "?"     # cd ./$(cat .appdir): a folder computed at run time
+                    continue
+                at_root = _CD_WORKSPACE.match(command)
+                if at_root and re.search(r"[$*?\[]", at_root.group(1) or ""):
+                    previous, folder = folder, "?"     # cd "$WORKSPACE/$APP_DIR" (the eighth review of 2d.2k)
+                    continue
+                if at_root:
+                    # cd $WORKSPACE/x: the checkout's own folder x, wherever the script was.
+                    joined = posixpath.normpath(at_root.group(1) or ".")
+                    previous, folder = folder, ("?" if joined.startswith("..") else ("" if joined == "." else joined))
+                    continue
+                built = _BUILD_CMD.match(command)
+                if built and builds is not None:
+                    rel, args = _build_options(command[built.end():])
+                    if any("$" in v for v in args.values()):
+                        args = "?"
+                    tags = [m.group(2) for m in _TAG_OPTION.finditer(command)]
+                    builds.append((_join(folder, rel) if rel != "?" else "?", args, tags))
+                    continue
+                if words and words[0] == "popd":
+                    previous, folder = folder, (stack.pop() if stack and len(words) == 1 else "?")
+                    continue
+                if command == "cd -":
+                    previous, folder = folder, previous
+                    continue
+                moved = _CD.match(command)
+                if words and words[0] in ("cd", "pushd") and not moved:
+                    previous, folder = folder, "?"     # home, options, `$(...)`: a folder the checker cannot tell
+                    continue
+                if moved:
+                    target = moved.group(2)
+                    previous = folder
+                    if re.search(r"[$*?\[]", target) or folder == "?" or target.startswith(("/", "~")):
+                        folder = "?"
+                    else:
+                        joined = posixpath.normpath(_join(folder, target.strip("/")) or ".")
+                        folder = "?" if joined.startswith("..") else ("" if joined == "." else joined)
+                    continue
+                if builds_only:
+                    continue
+                if _PIP_INSTALL.search(command):
+                    for m in _REQUIREMENT_FLAG.finditer(command):
+                        out += self._requirements(_join(folder, m.group(2)), "given to pip")
+                base = words[0].rsplit("/", 1)[-1] if words else ""
+                sub = next((w for w in self._non_options(words[1:])), None) if words else None
+                if base in ("npm", "pnpm", "yarn", "bun") and (sub in _MANIFEST_INSTALLS or (
+                        sub is None and base in ("yarn", "bun"))):
+                    prefix = _NPM_PREFIX.search(command)
+                    where = folder if prefix is None else ("?" if "$" in prefix.group(2) else _join(folder, prefix.group(2)))
+                    out += self._package_json_problems(where)
+            finally:
+                if restore is not None:
+                    folder = restore
+        return out
+
+    def _requirements(self, rel: str, where_from: str, depth: int = 0) -> list:
+        """Agent CLIs a pip requirements file installs at a version that can move, nested -r and -c included
+        (three levels; nested paths are relative to the file that names them)."""
+        if rel in self._req_cache:
+            return self._req_cache[rel]
+        self._req_cache[rel] = []
+        body = self._read(rel) if "$" not in rel and rel != "?" else None
+        if body is None:
+            self.unknown("OBAAF-JEN-008", self._line, f"the requirements file '{_shown(rel)}' {where_from} is not read")
+            return []
+        out = []
+        folder = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        for req in body.splitlines():
+            req = req.split("#", 1)[0].strip()
+            nested = re.match(r"(?:-r|--requirement|-c|--constraint)(?:[ \t]+|=)?(\S+)", req)
+            if nested:
+                if depth < 3:
+                    out += self._requirements(_join(folder, nested.group(1)), f"named in '{_shown(rel)}'", depth + 1)
+                continue
+            if req:
+                out += self._package_problems("pip install " + req, f" (in the requirements file {_shown(rel)})") or []
+        self._req_cache[rel] = out
+        return out
+
     def mutable_references(self) -> None:
         def severity_for(infos: list[Info]) -> str:
             if any(i.ai or i.publish for i in infos):
@@ -772,225 +2845,2040 @@ class JenkinsRules:
                 return "medium"
             return "low"
 
+        env_vars = self._env_vars()
+        self._collect_local_images(env_vars)
         for agent, ctx in self.p.agents:
             under = self.under(agent)
-            refs = []
+            severity = severity_for(under)
+            where = f"for stage '{stage_label(ctx.stage)}'"
             if agent.image and not agent.from_step:      # step images are checked with the step below
-                refs.append((agent.image, agent.line, agent.image_dynamic))
-            refs += [(img, line, "${" in img) for img, line in agent.images]
+                self._image(agent.image, agent.line, ctx.stage, where, severity)
+            for img, line in agent.images:
+                self._image(img, line, ctx.stage, where, severity)
+            if agent.images_unknown:
+                self.applicable.add("OBAAF-JEN-008")
+                self.unknown("OBAAF-JEN-008", agent.line, "a pod template's containers are a list the checker "
+                             "cannot read, so their images are not checked")
+            if agent.kind == "dockerfile":
+                args = agent.build_args
+                build_args = "?" if args and "${" in args else (_build_options(args)[1] if args else {})
+                self._dockerfile(agent.dockerfile or "Dockerfile", agent.line, ctx.stage, severity, build_args)
             pod = self.pod_spec(agent, "OBAAF-JEN-008") if agent.kind == "kubernetes" else None
             if pod:
-                refs += [(m.group(1), agent.line, "${" in m.group(1)) for m in POD_IMAGE.finditer(pod)]
-            for ref, line, dynamic in refs:
-                self.applicable.add("OBAAF-JEN-008")
-                if dynamic:
-                    self.unknown("OBAAF-JEN-008", line, f"image reference {ref} is computed at run time")
-                elif not DIGEST.search(ref):
-                    self.add("OBAAF-JEN-008", line,
-                             f"Image '{ref}' for stage '{stage_label(ctx.stage)}' is not pinned to a sha256 digest.",
-                             ctx.stage, severity=severity_for(under))
+                images = self._pod_images(pod)
+                if images is None:
+                    self.applicable.add("OBAAF-JEN-008")
+                    self.unknown("OBAAF-JEN-008", agent.line, "the pod spec is not YAML the checker can read, so its "
+                                 "images are not checked")
+                else:
+                    for img in images:
+                        self._image(img, agent.line, ctx.stage, f"in the pod spec {where}", severity)
         for info in self.infos:
-            if info.use.name == "docker.image" or info.use.name == "withDockerContainer":
+            name = info.use.name
+            users = self.by_stage.get(info.ctx.stage, [])
+            where = f"in stage '{stage_label(info.ctx.stage)}'"
+            if name in ("docker.image", "withDockerContainer"):
                 call = info.use.call
-                node = first_arg(call) if info.use.name == "docker.image" else (
-                    named_arg(call, "image") or first_arg(call))
-                ref = literal(node)
+                node = first_arg(call) if name == "docker.image" else (named_arg(call, "image") or first_arg(call))
                 if node is None:
                     continue
-                self.applicable.add("OBAAF-JEN-008")
+                ref = literal(node)
                 if ref is None:
-                    self.unknown("OBAAF-JEN-008", info.line, "an image reference is computed at run time")
-                elif not DIGEST.search(ref):
-                    users = self.by_stage.get(info.ctx.stage, [])
-                    self.add("OBAAF-JEN-008", info.line,
-                             f"Image '{ref}' in stage '{stage_label(info.ctx.stage)}' is not pinned to a sha256 digest.",
-                             info.ctx.stage, severity=severity_for(users))
-        for lib in self.p.libraries:
-            if lib.name == "?" or lib.dynamic:
-                continue
-            self.applicable.add("OBAAF-JEN-008")
-            if lib.version is None:
-                self.add("OBAAF-JEN-008", lib.line,
-                         f"Library '{lib.name}' is loaded at its default version, which an administrator can change "
-                         "and which may follow a branch.", None, severity="medium")
-            elif not FULL_SHA.match(lib.version):
-                self.add("OBAAF-JEN-008", lib.line,
-                         f"Library '{lib.name}' is loaded at '{lib.version}', a branch or tag that can move.", None,
-                         severity="medium")
-        for info in self.infos:
-            if not info.shell or not INSTALLER.search(info.script) and "curl" not in info.script:
-                continue
-            for line_text in info.script.splitlines():
-                if AGENT_INSTALL_SCRIPT.search(line_text):
+                    ref = node.text() if isinstance(node, Str) else (
+                        "${" + path_of(node) + "}" if path_of(node) else "${computed}")
+                if self._resolve(ref, groovy=True) in self._local_images:
+                    continue           # docker.build('app') then docker.image('app'): the job's own image
+                self._image(ref, info.line, info.ctx.stage, where, severity_for(users))
+            elif name == "docker.build":
+                call = info.use.call
+                options = call.args[1] if len(call.args) > 1 else None
+                text = literal(options) if options is not None else "."
+                if text is None:
                     self.applicable.add("OBAAF-JEN-008")
-                    self.add("OBAAF-JEN-008", info.line,
-                             "An agent CLI is installed by piping a downloaded script into a shell, which installs "
-                             "whatever version the script fetches.", info.ctx.stage, severity="high")
+                    self.unknown("OBAAF-JEN-008", info.line, "docker.build's options are computed at run time, so "
+                                 "the Dockerfile it builds is not checked")
                     continue
-                for pkg, rx in self.packages:
-                    if pkg not in line_text:
-                        continue
-                    for m in rx.finditer(line_text):
-                        if not INSTALLER.search(line_text[: m.start()]):
-                            continue
-                        self.applicable.add("OBAAF-JEN-008")
-                        ver = (m.group("ver") or "").lstrip("@=")
-                        if not ver or ver in ("latest", "next", "stable"):
-                            self.add("OBAAF-JEN-008", info.line,
-                                     f"Agent CLI {pkg} is installed without a fixed version"
-                                     + (f" ({m.group('ver')})" if ver else "") + ".", info.ctx.stage, severity="high")
+                rel, build_args = _build_options(text)
+                if any("$" in v for v in build_args.values()):
+                    build_args = "?"
+                self._dockerfile(_join(info.ctx.dir, rel) if rel != "?" else "?", info.line, info.ctx.stage,
+                                 severity_for(users), build_args)
+        for lib in self.p.libraries:
+            name, version = lib.name, lib.version
+            if lib.name == "?" or lib.dynamic:
+                # A library named by a value: put in what the file fixes (flagship slice 2d.2k).
+                text = None
+                if lib.name == "?" and lib.ref:
+                    base = lib.ref[4:] if lib.ref.startswith("env.") else lib.ref
+                    text = self._resolve("${" + base + "}", groovy=True)
+                elif lib.dynamic:
+                    text = self._resolve(lib.name + (f"@{lib.version}" if lib.version else ""), groovy=True)
+                if text is None or "$" in text:
+                    self.applicable.add("OBAAF-JEN-008")
+                    self.unknown("OBAAF-JEN-008", lib.line, f"{lib.how} names a library or version computed at run "
+                                 "time, so its pin is not checked")
+                    continue
+                name, _, version = text.partition("@")
+                version = version or None
+            self.applicable.add("OBAAF-JEN-008")
+            # A library's code runs in every stage: high when any of them runs an agent or publishes.
+            severity = "high" if any(i.ai or i.publish for i in self.infos) else "medium"
+            if version is None:
+                self.add("OBAAF-JEN-008", lib.line,
+                         f"Library '{_shown(name)}' is loaded at its default version, which an administrator can change "
+                         "and which may follow a branch.", None, severity=severity)
+            elif not FULL_SHA.match(version):
+                self.add("OBAAF-JEN-008", lib.line,
+                         f"Library '{_shown(name)}' is loaded at '{_shown(version)}', a branch or tag that can move.", None,
+                         severity=severity)
+        scanned: set = set()
+        for info in self.infos:
+            # A method of the file expanded at many calls records its steps once per call; each step's
+            # script is scanned once per call and folder (flagship slices 2d.2i, B097, and 2d.2k).
+            if not info.shell or (id(info.use.call), info.ctx.dir) in scanned:
+                continue
+            scanned.add((id(info.use.call), info.ctx.dir))
+            self._line = info.line
+            folder = info.ctx.dir
+            text = self._pin_script(info)
+            problems = self._install_problems(text, shell_vars=env_vars)
+            builds: list = []
+            problems += self._manifests(self._substituted(text, env_vars), folder, builds)
+            images = self._shell_images(self._substituted(text, env_vars))
+            for rel in self._scripts(info.script):
+                body_problems, body_images, body_builds = self._script_scan(_join(folder, rel), folder, env_vars)
+                problems += body_problems
+                images += body_images
+                builds += body_builds
+            for dockerfile, build_args, _ in builds:
+                self._dockerfile(dockerfile, info.line, info.ctx.stage,
+                                 severity_for(self.by_stage.get(info.ctx.stage, [])), build_args)
+            for image, command in images:
+                where = f"in a `{command}` command in stage '{stage_label(info.ctx.stage)}'"
+                if image == "cut":
+                    self.applicable.add("OBAAF-JEN-008")
+                    self.unknown("OBAAF-JEN-008", info.line, f"stage '{stage_label(info.ctx.stage)}' runs more than "
+                                 "200 container commands in one script; the images after the 200th are not checked")
+                elif image is None:
+                    self.applicable.add("OBAAF-JEN-008")
+                    self.unknown("OBAAF-JEN-008", info.line, f"a `{command}` command in stage "
+                                 f"'{stage_label(info.ctx.stage)}' names its image in a way the checker cannot read")
+                elif command == "pull" or image not in self._local_images:
+                    self._image(image, info.line, info.ctx.stage, where,
+                                severity_for(self.by_stage.get(info.ctx.stage, [])), groovy=False)
+            for message in dict.fromkeys(problems):
+                self.applicable.add("OBAAF-JEN-008")
+                self.add("OBAAF-JEN-008", info.line, message + ".", info.ctx.stage, severity="high")
+
+    def _script_scan(self, rel: str, folder: str, env_vars: dict) -> tuple:
+        """(install problems, container images, docker builds) of a repository script a step runs, read
+        once per path and folder."""
+        key = (rel, folder)
+        if key not in self._script_cache:
+            body = self._read(rel) if rel != "?" else None
+            body = self._prepared(body) if body else None
+            builds: list = []
+            if body:
+                resolved = self._substituted(body, env_vars)
+                self._script_cache[key] = (
+                    self._install_problems(body, f" (in the script {_shown(rel)})", shell_vars=env_vars)
+                    + self._manifests(resolved, folder, builds), self._shell_images(resolved), builds)
+            else:
+                self._script_cache[key] = ([], [], [])
+        return self._script_cache[key]
+
+    def _collect_local_images(self, env_vars: dict) -> None:
+        """Images the job builds or tags itself (`docker build -t`, `docker tag`, docker.build), after
+        variables are put in, in steps and in the repository scripts they run: a `run` of one is not a pull
+        from a registry (the third and fourth reviews of 2d.2k). A `pull` is always checked."""
+        self._local_images = set()
+
+        def add(tag: str) -> None:
+            if "$" not in tag:
+                self._local_images.update({tag, tag if ":" in tag.rsplit("/", 1)[-1] else tag + ":latest"})
+
+        seen: set = set()
+        texts: dict = {}
+
+        def scan(text: str, folder: str) -> None:
+            """Builds and `docker tag` targets of a script, once per text and folder, with no other effect."""
+            if (text, folder) in texts or not re.search(r"\b(build|bud|tag)\b", text):
+                return
+            texts[(text, folder)] = True
+            resolved = self._substituted(text, env_vars)
+            builds: list = []
+            self._manifests(resolved, folder, builds, builds_only=True)
+            for _, _, tags in builds:
+                for tag in tags:
+                    add(tag)
+            for command, _ in self._commands(resolved):
+                tagged = _TAG_CMD.match(command)
+                if tagged:
+                    add(tagged.group(2))
+
+        for info in self.infos:
+            if (id(info.use.call), info.ctx.dir) in seen:
+                continue
+            seen.add((id(info.use.call), info.ctx.dir))
+            if info.use.name == "docker.build":
+                tag = self._resolve(literal(first_arg(info.use.call)) or (
+                    first_arg(info.use.call).text() if isinstance(first_arg(info.use.call), Str) else "$"),
+                    groovy=True)
+                add(tag)
+            elif info.shell:
+                # The builds a step and its scripts run; their Dockerfiles are checked in the main loop.
+                scan(self._pin_script(info), info.ctx.dir)
+                for rel in self._scripts(info.script):
+                    path = _join(info.ctx.dir, rel)
+                    body = self._read(path) if path != "?" else None
+                    if body:
+                        scan(self._prepared(body), info.ctx.dir)
+
+    def _package_json_problems(self, folder: str) -> list:
+        """Agent CLIs that package.json asks for at a version that can move, when no lockfile beside it
+        fixes them: dependencies of every kind, npm aliases (`npm:@scope/name@range`) included."""
+        if folder == "?":
+            self.unknown("OBAAF-JEN-008", self._line, "npm installs in a folder computed at run time or that "
+                         "the checker does not follow, so its package.json is not read")
+            return []
+        if folder in self._package_cache:
+            return self._package_cache[folder]
+        self._package_cache[folder] = out = []
+        text = self._read(_join(folder, "package.json"))
+        if text is None or any(self._read(_join(folder, x)) is not None for x in LOCKFILES):
+            return out
+        try:
+            data = json.loads(text)
+        except (ValueError, RecursionError):
+            if self._agent_words.search(text):
+                out.append("An agent CLI may be installed from a package.json the checker cannot read")
+            return out
+        for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+            deps = data.get(key) if isinstance(data, dict) else None
+            if not isinstance(deps, dict):
+                continue
+            for pkg, ver in deps.items():
+                target = pkg
+                if isinstance(ver, str) and ver.startswith("npm:"):
+                    target, _, ver = ver[4:].rpartition("@") if ver[4:].count("@") > (1 if ver[4:].startswith("@")
+                                                                                     else 0) else (ver[4:], "", "")
+                if target in self.agent_package_names:
+                    self.applicable.add("OBAAF-JEN-008")
+                    if not (isinstance(ver, str) and EXACT_NPM.match(ver)):
+                        out.append(f"Agent CLI {target} is installed from {_shown(_join(folder, 'package.json'))} "
+                                   f"at '{_shown(str(ver))}', a version that can move, with no lockfile")
+        return out
 
     # ------------------------------------------------------------------ JEN-009
     def injection(self) -> None:
+        """Untrusted text built into a command or into Groovy code before it runs (flagship slice 2d.2). Each value
+        is read from its structure by values.Judge: through `env` and `params` aliases, case-insensitive environment
+        names, closure and loop parameters, method results, mutated builders and maps; a result that is a number, a
+        boolean or a whitelisted rewrite carries no text. Before 2d.2 the rule searched the interpolation's text for
+        names, so `def e = env` then `${e.CHANGE_TITLE}` passed and `${env.CHANGE_TITLE.length()}` was high."""
+        from obaaf.checker.jenkins.values import Judge, worst
+        memo: dict = {}
+        current: list = [frozenset(), None]          # the step's uncalled method's parameters, its closure's `it`
+
+        def judged(node):
+            if node is None:
+                return None
+            key = (id(node), current[0], id(current[1]))
+            hit = memo.get(key)
+            if hit is not None and hit[0] is node:
+                return hit[1]
+            it = current[1]
+            found = Judge(self.p, function_params=set(current[0])).value(node, {"it": it} if it else None)
+            memo[key] = (node, found)
+            return found
+
+        def params_of(ctx) -> frozenset:
+            # A value from outside the file is a parameter of the uncalled method the step is in, and only there.
+            fn = ctx.in_function
+            if fn in self.p.uncalled_methods:
+                return frozenset(p for d in self.p.method_defs.get(fn, []) for p in d.params if isinstance(p, str))
+            return frozenset()
+
+        def caller_reason(found, what: str) -> str:
+            if found[2] == "a value passed in by a method's caller outside this file":
+                return f"{what} uses a value passed in by a method's caller outside this file"
+            return f"{what} uses {found[0]}, {found[2]}"
+
+        if self.p.webhook_unread is not None and any(i.shell for i in self.infos):
+            self.applicable.add("OBAAF-JEN-009")
+            self.unknown("OBAAF-JEN-009", self.p.webhook_unread,
+                         "the webhook trigger's variables are given in a form the checker does not read, so which "
+                         "names carry the payload cannot be told")
+        loads_seen = set()
         for info in self.infos:
             name = info.use.name
+            call = info.use.call
+            current[0] = params_of(info.ctx)
+            held = self.p.step_it.get(id(call))
+            current[1] = held[1] if held is not None and held[0] is call else None
             if info.shell:
                 self.applicable.add("OBAAF-JEN-009")
-                source = untrusted_source(info.exprs, self.p)
-                if source:
+                script = shell_script(call)
+                if script is None:
+                    spread = named_arg(call, "*")
+                    script = spread if spread is not None else None
+                found = judged(script)
+                if found and found[1] != "unknown":
                     self.add("OBAAF-JEN-009", info.line,
                              f"The {name} step in stage '{stage_label(info.ctx.stage)}' builds its script with Groovy "
-                             f"interpolation of {source[0]}. The value becomes part of the command before the shell "
-                             "runs, so it can run commands of its own.", info.ctx.stage, severity=source[1])
-                elif any(e.split(".")[0] in self.p.method_params for e in info.exprs if e):
-                    # A method nothing in this file calls: its callers, and what they pass, are elsewhere.
-                    self.unknown("OBAAF-JEN-009", info.line,
-                                 f"the {name} step at line {info.line} uses a value passed in by a method's caller "
-                                 "outside this file")
+                             f"interpolation of {found[0]}. The value becomes part of the command before the shell "
+                             "runs, so it can run commands of its own.", info.ctx.stage, severity=found[1])
+                elif found:
+                    self.unknown("OBAAF-JEN-009", info.line, caller_reason(found, f"the {name} step at line {info.line}"))
+                if name.rsplit(".", 1)[-1] == "bat":
+                    self._bat_percent(info, script)
             elif name in ("load", "evaluate"):
-                arg = first_arg(info.use.call)
-                source = untrusted_source(source_texts(arg), self.p) if arg is not None else None
-                if source:
+                loads_seen.add((name, info.line))
+                arg = first_arg(call)
+                found = judged(arg)
+                if found and found[1] != "unknown":
                     self.add("OBAAF-JEN-009", info.line,
                              f"{name} at line {info.line} takes Groovy {('code' if name == 'evaluate' else 'from a path')} "
-                             f"built from {source[0]}.", info.ctx.stage, severity="high")
+                             f"built from {found[0]}.", info.ctx.stage, severity="high")
+                elif found:
+                    self.unknown("OBAAF-JEN-009", info.line, caller_reason(found, f"{name} at line {info.line}"))
             elif info.trigger:
                 self.applicable.add("OBAAF-JEN-009")
-                params = named_arg(info.use.call, "parameters")
-                exprs = []
-                for item in (params.items if isinstance(params, ListLit) else []):
+                params = named_arg(call, "parameters")
+                if isinstance(params, Name) and params.name in self.p.lists:
+                    params = self.p.lists[params.name]
+                items = params.items if isinstance(params, ListLit) else ([params] if params is not None else [])
+                results = []
+                for item in items:
                     # Booleans and choices cannot carry commands; string, text and run parameters can.
                     if isinstance(item, Call) and chain_name(item.callee) in ("booleanParam", "choice"):
                         continue
-                    for st in _strings(item):
-                        exprs += st.exprs
-                    for node in _values(item):
-                        p = path_of(node)
-                        if p:
-                            exprs.append(p)
-                source = untrusted_source(exprs, self.p)
-                if source and source[1] != "low":
+                    if isinstance(item, MapLit) and any(
+                            k == "$class" and (literal(v) or "").split(".")[-1] in (
+                                "BooleanParameterValue", "ChoiceParameterValue") for k, v in item.entries):
+                        continue
+                    results.append(judged(item))
+                found = worst(*results)
+                if found and found[1] not in ("low", "unknown"):
                     job = f"Job '{info.trigger}'" if info.trigger != "a computed job name" else "A job with a computed name"
                     self.add("OBAAF-JEN-009", info.line,
-                             f"{job} is started with a parameter taken from {source[0]}. Check that the job treats it "
+                             f"{job} is started with a parameter taken from {found[0]}. Check that the job treats it "
                              "as data, never as part of a command.", info.ctx.stage, severity="medium")
+                elif found and found[1] == "unknown":
+                    self.unknown("OBAAF-JEN-009", info.line, caller_reason(found, f"the build step at line {info.line}"))
+            else:
+                self._docker_and_remote(info, judged, caller_reason)
+        # Groovy compiled at run time by other means (Eval.me, a GroovyShell, a script engine, Job DSL): the code is
+        # the value (flagship slice 2d.2; before, only `load` and `evaluate` by those names were read).
+        for kind, cname, ccall, ctx, _certain in self.p.code_loads:
+            current[0] = params_of(ctx)
+            held = self.p.step_it.get(id(ccall))
+            current[1] = held[1] if held is not None and held[0] is ccall else None
+            bare = cname.rsplit(".", 1)[-1]
+            if (cname in ("load", "evaluate") and (cname, ccall.line) in loads_seen) or "(a pointer)" in cname:
+                continue
+            arg = named_arg(ccall, "scriptText") if kind == "jobDsl" else first_arg(ccall)
+            if kind == "jobDsl" and arg is None:
+                continue
+            found = judged(arg)
+            if found and found[1] != "unknown":
+                self.applicable.add("OBAAF-JEN-009")
+                self.add("OBAAF-JEN-009", ccall.line,
+                         f"{cname} at line {ccall.line} compiles Groovy built from {found[0]}, which runs on the "
+                         "controller with the pipeline's rights.", ctx.stage, severity="high")
+            elif found:
+                self.unknown("OBAAF-JEN-009", ccall.line, caller_reason(found, f"{bare} at line {ccall.line}"))
+
+    _DOCKER_SHELL = {"build", "run", "withRun", "push", "tag", "pull"}
+
+    def _docker_and_remote(self, info, judged, caller_reason) -> None:
+        """The Docker Pipeline plugin runs `docker build`, `docker run`, `docker push`, `docker tag` and `docker pull`
+        through a shell step with the image name and arguments in the command line; `inside(args)` passes args as
+        `docker run` options. Publish Over SSH's `execCommand` and SSH Steps' `command` run in a remote shell."""
+        from obaaf.checker.jenkins.values import worst
+        name = info.use.name
+        call = info.use.call
+        parts = name.split(".")
+        method = parts[-1]
+        values = []
+        what = None
+        if (parts[0] == "docker" or parts[0] in self.p.docker_vars) and len(parts) > 1 and (
+                method in self._DOCKER_SHELL or method == "inside"):
+            if name == "docker.image" or (name == "docker.build" and False):
+                return
+            values += [judged(a) for a in call.args] + [judged(v) for _, v in call.named]
+            inner = call.callee.target if isinstance(call.callee, Prop) else None
+            if isinstance(inner, Call) and chain_name(inner.callee) in ("docker.image", "docker.build"):
+                values += [judged(a) for a in inner.args]
+            elif isinstance(inner, Name):
+                values.append(judged(inner))
+            if name in ("docker.image", "docker.withRegistry", "docker.withServer", "docker.withTool"):
+                return
+            what = ("as docker run options, so it can add options of its own (a host mount, --privileged)"
+                    if method == "inside" else "to a docker command the Docker Pipeline plugin runs through a shell "
+                    "step, so it can run commands of its own")
+        elif method == "execute" and isinstance(call.callee, Prop):
+            # "...".execute(): Groovy starts the process on the controller, splitting the text into words.
+            values.append(judged(call.callee.target))
+            what = "to a process the controller starts (String.execute()), so it can run commands of its own"
+        elif name in ("sshTransfer", "sshCommand", "sshScript"):
+            key = "execCommand" if name == "sshTransfer" else "command" if name == "sshCommand" else "script"
+            values.append(judged(named_arg(call, key)))
+            what = "to a command run in a shell on a remote host, so it can run commands of its own"
+        else:
+            return
+        found = worst(*values)
+        if found is None:
+            if what is not None:
+                self.applicable.add("OBAAF-JEN-009")
+            return
+        self.applicable.add("OBAAF-JEN-009")
+        if found[1] == "unknown":
+            self.unknown("OBAAF-JEN-009", info.line, caller_reason(found, f"{name} at line {info.line}"))
+            return
+        self.add("OBAAF-JEN-009", info.line, f"{name} at line {info.line} passes {found[0]} {what}.",
+                 info.ctx.stage, severity=found[1])
+
+    @staticmethod
+    def _bat_vars(text: str):
+        """The names cmd expands in a batch file's text, read as cmd reads them: from each `%` to the next on the line
+        (so `%A%%B%` is two, `%ProgramFiles(x86)%` one, and `50% done %X%` the name ` done `); `%%` is a literal
+        percent sign; `%1` and `%~dp0` are arguments. `%NAME:~0,5%` and `%NAME:a=b%` are NAME."""
+        i, n = 0, len(text)
+        while i < n:
+            j = text.find("%", i)
+            if j == -1 or j + 1 >= n:
+                return
+            nxt = text[j + 1]
+            if nxt == "%":
+                i = j + 2
+                continue
+            if nxt.isdigit() or nxt == "*":
+                i = j + 2
+                continue
+            if nxt == "~":
+                k = j + 2
+                while k < n and text[k].isalpha():
+                    k += 1
+                i = k + 1
+                continue
+            end = text.find("%", j + 1)
+            line_end = text.find("\n", j + 1)
+            if end == -1 or (line_end != -1 and line_end < end):
+                i = j + 1 if line_end == -1 else line_end + 1
+                continue
+            name = text[j + 1:end].split(":", 1)[0]
+            if name:
+                yield name
+            i = end + 1
+
+    def _bat_percent(self, info, script) -> None:
+        """cmd expands `%NAME%` before it parses the line, so `bat 'echo %CHANGE_TITLE%'`, the form that is safe in
+        sh, runs whatever the title holds (flagship slice 2d.2)."""
+        from obaaf.checker.jenkins.model import UNTRUSTED_FOLDED
+        if isinstance(script, Name) and isinstance(self.p.literals.get(script.name), Str):
+            script = self.p.literals[script.name]          # def cmd = 'echo %CHANGE_TITLE%'; bat cmd
+        if not isinstance(script, Str):
+            return
+        # cmd reads environment names without regard to case; only names in the environment count (a Groovy local
+        # is not one): the untrusted variables, parameters, and names the file sets in the environment.
+        env_set = {n.lower(): n for n in self.p.env_set}
+        params = {n.lower(): n for n in self.p.string_params if n not in self.p.safe_params}
+        for var in self._bat_vars(script.text()):
+            hit = UNTRUSTED_FOLDED.get(var.lower())
+            found = (hit[0], hit[1]) if hit else None
+            name = env_set.get(var.lower())
+            if found is None and name is not None and name in self.p.tainted:
+                root, sev = self.p.tainted[name]
+                found = (name if name == root else f"{name} (from {root})", sev)
+            if found is None and var.lower() in params:
+                found = (f"parameter {params[var.lower()]}", "medium")
+            if found is None and name is not None and name in self.p.caller_values:
+                self.unknown("OBAAF-JEN-009", info.line,
+                             f"the bat step at line {info.line} expands %{var}%, {self.p.caller_values[name]}")
+                continue
+            if found:
+                self.add("OBAAF-JEN-009", info.line,
+                         f"The bat step in stage '{stage_label(info.ctx.stage)}' expands %{var}% ({found[0]}): cmd "
+                         "puts the value into the line before it parses it, so it can run commands of its own.",
+                         info.ctx.stage, severity=found[1])
+                return
 
     # ------------------------------------------------------------------ JEN-010
     def artifact_transfer(self) -> None:
-        if not any(i.publish for i in self.infos):
+        """Another job's artifacts fetched by a reference that moves, then published with no check that ties them
+        to a build record first (flagship slice 2d.2m). Before 2d.2m the rule read only `copyArtifacts(...)` called by
+        that name, judged a selector by its name (`specific('lastSuccessfulBuild')` was fixed), took a map given as
+        the only argument for the default selector, and accepted any later shell step of the same stage whose text
+        held `sha256sum -c`, `cosign verify` or `obaaf verify` anywhere (an `echo`, a comment, `|| true`, after the
+        publish); it read every later step of the stage once per copy, so nested helpers took seconds."""
+        publishes = [i for i in self.infos if i.publish]
+        if not publishes:
             return
+        fetches = []           # (info, kind, what): kind is "moving", "unknown" or "fixed"
+        named = set()          # ids of the nodes that name copyArtifacts in a copy the checker read
+        seen_calls: dict[int, list] = {}
         for info in self.infos:
-            if info.use.name != "copyArtifacts":
+            found = seen_calls.get(id(info.use.call))
+            if found is None or found[0] is not info.use.call:
+                found = [info.use.call, self._fetches_of(info, named)]
+                seen_calls[id(info.use.call)] = found
+            for kind, what in found[1]:
+                fetches.append((info, kind, what))
+        stray = self._unread_copy_names(named)
+        if not fetches and stray is None:
+            return
+        self.applicable.add("OBAAF-JEN-010")
+        if stray is not None:
+            self.unknown("OBAAF-JEN-010", stray,
+                         f"line {stray} names copyArtifacts in a form the checker does not read (a method pointer, a "
+                         "computed method name, invokeMethod or a call it could not expand), so what it copies, and "
+                         "by which reference, is not known")
+        fetches = [f for f in fetches if f[1] != "fixed"]
+        checks = [(i, self._fetch_check(i)) for i in self.infos]
+        # A check whose shell may run another program than the one it names counts as neither (the review of #365)
+        checks = sorted(((i, "steered" if self._steered(i) else kind) for i, kind in checks
+                         if kind and not i.ctx.deferred), key=lambda c: c[0].index)
+        keys: dict[int, frozenset] = {}
+
+        def guards(info: Info) -> frozenset:
+            found = keys.get(id(info))
+            if found is None:
+                found = keys[id(info)] = frozenset(guard_keys(info))
+            return found
+
+        def fixed_guards(info: Info) -> frozenset:
+            """The copy's conditions that cannot change between the copy and a check: those on the build's
+            parameters alone (`if (params.RELEASE)`). Others (`if (!fileExists('app.jar'))`) may be false at the
+            check because of the copy."""
+            return frozenset(guard_key(g) for g in info.ctx.guards if PARAMS_ONLY_GUARD.fullmatch(g.split(KEY_SEP, 1)[0]))
+
+        sets = {fixed_guards(info) for info, _k, _w in fetches}
+        if fetches and (max(len(fetches), len(checks)) * len(publishes) > 150_000
+                        or len(sets) * len(publishes) * max(1, len(checks)) > 1_500_000):
+            self.unknown("OBAAF-JEN-010", fetches[0][0].line,
+                         f"{len(fetches)} copies of another job's artifacts, {len(checks)} checks and {len(publishes)} "
+                         "publishes, as the file's methods expand, are too many to compare")
+            return
+
+        # For each publish and set of conditions the copy runs under, the latest check before the publish that can
+        # stop it, worked out once: comparing every copy with every step of its stage took 11.7 seconds on 744
+        # bytes of nested helpers. A check counts as `gates` says, except that a condition the copy runs under
+        # may also skip the check: when it does not hold, nothing was copied.
+        memo: dict[tuple, tuple[int, int, int]] = {}
+
+        def latest(publish: Info, copy_guards: frozenset) -> tuple[int, int, int]:
+            key = (publish.index, copy_guards)
+            found = memo.get(key)
+            if found is None:
+                full = digest = steered = -1
+                allowed = guards(publish) | copy_guards
+                for check, kind in checks:
+                    if check.index >= publish.index:
+                        break
+                    # the script itself is read by _fetch_check; here, a catchError, warnError or catch around it
+                    if check.ctx.swallowed or check.ctx.post in FAILURE_PATHS or concurrent(check.ctx, publish.ctx) \
+                            or not guards(check) <= allowed:
+                        continue
+                    if kind == "full":
+                        full = check.index
+                    elif kind == "steered":
+                        steered = check.index
+                    else:
+                        digest = check.index
+                found = memo[key] = (full, digest, steered)
+            return found
+
+        for info, kind, what in fetches:
+            if info.ctx.deferred:
+                # Even when the same closure is also read where it is called: it may run again where the checker
+                # does not see a call (`parallel a: c`), after the check
+                self.unknown("OBAAF-JEN-010", info.line,
+                             f"the copy at line {info.line} is in {info.ctx.deferred}; whether and where it runs is "
+                             "not known")
                 continue
-            self.applicable.add("OBAAF-JEN-010")
-            call = info.use.call
-            selector = named_arg(call, "selector")
-            sel = chain_name(selector.callee) if isinstance(selector, Call) else None
-            mutable = selector is None or sel in MUTABLE_SELECTORS
-            if not mutable:
-                if sel not in ("specific", "upstream"):
-                    self.unknown("OBAAF-JEN-010", info.line, f"copyArtifacts selector {sel or 'computed'} not understood")
+            # A retry or waitUntil block, or a loop, around the copy runs a publish before it again after it
+            again = set(info.ctx.repeats) | {guard_key(g) for g in info.ctx.guards if g.startswith("loop ")}
+            def repeated(p: Info) -> bool:
+                return bool(again) and bool(again & (set(p.ctx.repeats) | guards(p)))
+            later = [p for p in publishes if p.index > info.index or concurrent(info.ctx, p.ctx) or repeated(p)]
+            unchecked, digest_only, steered_only = [], [], []
+            for publish in later:
+                if publish.ctx.post in FAILURE_PATHS or publish.index < info.index or concurrent(info.ctx, publish.ctx):
+                    # a publish in a failure path runs when the check failed; one before the copy in the same retry
+                    # block runs after the copy of the try before; one beside the copy is checked by nothing after it
+                    unchecked.append(publish)
+                    continue
+                full, digest, steered = latest(publish, fixed_guards(info))
+                if full > info.index and not self._beside(info, full):
+                    continue
+                if steered > info.index and not self._beside(info, steered):
+                    steered_only.append((publish, steered))
+                elif digest > info.index and not self._beside(info, digest):
+                    digest_only.append(publish)
+                else:
+                    unchecked.append(publish)
+            if kind == "unknown":
+                if steered_only and not unchecked and not digest_only:
+                    check = self.infos[steered_only[0][1]]
+                    self.unknown("OBAAF-JEN-010", info.line,
+                                 f"the copy at line {info.line} copies artifacts from {what}, which the file does not "
+                                 f"fix; the check at line {check.line} runs before the publish, but "
+                                 f"{self._steered(check)}")
+                elif unchecked or digest_only or steered_only:
+                    self.unknown("OBAAF-JEN-010", info.line,
+                                 f"the copy at line {info.line} copies artifacts from {what}, which the file does not "
+                                 "fix, and the pipeline publishes after it")
                 continue
-            later = [i for i in self.by_stage.get(info.ctx.stage, []) if i.index > info.index]
-            if any(i.shell and CHECKSUM_VERIFY.search(i.script) for i in later):
+            if not unchecked:
+                if steered_only:
+                    check = self.infos[steered_only[0][1]]
+                    self.unknown("OBAAF-JEN-010", info.line,
+                                 f"the copy at line {info.line} copies artifacts from {what}; the check at line "
+                                 f"{check.line} runs before the publish, but {self._steered(check)}")
+                elif digest_only:
+                    self.unknown("OBAAF-JEN-010", info.line,
+                                 f"the copy at line {info.line} copies artifacts from {what}; a digest check runs before "
+                                 "the publish, but whether its digests come from somewhere other than the build it "
+                                 "copied from is not known (obaaf verify release checks them against the signed record)")
                 continue
-            project = literal(named_arg(call, "projectName")) or "another job"
-            same = self.stage_publishes(info.ctx.stage)
+            if all(p.ctx.deferred for p in unchecked):
+                self.unknown("OBAAF-JEN-010", info.line,
+                             f"the copy at line {info.line} copies artifacts from {what}, and the only publish after it "
+                             f"with no check is in {unchecked[0].ctx.deferred}")
+                continue
+            here = base_stage(info.ctx.stage)
+            same = any(base_stage(p.ctx.stage) == here and not p.ctx.deferred
+                       and (p.index > info.index or repeated(p)) for p in unchecked)
             self.add("OBAAF-JEN-010", info.line,
-                     f"Stage '{stage_label(info.ctx.stage)}' copies artifacts from {project} by "
-                     f"{'the default selector (last successful build)' if selector is None else sel + '()'}, "
-                     "a reference that moves, and does not check their digests before "
+                     f"Stage '{stage_label(info.ctx.stage)}' copies artifacts from {what}, a reference that moves, "
+                     "and does not check their digests before "
                      + ("publishing them in the same stage." if same else "the pipeline publishes."),
                      info.ctx.stage, severity="high" if same else "medium")
 
+    def _beside(self, copy: Info, check_index: int) -> bool:
+        """Whether the check at `check_index` runs in a parallel branch beside the copy, so it may run first."""
+        return concurrent(copy.ctx, self.infos[check_index].ctx)
+
+    def _fetch_check(self, info: Info) -> str | None:
+        """'full' for a step that runs `obaaf verify release`, 'digest' for one that runs another digest or
+        signature check, as a command whose failure stops the `sh` script (flagship slice 2d.2m): read with the
+        reader of slice 2d.2e, so a command in an `echo`, a comment, after `|| true`, `&`, `set +e` or `exit`, or in a
+        script that does not stop at a failed command, is no check. `bat`, `powershell` and `pwsh` are not read."""
+        cached = self._script_cache.get(("fetch-check", id(info.use.call)))
+        if cached is not None and cached[0] is info.use.call:
+            return cached[1]
+        kind = None
+        if self._status_stops(info) and info.shell and info.use.name.rsplit(".", 1)[-1] == "sh" and info.script:
+            read = self._sh_commands(info.script)
+            if read is not None:
+                commands, _complete = read
+                for words in commands:
+                    if {"--help", "-h", "--version"} & set(words):
+                        continue
+                    joined = " ".join(words)
+                    if any(r.match(joined) for r in self.release_verify):
+                        kind = "full"
+                        break
+                    if FETCH_DIGEST_CHECK.match(joined) or any(r.match(joined) for r in self.verify_cmds):
+                        kind = "digest"
+        self._script_cache[("fetch-check", id(info.use.call))] = (info.use.call, kind)
+        return kind
+
+    def _steered(self, info: Info) -> str | None:
+        """Why a check step's shell may run another program than the one it names, or None (the review of pull request
+        #365, for #344): a variable that `steers` counts (`PATH`, bash's, the loader's, Python's and the others the
+        GitHub rules read since slice 2d.13), or one whose name the checker cannot read, set by a `withEnv` entry, an
+        `environment { }` block or a matrix axis around the step (`PATH+NAME` is `PATH`: Jenkins puts the value in front
+        of it), or named as a credential binding's variable around it; or set by a script anywhere in the file
+        (`env.PATH = ...` holds for every later step, wherever it is), or a place the file names withEnv that the checker
+        did not read (`_file_steering`). Before the review only an `export` inside the step's own script stopped the
+        reader, so `withEnv(["PATH+X=${env.WORKSPACE}/x"])` around `obaaf verify release` counted the check, whatever
+        `x` held. What an agent's or a tool's own setup puts in the environment (the controller's node properties,
+        `tools { }`, a container's image or its `-e` options, a pod template's `envVars`) is not read."""
+        for name, line in info.ctx.env_names:
+            if name == "?":
+                return (f"a withEnv entry, environment block or matrix axis at line {line}, around the step, sets a "
+                        "variable whose name the checker cannot read, which may change the program the step's shell "
+                        "runs")
+            if steers(name.split("+", 1)[0]):
+                return (f"{name} is set around the step (line {line}), which can change the program the step's shell "
+                        "runs")
+        for binding in info.ctx.creds:
+            for name in (*binding.variables, *binding.paths):
+                if isinstance(name, str) and name == "?":
+                    return (f"{binding.how} at line {binding.line} puts a credential around the step in a variable "
+                            "whose name the checker cannot read, which may change the program the step's shell runs")
+                if isinstance(name, str) and steers(name):
+                    return (f"{binding.how} at line {binding.line} puts a credential in {name} around the step, which "
+                            "can change the program the step's shell runs")
+        return self._file_steering()
+
+    # Methods of `env` that only read it; any other method called on it, or named without a call (a method pointer,
+    # `env.&setProperty`), may set a variable (`setProperty`, `put`, `with { }`, `identity { }`, `invokeMethod`).
+    _ENV_READS = frozenset({"getEnvironment", "getOverriddenEnvironment", "getProperty", "getProperties", "get",
+                            "getAt", "containsKey", "keySet", "entrySet", "values", "toString", "hashCode", "isEmpty",
+                            "size", "equals"})
+    _ENV_SETTERS = frozenset({"setProperty", "put", "putAt"})
+    _ENV_MUTATORS = _ENV_SETTERS | {"with", "identity", "tap", "putAll", "invokeMethod", "metaClass", "setMetaClass",
+                                    "overrideAll", "override"}
+    _IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+    # In text the parser keeps no node for (a loop's header, a method's parameters and their defaults, a switch's case
+    # labels): `env` used as a value (not followed by `.`, `?.` or `[`), written to, incremented, or with a method
+    # that may set a variable named. Bounded, and run only on those short texts.
+    _ENV_TEXT_RISK = re.compile(
+        r"""\b(?:getProperty|getAt|invokeMethod|setProperty)\b|\.\s*&|\.\s*["']\$|[\[.]\s*(?:'{1,3}env'{1,3}|"{1,3}env"{1,3})|"""
+        r"""(?<!['"])\benv\b(?!['"])(?!\s*(?:\?\.|\.|\[))"""
+        r"""|\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\*\*|<<|>>>|>>|\?:|[-+*/%&|^])?=(?![=~])"""
+        r"""|\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\+\+|--)|(?:\+\+|--)\s*\benv\b"""
+        r"""|\benv\b\s*\??\.\s*&?\s*(?:setProperty|put|putAt|putAll|with|identity|tap|invokeMethod|metaClass|"""
+        r"""setMetaClass|overrideAll|override)\b""")
+
+    _ENV_POSTFIX = re.compile(r"""\benv\b\s*(?:\??\.\s*[\w$'"{}]{1,200}|\[[^\]\n]{0,200}\])\s*(?:\+\+|--)""")
+
+    def _tree_env_writes(self) -> list:
+        """(name, line) for every write to the build's `env` anywhere in the parsed file, and in every `${...}` of its
+        strings (parsed as statements), whether or not the walker reads that place (a `when { expression { } }`, a
+        method a directive calls, a GString). `env` is the name `env`, any `x.env`, `getProperty('env')`,
+        `getAt('env')` or `this['env']`; a computed one (`getProperty(n)`, `this."${n}"`, `this[n]`) may be. Each use
+        of it is one of: a property or index read, which is safe; a property or index assigned or incremented, a
+        setter with a literal name, which gives that name; or anything else, which gives "?": another method called
+        on it or named (a pointer), a computed name written to, and `env` used as a value (given to a variable, a
+        closure's delegate, a method, a list, a ternary, returned), which the checker does not follow. So are a call
+        or pointer whose name is computed, `invokeMethod`, a statement the parser could not read that names `env`
+        near it, and the same uses in the text the parser keeps no node for (`_ENV_TEXT_RISK`)."""
+        import time as _time
+        from obaaf.checker.jenkins.parser import parse as parse_groovy
+        tree = self.p.tree
+        if tree is None:
+            return []
+        from obaaf.checker.jenkins.lexer import translate_unicode_escapes
+        lines = translate_unicode_escapes(self.p.source or "").split("\n")
+        writes = []
+        # Receivers that can be the script itself: `this` and the names Groovy gives a closure's owners, variables the
+        # file gives one of them anywhere, and every parameter of a method or closure (a caller may pass `this`).
+        script_names = {"this", "script", "steps", "binding", "owner", "delegate", "thisObject"} | self.p.script_vars
+        parents: dict = {}
+        entries = []               # (node, the line to report, the interpolation's text or None)
+        roots = [(tree, None, None)]
+        seen_exprs: set = set()
+        while roots and len(entries) < 2_000_000:
+            root, outer, own = roots.pop()
+            stack = [root]
+            while stack and len(entries) < 2_000_000:
+                n = stack.pop()
+                if n is None:
+                    continue
+                entries.append((n, outer or getattr(n, "line", 0), own))
+                for c in children(n):
+                    if c is not None:
+                        parents[id(c)] = n
+                        stack.append(c)
+                if isinstance(n, Str) and n.interpolated:
+                    here = outer or getattr(n, "line", 0)
+                    for text in n.exprs:
+                        if text in seen_exprs or not re.search(r"\benv\b|[(&\"'?]|this|script|steps|binding", text):
+                            continue
+                        seen_exprs.add(text)
+                        try:
+                            sub = parse_groovy(text.strip().removeprefix("->"), deadline=_time.monotonic() + 1.0)
+                        except Exception:              # noqa: BLE001 - a text the parser refuses is not read
+                            sub = None
+                        if sub is None or sub.error or sub.tree is None:
+                            if re.search(r"\benv\b", text):
+                                writes.append(("?", here))
+                        else:
+                            roots.append((sub.tree, here, text))
+
+        # A method's or closure's parameter, and `it`, may be the script, or anything else (a map with an `env` key):
+        # their `env` counts only where it is written to or given a method that may set a variable.
+        param_names = {"it"}
+        for n, _line, _own in entries:
+            if isinstance(n, MethodDef):
+                param_names.update(p for p in n.params if isinstance(p, str))
+            elif isinstance(n, (Closure, Block)) and getattr(n, "params", None):
+                param_names.update(p for p in n.params if isinstance(p, str))
+        def scriptish(n) -> str | None:
+            """"strong" when `n` can be the script by its name (a name in `script_names`, a chain of `owner`,
+            `delegate` or `thisObject` after one, `getOwner()` and its kin on anything), "weak" when it is a
+            parameter or `it` (or such a chain after one), None otherwise."""
+            if n is None:
+                return "strong"
+            if isinstance(n, Call):
+                callee = n.callee
+                name = callee.name if isinstance(callee, Prop) else (path_of(callee) or "")
+                return "strong" if name in ("getOwner", "getDelegate", "getThisObject") else None
+            path = path_of(n)
+            if path is None:
+                if isinstance(n, Prop) and n.name in ("owner", "delegate", "thisObject"):
+                    return scriptish(n.target)
+                return None
+            first, *rest = path.split(".")
+            if not all(part in ("owner", "delegate", "thisObject") for part in rest):
+                return None
+            return "strong" if first in script_names else "weak" if first in param_names else None
+
+        weak_env: set = set()
+
+        def env_ref(n, writing: bool = False) -> str | None:
+            """"strong" when `n` is, or may be, the build's `env`; "weak" when it may be, through a parameter or `it`
+            (`it.env`), so that only a write or a method that may set a variable counts; None otherwise. A property
+            named `env` of a receiver that cannot be the script (`buildInfo.env`, `config.env`) counts only where it is
+            written to."""
+            if isinstance(n, Name):
+                return "strong" if n.name == "env" else "weak" if n.name in weak_env else None
+            if isinstance(n, Prop):
+                if n.name == "env":
+                    return "strong" if writing else scriptish(n.target)
+                return scriptish(n.target) if "${" in n.name else None
+            if isinstance(n, Call) and (n.callee.name if isinstance(n.callee, Prop) else (path_of(n.callee) or "")) in (
+                    "getProperty", "getAt"):
+                key = literal(n.args[0]) if n.args else None
+                return "strong" if key is None or key == "env" else None
+            if isinstance(n, Index):
+                level = scriptish(n.target)
+                key = literal(n.index)
+                return level if level and (key is None or key == "env") else None
+            return None
+
+        # `this.with { it.env ... }`, `identity { s -> s.env ... }`: the closure's `it` or parameter is the script. The
+        # names are not scoped to that closure, so `it` then counts as the script everywhere in the file.
+        for n, _line, _own in entries:
+            if not isinstance(n, Call):
+                continue
+            callee = n.callee
+            name = callee.name if isinstance(callee, Prop) else (path_of(callee) or "")
+            if name in ("with", "identity", "tap") and (not isinstance(callee, Prop) or scriptish(callee.target)
+                                                        == "strong"):
+                bodies = [n.closure] + [a for a in n.args if isinstance(a, Closure)]
+                for body in bodies:
+                    params = getattr(body, "params", None) or getattr(getattr(body, "body", None), "params", None)
+                    script_names.update(p for p in (params or ["it"]) if isinstance(p, str))
+                    script_names.add("it")
+        for _round in range(4):
+            before = len(script_names) + len(param_names) + len(weak_env)
+            for n, _line, _own in entries:
+                value = n.value if isinstance(n, (Decl, Assign)) else None
+                name = n.name if isinstance(n, Decl) else (n.target.name if isinstance(n, Assign) and isinstance(
+                    n.target, Name) else None)
+                if not name or value is None or name in script_names:
+                    continue
+                level = scriptish(value)
+                if level == "strong" or any(isinstance(m, Name) and m.name in ("this", "owner", "delegate", "thisObject")
+                                            for m in find_nodes(value, lambda _m: True, limit=2_000)):
+                    script_names.add(name)            # def s = this, def s = c ? this : null
+                elif level == "weak":
+                    param_names.add(name)             # def t = s, with s a parameter
+                elif env_ref(value) == "weak":
+                    weak_env.add(name)                # def e = s.env, with s a parameter: a write through e counts
+            if len(script_names) + len(param_names) + len(weak_env) == before:
+                break
+
+        postfix_lines: dict = {}
+
+        def postfix(line: int, own) -> bool:
+            key = own if own is not None else line
+            if key not in postfix_lines:
+                text = own if own is not None else (lines[line - 1] if 0 < line <= len(lines) else "")
+                postfix_lines[key] = bool(self._ENV_POSTFIX.search(text))
+            return postfix_lines[key]
+
+        opaque_seen: dict = {}
+
+        def opaque_near_env(line: int, own) -> bool:
+            key = own if own is not None else line
+            if key not in opaque_seen:
+                text = own if own is not None else text_of(line, line + 10, None)
+                opaque_seen[key] = bool(re.search(r"\benv\b|getProperty|getAt", text))
+            return opaque_seen[key]
+
+        def label_end(cases: list, k: int, line: int) -> int:
+            """The last line a case label can be on: the line of the case's first statement, or of the next case, or
+            ten lines on."""
+            case = cases[k]
+            start = getattr(case, "line", line)
+            stmts = getattr(case, "stmts", None)
+            if stmts:
+                return max(getattr(stmts[0], "line", start), start)
+            if k + 1 < len(cases):
+                return max(getattr(cases[k + 1], "line", start), start)
+            return start + 10
+
+        def risky_text(text: str) -> bool:
+            return bool(self._ENV_TEXT_RISK.search(text))
+
+        def text_of(first: int, last: int, own) -> str:
+            return own if own is not None else "\n".join(lines[max(first - 1, 0):max(last, first)])
+
+        for n, line, own in entries:
+            parent = parents.get(id(n))
+            above_parent = parents.get(id(parent)) if parent is not None else None
+            written = isinstance(parent, (Prop, Index)) and parent.target is n and (
+                (isinstance(above_parent, Assign) and above_parent.target is parent) or (
+                    isinstance(above_parent, Call) and above_parent.callee is parent and isinstance(parent, Prop)
+                    and parent.name in self._ENV_SETTERS))
+            level = env_ref(n, writing=written)
+            if level:
+                if isinstance(parent, (Prop, Index)) and parent.target is n:
+                    use = parent
+                    above = parents.get(id(use))
+                    name = (use.name if isinstance(use, Prop) else literal(use.index)) or "?"
+                    plain = isinstance(name, str) and bool(self._IDENTIFIER.fullmatch(name))
+                    if isinstance(above, Assign) and above.target is use:
+                        writes.append((name if plain else "?", line))
+                    elif isinstance(above, Unary) and above.op in ("++", "--"):
+                        writes.append(("?", line))
+                    elif isinstance(above, Call) and above.callee is use and isinstance(use, Prop):
+                        if use.name in self._ENV_SETTERS:
+                            key = literal(above.args[0]) if len(above.args) >= 2 else None
+                            writes.append((key if key and self._IDENTIFIER.fullmatch(key) else "?", line))
+                        elif use.name not in self._ENV_READS and (level == "strong" or use.name in self._ENV_MUTATORS):
+                            writes.append(("?", line))
+                    elif isinstance(use, Prop) and use.name in self._ENV_MUTATORS:
+                        writes.append(("?", line))     # env.&setProperty, env.metaClass
+                    elif postfix(line, own):
+                        writes.append(("?", line))     # env.PATH++: the parser keeps no node for a postfix operator
+                elif level == "strong":
+                    writes.append(("?", line))         # env as a value: an alias, a delegate, an argument, a result
+            elif isinstance(n, Call):
+                callee = n.callee
+                if (isinstance(callee, Str) and callee.interpolated) or (isinstance(callee, Prop) and "${" in callee.name
+                                                                          and not env_ref(callee)):
+                    writes.append(("?", line))         # "$m"(...), x."$m"(...): a method whose name is computed
+                elif (path_of(callee) or "").rsplit(".", 1)[-1] == "invokeMethod":
+                    writes.append(("?", line))
+            elif isinstance(n, Prop) and n.name in ("getProperty", "getAt", "setProperty", "invokeMethod") and not (
+                    isinstance(parent, Call) and parent.callee is n):
+                writes.append(("?", line))             # this.&getProperty: a pointer to a method that reaches env
+            elif isinstance(n, Opaque) and line and opaque_near_env(line, own):
+                # (env.PATH, env.X) = [...], foo(env.PATH = 'x'): a statement the parser could not read, from its first
+                # line and the ten after it, which may hold the rest of it
+                writes.append(("?", line))
+            elif isinstance(n, (Loop, MethodDef)) and line and risky_text(
+                    text_of(line, getattr(n.body, "line", line), own)):
+                writes.append(("?", line))             # a loop's header, a method's parameter defaults
+            elif isinstance(n, Switch) and line and any(
+                    risky_text(text_of(getattr(case, "line", line), label_end(n.cases, k, line), own))
+                    for k, case in enumerate(n.cases)):
+                writes.append(("?", line))             # case { env.PATH = '/x'; true }: a case label
+        return writes
+
+    def _file_steering(self) -> str | None:
+        """The part of `_steered` that is the same for every step of the file, worked out once."""
+        cached = self._script_cache.get(("file-steering",))
+        if cached is not None:
+            return cached[0]
+        reason = None
+        writes = list(self.p.env_scripted) + self._tree_env_writes()
+        for name, line in sorted(writes, key=lambda w: w[1]):
+            if name == "?":
+                reason = (f"line {line} may set a variable in the build's environment whose name the checker cannot "
+                          "read, or call a method it cannot name, which may change the program the step's shell runs")
+                break
+            if steers(name.split("+", 1)[0]):
+                reason = (f"line {line} sets {name} in the build's environment, which can change the program the step's "
+                          "shell runs")
+                break
+        if reason is None and self.p.tree is not None:
+            def names_with_env(n) -> bool:
+                if isinstance(n, (Name, Prop)):
+                    return n.name == "withEnv"
+                if isinstance(n, Call) and isinstance(n.callee, Str):
+                    return n.callee.text() == "withEnv"
+                return False
+            read = self.p.with_env_read
+            found = [n for n in find_nodes(self.p.tree, names_with_env)
+                     if id(n) not in read and not (isinstance(n, Call) and id(n.callee) in read) and n.line]
+            if found:
+                reason = (f"line {min(n.line for n in found)} names withEnv in a form or place the checker does not read "
+                          "(a method pointer, a quoted name, options { withEnv(...) }, a when expression), so what it "
+                          "sets around which steps is not known")
+        self._script_cache[("file-steering",)] = (reason,)
+        return reason
+
+    @staticmethod
+    def _status_stops(info: Info) -> bool:
+        """Whether a failed shell step fails the build: no `returnStatus`, or `returnStatus: false` written out. A
+        computed value may be true (flagship slice 2d.2m)."""
+        status = call_entries(info.use.call, "script").get("returnStatus")
+        return status is None or (isinstance(status, Name) and status.name == "false") or literal(status) == "false"
+
+    @staticmethod
+    @functools.lru_cache(maxsize=256)       # OBAAF-JEN-011 and 012 read the same scripts (flagship slice 2d.2o)
+    def _sh_commands(text: str) -> tuple[list[list[str]], bool] | None:
+        """The commands of an `sh` script whose failure fails the step, read by the reader of slice 2d.2e, and
+        whether the whole script was read; None when the script names a #! program other than sh, bash or dash,
+        which the reader does not read (flagship slices 2d.2m and 2d.2n)."""
+        errexit, pipefail = True, False      # Jenkins runs an `sh` script without a #! line as `sh -xe`
+        if text.startswith("#!"):           # durable-task reads a #! line only at the very start
+            first, _, text = text.partition("\n")
+            words = first[2:].split()
+            program = words[0].rsplit("/", 1)[-1] if words else ""
+            if program == "env" and len(words) > 1:
+                program, words = words[1].rsplit("/", 1)[-1], words[1:]
+            if program not in ("sh", "bash", "dash"):
+                return None
+            if any(re.fullmatch(r"-[a-zA-Z]*n[a-zA-Z]*", w) for w in words[1:]):
+                return None                   # `#!/bin/bash -ne`: read the script, run nothing (2d.2n review)
+            errexit = any(re.fullmatch(r"-[a-zA-Z]*e[a-zA-Z]*", w) for w in words[1:])
+        lines = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+        if not text:
+            return None
+        if not errexit and len(lines) == 1:
+            errexit = True                    # one command: the script's status is that command's
+        return binding_commands(text, errexit, pipefail)
+
+    def _provenance_kind(self, info: Info) -> str | None:
+        """What a step is as OBAAF-JEN-012's check (flagship slice 2d.2n): "full" for `obaaf verify release`,
+        "provenance" for another provenance check (`cosign verify-attestation`, `gh attestation verify`,
+        `slsa-verifier verify`, `obaaf verify release --pre-approval`), each as a command whose failure fails the `sh`
+        step, read by the reader of slice 2d.2e; "unread" (cannot tell) when the step names such a check in a place
+        where the reader may be wrong or does not vouch for it: Groovy puts text into the script (`"... ${x}"`,
+        concatenation), `returnStatus` is computed, `.trim()` may move a #! line to the start, the command is named by
+        a path, the reader stopped before it or does not read it on its line, or the step is `bat`, `powershell`,
+        `pwsh` or another #! program; None otherwise (no such check, a true `returnStatus`, the name only in an `echo`
+        argument or a comment, `--help`). Before 2d.2n the rule searched the script's text."""
+        if not info.shell or not info.script or not CHECK_NAMED.search(info.script):
+            return None
+        cached = self._script_cache.get(("provenance-check", id(info.use.call)))
+        if cached is not None and cached[0] is info.use.call:
+            return cached[1]
+        kind = self._provenance_read(info)
+        if kind == "unread" and info.verify not in ("full", "provenance"):
+            kind = None       # the older reading found its failure ignored: `|| true`, a pipe, `set +e`, a later command
+        elif kind == "path":
+            kind = "unread"
+        self._script_cache[("provenance-check", id(info.use.call))] = (info.use.call, kind)
+        return kind
+
+    def _provenance_read(self, info: Info) -> str | None:
+        status = call_entries(info.use.call, "script").get("returnStatus")
+        if status is not None and not ((isinstance(status, Name) and status.name in ("false", "true"))
+                                       or literal(status) in ("false", "true")):
+            return "unread"                        # computed: it may be true
+        if not self._status_stops(info):
+            return None                            # returnStatus: true
+        if info.dynamic or info.exprs:
+            return "unread"                        # Groovy builds the text the shell runs: "... ${EXTRA}"
+        if info.use.name.rsplit(".", 1)[-1] != "sh":
+            return "unread"                        # bat, powershell and pwsh are not read
+        text = info.script
+        if not text.startswith("#!") and text.lstrip().startswith("#!") and _text_method(shell_script(info.use.call)):
+            return "unread"                        # a .trim() may make the #! line the first
+        read = self._sh_commands(text)
+        if read is None:
+            return "unread"                        # another #! program
+        commands, complete = read
+        kind = None
+        for words in commands:
+            if _asks_help(words):
+                continue
+            joined = " ".join(words)
+            if any(r.match(joined) for r in self.release_verify):
+                if any(len(w) >= 4 and "--pre-approval".startswith(w) for w in words):
+                    kind = "provenance"            # everything but the approvals (argparse takes `--pr` for it)
+                elif any("$" in w or "`" in w for w in words[3:]):
+                    # `$FLAGS`, `--artifacts $A` unquoted or a substitution may become --pre-approval or --help; the
+                    # reader's words do not say what was quoted
+                    kind = kind or "expansion"
+                else:
+                    return "full"
+            elif any(r.match(joined) for r in self.verify_cmds):
+                kind = "provenance"
+        if kind == "expansion":
+            return "unread"
+        if kind:
+            return kind
+        # The reader vouches for no check. Cannot tell when the script names one in a command the reader does not
+        # count (`set -o pipefail; obaaf verify release ... | tee log`, `timeout 600 obaaf verify release`, a line
+        # after one it cannot read) and the older reading found nothing that ignores its failure (the caller checks);
+        # no check when the name is only an argument of `echo` or `printf`, is in a comment, or the command asks for
+        # `--help`. A path to `obaaf` is cannot tell whatever the older reading says: which program it is depends on
+        # the workspace.
+        found = None
+        for raw in text.split("\n"):
+            if not CHECK_NAMED.search(raw):
+                continue
+            tokens = _script_tokens(_strip_comment(raw))
+            if tokens is None:
+                found = found or "unread"          # a line the tokenizer cannot split
+                continue
+            command: list[str] = []
+            for word in [w for w, _quoted in tokens] + [";"]:
+                if word not in COMMAND_START:
+                    command.append(word)
+                    continue
+                match = CHECK_NAMED.search(" ".join(command)) if command else None
+                at = max((k for k in range(len(command)) if CHECK_NAMED.search(" ".join(command[k:k + 4]))),
+                         default=0) if match else 0
+                if match and command[0] not in ("echo", "printf", ":") and not _asks_help(command[at:]):
+                    # `OUT="$(obaaf verify release ...)"`, `timeout 600 obaaf verify release`: not counted by the
+                    # reader, but the check may stop the script
+                    found = "path" if match.group(1) else (found or "unread")
+                command = []
+        return found
+
+    def _fetches_of(self, info: Info, named: set) -> list[tuple[str, str]]:
+        """How a step fetches another job's artifacts: [(kind, what)], kind "moving", "fixed" or "unknown"."""
+        call = info.use.call
+        last = info.use.name.rsplit(".", 1)[-1]
+        out = []
+        if last == "copyArtifacts":
+            named.add(id(call.callee))
+            if len(call.args) == 1 and not call.named and not isinstance(call.args[0], (MapLit, Str)):
+                # copyArtifacts(args): a variable given one map and nothing else is that map; anything else
+                # (`base + [...]`, a call) may hold any argument
+                value = self._single_value(call.args[0].name, call.args[0]) if isinstance(call.args[0], Name) else None
+                if isinstance(value, MapLit):
+                    call = Call(callee=call.callee, args=[value], line=call.line)
+                else:
+                    call = Call(callee=call.callee, named=[("*", None)], line=call.line)
+            out.append(self._copy_reference(call_entries(call, "projectName")))
+        elif last == "step":
+            if len(call.args) == 1 and isinstance(call.args[0], Name) and not call.named:
+                value = self._single_value(call.args[0].name, call.args[0])
+                if isinstance(value, MapLit):
+                    call = Call(callee=call.callee, args=[value], line=call.line)
+            entries = call_entries(call, None)
+            cls = entries.get("$class")
+            if isinstance(cls, Str) and not cls.interpolated and cls.text().rsplit(".", 1)[-1] == "CopyArtifact":
+                named.add(id(cls))
+                out.append(self._copy_reference(entries))
+            elif cls is not None and not (isinstance(cls, Str) and not cls.interpolated):
+                out.append(("unknown", "a step whose $class the file computes"))
+        elif last == "invokeMethod" and call.args and literal(call.args[0]) == "copyArtifacts":
+            named.add(id(call.args[0]))
+            out.append(("unknown", "a copy called through invokeMethod"))
+        urls = []
+        if info.shell:
+            urls += [text.replace("'", "").replace('"', "") for text in self._expanded(info.script, call)]
+        elif last == "httpRequest":
+            target = step_arg(call, "url") or first_arg(call)
+            if isinstance(target, Name):
+                target = self._single_value(target.name, target)
+            urls += self._expanded(text_or_expr(target), call)
+        for text in urls:
+            for found in artifact_urls(text or ""):
+                if found not in out:
+                    out.append(found)
+        return out
+
+    def _expanded(self, text: str, read) -> list[str]:
+        """`text`, and `text` with `$NAME`, `${NAME}` and `${env.NAME}` replaced by the literal value the file's
+        `environment` or a variable it declares gives NAME, so a URL kept there is read where it is used. Both are
+        read and what either shows counts: the shell or a `withEnv` may set NAME to something else, so a value put in
+        never takes away what the text alone shows (from the slice's third review)."""
+        if "$" not in text:
+            return [text]
+        def value(m) -> str:
+            name = m.group(1) or m.group(2)
+            node = self.p.env_values.get(name)
+            if node is None:
+                node = self._single_value(name, read)
+            return node.text() if isinstance(node, Str) else m.group(0)
+        expanded = re.sub(r"\$\{(?:env\.)?([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)", value, text)
+        return [text] if expanded == text else [text, expanded]
+
+    def _copy_reference(self, entries: dict) -> tuple[str, str]:
+        """What a copy's projectName and selector fix (flagship slice 2d.2m)."""
+        project = entries.get("projectName")
+        shown_project = (f"'{literal(project)}'" if literal(project) is not None else "a computed project") \
+            if project is not UNREAD else "a project the file does not show"
+        name = literal(project) if project not in (None, UNREAD) else None
+        project_text = name or "another job"
+        selector = entries.get("selector")
+        if selector is UNREAD:
+            return ("unknown", f"{shown_project} with a selector that a spread map may set")
+        if selector is None or (isinstance(selector, Name) and selector.name == "null"):
+            return ("moving", f"{project_text} by the default selector (last successful build)")
+        kind, what = self._selector(selector)
+        if kind == "moving":
+            return ("moving", f"{project_text} by {what}")
+        if kind == "fixed" and name is None:
+            return ("unknown", f"{shown_project}, by {what}")
+        return (kind, f"{project_text} by {what}")
+
+    def _selector(self, node) -> tuple[str, str]:
+        """("fixed" | "moving" | "unknown", how it reads) for a copyArtifacts selector: a symbol call
+        (`lastSuccessful()`), a map with `$class` (`[$class: 'StatusBuildSelector']`), or a variable that is given
+        one of them and nothing else."""
+        if isinstance(node, Name):
+            node = self._single_value(node.name, node)
+        symbol, entries = None, {}
+        if isinstance(node, Call):
+            # A plugin symbol only when called by its bare name and the file defines nothing by that name
+            # (`def specific(n) { lastSuccessful() }`, `s.specific('42')` are not the plugin's)
+            if isinstance(node.callee, Name) and node.callee.name not in self.p.local_names:
+                symbol = node.callee.name
+            entries = call_entries(node, SELECTOR_POSITIONAL.get(symbol))
+        elif isinstance(node, MapLit):
+            entries = call_entries(Call(callee=Name("[:]", line=node.line), args=[node], line=node.line), None)
+            cls = entries.get("$class")
+            if isinstance(cls, Str) and not cls.interpolated:
+                symbol = SELECTOR_CLASSES.get(cls.text().rsplit(".", 1)[-1], "?" + cls.text())
+        if symbol is None:
+            return ("unknown", "a selector the file computes")
+        if symbol in MUTABLE_SELECTORS:
+            return ("moving", f"{symbol}()")
+        if symbol == "specific":
+            return self._build_number(entries.get("buildNumber"))
+        if symbol == "upstream":
+            fallback = entries.get("fallbackToLastSuccessful")
+            if fallback is None or (isinstance(fallback, Name) and fallback.name == "false"):
+                return ("fixed", "upstream()")
+            if isinstance(fallback, Name) and fallback.name == "true":
+                return ("moving", "upstream(fallbackToLastSuccessful: true), which takes the last successful build "
+                                  "when no upstream build started this one")
+            return ("unknown", "upstream() with a fallback the file computes")
+        return ("unknown", f"the selector {symbol.lstrip('?')}")
+
+    def _build_number(self, node) -> tuple[str, str]:
+        """A SpecificBuildSelector's build number: fixed only for digits written in the file, or the number of a
+        build the file started (`def b = build(...)`, then `"${b.number}"`). Other text is read by Jenkins as a
+        permalink or a build's display name, and `${...}` in it is expanded at run time (the plugin's help)."""
+        if node is None or node is UNREAD:
+            return ("unknown", "specific() with a build number the file does not show")
+        text = literal(node)
+        if text is not None:
+            if text.isascii() and text.isdigit():
+                return ("fixed", f"specific('{text}')")
+            if "$" in text:
+                return ("unknown", f"specific('{text}'), whose value is expanded at run time")
+            return ("moving", f"specific('{text}'), which Jenkins reads as a permalink or a build's display name")
+        if isinstance(node, Num):
+            return ("fixed", f"specific({node.value})") if node.value.isdigit() else \
+                ("unknown", f"specific({node.value})")
+        ref = None
+        if isinstance(node, Str) and len(node.exprs) == 1 and node.text() == "${" + str(node.exprs[0]) + "}":
+            ref = node.exprs[0]
+        elif isinstance(node, (Prop, Name)):
+            ref = path_of(node)
+        elif isinstance(node, Call) and isinstance(node.callee, Prop) and not node.args \
+                and node.callee.name in ("toString", "getNumber"):
+            ref = path_of(node.callee.target) if node.callee.name == "toString" else \
+                f"{path_of(node.callee.target)}.number"
+        if ref and "." in ref:
+            var, _, attr = ref.partition(".")
+            value = self._single_value(var, node) if attr in ("number", "getNumber()") else None
+            if isinstance(value, Call) and isinstance(value.callee, Name) and value.callee.name == "build" \
+                    and "build" not in self.p.local_names:
+                return ("fixed", f"the number of the build it started ({ref})")
+        return ("unknown", "specific() with a build number computed at run time")
+
+    def _single_value(self, name: str, read):
+        """The one value the file gives a variable where `read` reads it, or None (flagship slice 2d.2m, from its
+        three reviews): the file must declare the name once, with a value, in a block that encloses the read with
+        no method or class between them (anything else is a property of the script, which a getter, a binding
+        write or `propertyMissing` can give another value), before the read, and name it in exactly one other
+        place, the read (a second assignment, a change through a property, index or method, an alias, an argument,
+        a parameter or loop variable of the same name, or a use inside an interpolated string may change it)."""
+        table = self.__dict__.get("_values_cache")
+        if table is None:
+            table = self._values_cache = self._value_table()
+        decls, parents = table
+        found = decls.get(name)
+        if found is None or read is None:
+            return None
+        decl, value = found
+        block = parents.get(id(decl))
+        if block is None or (getattr(read, "line", 0), getattr(read, "col", 0)) <= (decl.line, decl.col):
+            return None             # read before the declaration, on an earlier line or earlier on its line
+        node = parents.get(id(read))
+        while node is not None:
+            if node is block:
+                return value
+            if isinstance(node, (MethodDef, ClassDef)):
+                return None
+            node = parents.get(id(node))
+        return None
+
+    def _value_table(self) -> tuple[dict, dict]:
+        tree = self.p.tree
+        if tree is None:
+            return {}, {}
+        decls: dict[str, list] = {}
+        uses: dict[str, int] = {}
+        parents: dict[int, object] = {}
+
+        def use(name: str, times: int = 1) -> None:
+            uses[name] = uses.get(name, 0) + times
+
+        stack = [tree]
+        seen = 0
+        while stack and seen < 2_000_000:
+            n = stack.pop()
+            seen += 1
+            for child in children(n):
+                if child is not None and not isinstance(child, (str, int, float, bool)):
+                    parents[id(child)] = n
+                    stack.append(child)
+            if isinstance(n, Decl):
+                decls.setdefault(n.name, []).append(n)
+            elif isinstance(n, (Name, Prop)):
+                use(n.name)
+            elif isinstance(n, Str) and n.interpolated:
+                for expr in n.exprs:
+                    for word in re.findall(r"(?<![\w$])[A-Za-z_]\w*", str(expr)):
+                        use(word)
+            params = getattr(n, "params", None)
+            if isinstance(params, list):
+                for param in params:
+                    use(param if isinstance(param, str) else str(getattr(param, "name", "")))
+        if stack:
+            return {}, {}
+        table = {name: (nodes[0], nodes[0].value) for name, nodes in decls.items()
+                 if len(nodes) == 1 and nodes[0].value is not None and uses.get(name, 0) == 1}
+        return table, parents
+
+    def _unread_copy_names(self, named: set) -> int | None:
+        """The line of the first place the file names copyArtifacts (or the CopyArtifact class) other than a copy
+        the checker read: a method pointer, a computed method name, a call it did not expand."""
+        tree = self.p.tree
+        if tree is None:
+            return None
+        def names_copy(n) -> bool:
+            if isinstance(n, (Name, Prop)):
+                return n.name in ("copyArtifacts", "CopyArtifact")
+            if isinstance(n, Import):
+                return n.path.rsplit(".", 1)[-1] in ("CopyArtifact", "*") and "copyartifact" in n.path
+            if isinstance(n, Str):
+                text = n.text()
+                return text == "copyArtifacts" or text.rsplit(".", 1)[-1] == "CopyArtifact"
+            if isinstance(n, Call):
+                return isinstance(n.callee, Str) and n.callee.interpolated     # "$m"(...): a computed method name
+            return False
+        lines = [n.line for n in find_nodes(tree, names_copy) if id(n) not in named and n.line]
+        return min(lines) if lines else None
+
     # ------------------------------------------------------------------ JEN-011
+    def _failure_check(self, info: Info) -> tuple[str, str] | None:
+        """What a step is as OBAAF-JEN-011's check (flagship slice 2d.2o): ("stops", "") when the shell reader of slice
+        2d.2e vouches for every check command in it; ("swallowed", why) when the step's own options or script decide
+        that a check's failure does not fail it (`returnStatus: true`, `|| true`, `|| :`, `|| echo`, `|| printf`,
+        `|| exit 0`, a trailing `&`, a pipe without pipefail set before it, `set +e` or a `#!` line without `-e` with
+        more commands after it, a trap on EXIT or ERR that runs `exit 0`, more lines after it in `bat`); ("unread",
+        why) when the step names a check where neither is decided (Groovy puts text into the script, a computed
+        `returnStatus`, `powershell`, another `#!` program, a path to the program, a form the reader does not vouch
+        for); None when it names no check (only in `echo`, a comment, `--help`, or as another program's argument).
+        Every check in the step counts: the worst decides. Before 2d.2o the rule searched the script's text, and read
+        only `verify_commands` for a failure the script ignores."""
+        if not info.shell or not info.script or not _CHECK_PROGRAM.search(info.script):
+            return None
+        cached = self._script_cache.get(("failure-check", id(info.use.call)))
+        if cached is not None and cached[0] is info.use.call:
+            return cached[1]
+        result = self._failure_read(info)
+        self._script_cache[("failure-check", id(info.use.call))] = (info.use.call, result)
+        return result
+
+    @staticmethod
+    def _lines_of(text: str) -> list:
+        """A script's lines as the shell joins them (a backslash before a line break), each as its commands with the
+        operator after each (`_commands_of`), or None for a line the tokenizer cannot split. A line with no check, no
+        quote, no `set`, `trap`, compound word, bracket, here-document, `exit`, `wait`, `$?`, `$!` or `PIPESTATUS` is
+        one placeholder command: only that it holds a command matters (a 20,000-line script is not split word by
+        word)."""
+        out, physical, pending = [], [], ""
+        for part in (text.split("\n") if "\\\n" in text or text.endswith("\\") else ()):
+            # a backslash at the end of a line joins the next, but not at the end of a comment
+            trailing = len(part) - len(part.rstrip("\\"))
+            if trailing % 2 == 1 and _strip_comment(part).endswith("\\"):
+                pending += part[:-1]
+                continue
+            physical.append(pending + part)
+            pending = ""
+        if pending:
+            physical.append(pending)
+        if not physical:
+            physical = text.split("\n")        # no line continues another
+        # Which lines need reading, found in one pass over the text rather than two searches per line
+        joined = "\n".join(physical)
+        starts = [0, *itertools.accumulate(len(raw) + 1 for raw in physical[:-1])]
+        wanted = sorted({bisect.bisect_right(starts, m.start()) - 1 for m in _LINE_WANTED.finditer(joined)})
+        previous = 0
+        for n in wanted + [len(physical)]:
+            if n > previous:
+                # the lines between two that matter: one placeholder when any holds a command
+                gap = joined[starts[previous]:starts[n] - 1 if n < len(physical) else len(joined)]
+                if _COMMAND_LINE.search(gap):
+                    out.append((gap.split("\n", 1)[0], _PLACEHOLDER_LINE))
+            previous = n + 1
+            if n == len(physical):
+                break
+            raw = physical[n]
+            tokens = _script_tokens(_strip_comment(raw))
+            if tokens is None:
+                out.append((raw, None))
+            elif tokens:
+                out.append((raw, _commands_of(tokens)))
+        return out
+
+    def _failure_read(self, info: Info) -> tuple[str, str] | None:
+        text = info.script
+        name = info.use.name.rsplit(".", 1)[-1]
+        read = self._sh_commands(text) if name == "sh" else None
+        other = name == "sh" and read is None
+        lines = None
+        if other or name != "sh":
+            # another #! program, powershell or pwsh: its text is not read as a shell's
+            words = re.findall(r"[^\s;&|()`'\",\[\]]+", text)
+            if not any(_CHECK_WORD.fullmatch(w) and check_words(words[i:i + 64]) for i, w in enumerate(words)):
+                return None
+            # its words name a check, but they may be a string it prints: whether it runs one is not known
+            if name == "bat":
+                lines = []
+            else:
+                return ("loose", f"a {name} step is not read, so whether it runs a check is not known" if not other
+                        else "the script names a #! program other than sh, bash or dash, which is not read")
+        else:
+            lines = self._lines_of(text)
+            named = None
+            for raw, line in lines:
+                if line is None:
+                    named = named or ("unread" if _CHECK_PROGRAM.search(raw) else None)
+                    continue
+                if line is _PLACEHOLDER_LINE:
+                    continue
+                for command, _op in line:
+                    kind = _names_check(command)
+                    named = "check" if kind == "check" else (named or kind)
+            if named is None:
+                return None
+        status = call_entries(info.use.call, "script").get("returnStatus")
+        if status is not None and not ((isinstance(status, Name) and status.name in ("false", "true"))
+                                       or literal(status) in ("false", "true")):
+            return ("unread", "its returnStatus is computed and may be true")
+        if not self._status_stops(info):
+            return ("swallowed", "returnStatus: true")
+        if info.dynamic or info.exprs:
+            return ("unread", "Groovy puts text into the script, so what the shell runs is not read")
+        if name == "bat":
+            return self._bat_check(text)
+        if name != "sh":
+            return ("loose", f"a {name} step is not read, so whether it runs a check is not known")
+        if other:
+            return ("loose", "the script names a #! program other than sh, bash or dash, which is not read")
+        if not text.startswith("#!") and text.lstrip().startswith("#!") and _text_method(shell_script(info.use.call)):
+            return ("unread", "a .trim() may make the #! line the first")
+        commands, _complete = read
+        vouched: dict = {}
+        for words in commands:
+            if check_words(words) == "check" and not _asks_help(words):
+                vouched[tuple(words)] = vouched.get(tuple(words), 0) + 1
+        errexit = True
+        if text.startswith("#!"):
+            errexit = any(re.fullmatch(r"-[a-zA-Z]*e[a-zA-Z]*", w) for w in text.partition("\n")[0][2:].split()[1:])
+        states = self._check_states(lines, errexit)
+        unread, swallowed = None, []
+        if not states:
+            unread = "the shell reader does not vouch for the line the check is on"
+        for key, kind, why, n in states:
+            if kind == "check" and vouched.get(key, 0) > 0:
+                vouched[key] -= 1
+            elif why:
+                swallowed.append((self._check_rank(key), len(swallowed), why, n))
+            elif kind == "path":
+                unread = unread or "the check's program is named by a path, so which program runs depends on the workspace"
+            else:
+                unread = unread or "the shell reader does not vouch for the line the check is on"
+        if swallowed:
+            # The reason of the first check in the catalog's order of `verify_commands`, as the older reading gave it;
+            # where the first swallowed check is, for a publish in the same step
+            first = min(swallowed, key=lambda s: s[3])[3]
+            self._script_cache[("swallow-at", id(info.use.call))] = (info.use.call, text.find(lines[first][0]))
+            return ("swallowed", min(swallowed)[2])
+        return ("unread", unread) if unread else ("stops", "")
+
+    def _check_rank(self, key: tuple) -> int:
+        """Where a check's words come in the catalog's `verify_commands` (the older reading looked for them in that
+        order), after them for the other checks."""
+        joined = " ".join(key)
+        return next((k for k, rx in enumerate(self.verify_cmds) if rx.match(joined)), len(self.verify_cmds))
+
+    @staticmethod
+    def _bat_check(text: str) -> tuple[str, str]:
+        """A `bat` step's check (flagship slice 2d.2o): cmd.exe does not stop at a failed command, so a check with more
+        commands after it is swallowed; one alone on the script's last line, with no `|` or `&` on it, is the step's
+        status; anything else, and a script that tests `errorlevel` or ends with a bare `exit` after it, is not
+        read."""
+        lines = [line.strip() for line in text.replace("^\n", "").split("\n")]
+        lines = [line for line in lines if line and not re.match(r"(?i)(@?rem\b|::)", line)]
+        def leads(line: str) -> bool:
+            words = line.lstrip("@").split()
+            start = 1 if words and words[0].lower() == "call" else 0
+            return bool(check_words(words[start:start + 64]))
+        at = next((k for k, line in enumerate(lines) if _CHECK_PROGRAM.search(line) and leads(line)), None)
+        if at is None:
+            # named only inside another command (`if exist`, `title`, `echo`): whether it runs is not read
+            return ("loose", "the bat script names a check only in a form that is not read")
+        if any(re.search(r"(?i)\b(goto|exit\s+/b|call\s+:)", line) for line in lines[:at]):
+            return ("unread", "the bat script may leave or jump before the check, which is not read")
+        if re.search(r"[|&]", lines[at]) or any(re.search(r"(?i)errorlevel|^@?exit(\s+/b)?\s*$", line)
+                                                for line in lines[at + 1:]):
+            return ("unread", "the bat script tests or keeps the check's result, which is not read")
+        if at < len(lines) - 1:
+            return ("swallowed", "the bat script does not stop at a failed command, and more commands follow it")
+        return ("stops", "")
+
+    @staticmethod
+    def _counts(command: list[str]) -> bool:
+        """Whether a command is one that runs after a check (not a closing word or a redirection alone)."""
+        return bool(command) and command[0] not in ("}", ")", "fi", "done", "esac", "then", "else", "do", "…}") \
+            and not re.match(r"\d*[<>]", command[0])
+
+    @staticmethod
+    def _keeps(command: list[str]) -> tuple[bool, bool]:
+        """Whether a command may keep an earlier command's failure (`$?`, `PIPESTATUS`, a bare `exit`), and whether it
+        waits for a background job by its number (`wait $!`, `wait $pid`, `pid=$!`)."""
+        kept = command == ["exit"] or any("$?" in w or "${?}" in w or "PIPESTATUS" in w for w in command)
+        waits = (command[:1] == ["wait"] and len(command) > 1) or any("$!" in w for w in command)
+        return kept, waits
+
+    @classmethod
+    def _check_states(cls, lines: list, errexit: bool) -> list[tuple[tuple, str, str | None, int]]:
+        """Each check command of an `sh` script, in order, as (its words from the program on, or () when a runner or a
+        quoted string runs it; "check", "path" or "unread"; why the script decides its failure does not fail the step,
+        or None). Lines are read in order: errexit and pipefail set by `set` before the check count, after it they do
+        not. Nothing later is decided once a line cannot be read, a here-document starts, a file is sourced, a trap on
+        EXIT or ERR is set to anything but `exit 0`, or a `set` or `trap` runs inside a compound command, a function
+        or a subshell; a check inside a function definition is never decided, and one inside a compound command only
+        by its own line (`|| true`, `&`, a pipe). Only forms whose effect does not depend on anything else give a
+        reason; a later `$?`, `PIPESTATUS` or bare `exit` leaves errexit and pipes undecided, `wait $!` a background
+        job, and `exec` ends the script with the check. The reasons are worded as before slice 2d.2o, in its order
+        (`set +e` written so before the check, then `||` later on the line or `&` at its end, then a pipe, then
+        errexit off): a finding's message is its identity in a baseline. Linear in the script's size."""
+        how_off = "#!"
+        literal_off = pipefail = trap_zero = lost = in_func = func_opened = False
+        depth = func_depth = case_depth = 0
+        n_lines = len(lines)
+        later_cmd, later_kept, later_wait = [False] * (n_lines + 1), [False] * (n_lines + 1), [False] * (n_lines + 1)
+        for n in range(n_lines - 1, -1, -1):
+            ln = lines[n][1] or []
+            if ln is _PLACEHOLDER_LINE:
+                later_cmd[n], later_kept[n], later_wait[n] = True, later_kept[n + 1], later_wait[n + 1]
+                continue
+            later_cmd[n] = later_cmd[n + 1] or any(cls._counts(c) for c, _o in ln)
+            flags = [cls._keeps(c) for c, _o in ln]
+            later_kept[n] = later_kept[n + 1] or any(k for k, _w in flags)
+            later_wait[n] = later_wait[n + 1] or any(w for _k, w in flags)
+        out = []
+        for n, (raw, line) in enumerate(lines):
+            if line is None:
+                lost = True
+                continue
+            if line is _PLACEHOLDER_LINE:
+                continue        # a command that changes nothing the reading tracks
+            words = [w for command, _op in line for w in command] + [op for _c, op in line if op]
+            case_depth += sum(1 for w in words if w == "case") - sum(1 for w in words if w == "esac")
+            parens = case_depth <= 0 and "case" not in words      # a case pattern's `)` closes nothing
+            opening = sum(1 for w in words if w in ("if", "while", "until", "for", "case", "{") or (w == "(" and parens))
+            closing = sum(1 for w in words if w in ("fi", "done", "esac", "}") or (w == ")" and parens))
+            defs = len(re.findall(r"\(\s*\)", raw)) if re.search(r"(^|[\s;&|])[\w.-]+\s*\(\s*\)", raw) else 0
+            opening, closing = max(opening - defs, 0), max(closing - defs, 0)     # `name()` opens nothing
+            if not in_func and (defs or re.search(r"(^|[\s;&|])function\s+[\w.-]+", raw)):
+                in_func, func_depth, func_opened = True, depth, False
+            compound = depth > 0 or opening > 0 or closing > 0
+            heredoc = "<<" in raw
+            line_cmd, line_kept, line_wait = [False] * (len(line) + 1), [False] * (len(line) + 1), \
+                [False] * (len(line) + 1)
+            line_or = [False] * (len(line) + 1)
+            for k in range(len(line) - 1, -1, -1):
+                kept, waits = cls._keeps(line[k][0])
+                line_cmd[k] = line_cmd[k + 1] or cls._counts(line[k][0])
+                line_kept[k] = line_kept[k + 1] or kept
+                line_wait[k] = line_wait[k + 1] or waits
+                line_or[k] = line_or[k + 1] or line[k][1] == "||"
+            ends_bg = next((op for _c, op in reversed(line) if op), None) == "&"
+            for k, (command, op) in enumerate(line):
+                if not command:
+                    continue
+                before = line[k - 1][1] if k else None
+                kind, at = _check_at(command)
+                if kind is None:
+                    name = command[0]
+                    if name in ("source", ".") or heredoc:
+                        lost = True
+                    elif name == "set":
+                        if compound or lost or in_func:
+                            lost = True
+                            continue
+                        args, j = command[1:], 0
+                        if args[:1] == ["+e"]:
+                            literal_off = True
+                        while j < len(args):
+                            w = args[j]
+                            if w in ("-o", "+o") and j + 1 < len(args):
+                                on, option = w == "-o", args[j + 1]
+                                if option == "errexit":
+                                    errexit, how_off = on, (how_off if on else "set")
+                                elif option == "pipefail":
+                                    pipefail = on
+                                j += 2
+                                continue
+                            if w == "--" or not re.fullmatch(r"[-+][a-zA-Z]+", w):
+                                break
+                            on = w[0] == "-"
+                            if "e" in w:
+                                errexit, how_off = on, (how_off if on else "set")
+                            if "o" in w and j + 1 < len(args):
+                                if args[j + 1] == "errexit":
+                                    errexit, how_off = on, (how_off if on else "set")
+                                elif args[j + 1] == "pipefail":
+                                    pipefail = on
+                                j += 2
+                                continue
+                            j += 1
+                    elif name == "shopt" and any(w.startswith("-") and "o" in w for w in command[1:]):
+                        # `shopt -so pipefail` is `set -o pipefail`; `-u` turns it off
+                        if compound or lost or in_func:
+                            lost = True
+                            continue
+                        on = not any(w.startswith("-") and "u" in w for w in command[1:])
+                        for w in command[1:]:
+                            if w == "errexit":
+                                errexit, how_off = on, (how_off if on else "set")
+                            elif w == "pipefail":
+                                pipefail = on
+                    elif name == "trap":
+                        args = [w for w in command[1:] if w != "--"]
+                        if len(args) >= 2 and any(sig in ("EXIT", "ERR", "0") for sig in args[1:]):
+                            if compound or in_func or not re.search(r"(^|[;&|\s])exit\s+0\b", args[0]):
+                                trap_zero, lost = False, lost or args[0] not in ("-", "")
+                            else:
+                                trap_zero = True
+                    continue
+                key = tuple(command[at:at + 64]) if at >= 0 else ()
+                if lost or in_func or heredoc:
+                    out.append((key, kind, None, n))
+                    continue
+                after = line[k + 1][0] if k + 1 < len(line) else []
+                ends = command[0] == "exec"
+                kept = line_kept[k + 1] or later_kept[n + 1]
+                more = not ends and (line_cmd[k + 1] or later_cmd[n + 1])
+                waits = line_wait[k + 1] or later_wait[n + 1]
+                set_off = not errexit and how_off == "set"
+                or_true = op == "||" and bool(after) and (after[0] in ("true", ":", "echo", "printf", "/bin/true",
+                                                                         "/usr/bin/true")
+                                                          or after[:2] in (["exit", "0"], ["return", "0"]))
+                bg = op == "&" and not waits
+                pipe = op == "|" and not pipefail and not kept
+                guarded = before in ("if", "elif", "while", "until", "!", "&&", "||")
+                no_stop = not errexit and more and op not in ("&&", "||") and not kept and not guarded and not compound
+                why = None
+                if or_true or bg or pipe or no_stop:
+                    if literal_off:
+                        why = "set +e before the command"
+                    elif line_or[k] or ends_bg:
+                        why = "|| or & after the command"
+                    elif pipe:
+                        why = "a pipe without pipefail: the step's status is the last command's"
+                    else:
+                        why = ("set +e before the command" if set_off and literal_off else
+                               "the sh script does not stop at a failed command, and more commands follow it")
+                elif trap_zero:
+                    why = "a trap that runs `exit 0` on EXIT or ERR decides the script's status"
+                out.append((key, kind, why, n))
+            depth = max(depth + opening - closing, 0)
+            if in_func:
+                func_opened = func_opened or opening > 0
+                if func_opened and depth <= func_depth:
+                    in_func = False
+        return out
+
+    def _failure_gates(self, check: Info, target: Info) -> bool:
+        """Whether a check's place lets it stop `target` (flagship slice 2d.2o), as `provenance_gates` compares: it
+        runs before it, not in a sibling parallel branch, not caught by a block the publish is not in (a check in the
+        very catchError, warnError or try block the publish is in, before it, skips it), and every condition that
+        could skip the check also guards the publish. A check and a publish in one step are compared by the script,
+        not here."""
+        if check.index > target.index:
+            return False
+        if check.ctx.swallowed and not (check.ctx.swallow_id and check.ctx.swallow_id == target.ctx.swallow_id):
+            return False
+        return not concurrent(check.ctx, target.ctx) and guard_keys(check) <= guard_keys(target)
+
+    def _failure_reason(self, check: Info, kind: str, why: str, target: Info) -> tuple[str, str] | None:
+        if kind == "loose":
+            # The step's text names a check in a language that is not read: it may be no check at all
+            return ("unknown", f"whether the step at line {check.line} runs a check that stops the publish at line "
+                               f"{target.line} is not known: {why}")
+        verdict = self._failure_place(check, kind, why, target)
+        if verdict and verdict[0] == "finding" and check.ctx.swallowed:
+            # worded as before slice 2d.2o, which named the catching block for every finding on such a check
+            return ("finding", f"its failure is ignored ({check.ctx.swallowed})")
+        return verdict
+
+    def _failure_place(self, check: Info, kind: str, why: str, target: Info) -> tuple[str, str] | None:
+        """("finding" or "unknown", why) when the check cannot stop `target`, or it is not known; None when it can. The
+        place comes first, then the script, as before slice 2d.2o (a finding's message is its identity). A catching
+        block may mark the build's result, so a publish that runs only on a result is "cannot tell" after it, unless
+        the step itself already ignores the check's failure (`|| true` marks nothing)."""
+        if check.ctx.swallowed and not (check.ctx.swallow_id and check.ctx.swallow_id == target.ctx.swallow_id):
+            if kind != "swallowed" and (target.ctx.post == "success"
+                                        or any(RESULT_GUARD_SET.search(g) for g in target.ctx.guards)):
+                return ("unknown", f"the check at line {check.line} is in {check.ctx.swallowed}, which may mark the "
+                                   f"build's result; the publish at line {target.line} runs only on a result that is "
+                                   "not read")
+            return ("finding", f"its failure is ignored ({check.ctx.swallowed})")
+        if kind == "swallowed":
+            return ("finding", f"its failure is ignored ({why})")
+        if concurrent(check.ctx, target.ctx):
+            return ("finding", "it runs in a parallel branch beside the publish, not before it")
+        extra = [shown(g) for g in check.ctx.guards if guard_key(g) not in guard_keys(target)]
+        if extra:
+            return ("finding", f"it runs only when a condition holds ({extra[0][:80]}) that does not also guard the "
+                               "publish, so it can be skipped")
+        if check.index > target.index:
+            return ("finding", "it does not run before the publish")
+        if kind == "unread":
+            return ("unknown", f"whether the check at line {check.line} stops the publish at line {target.line} is not "
+                               f"known: {why}")
+        return None
+
+    def _sig(self, info: Info) -> tuple:
+        """What decides a check's verdict on a publish besides their order (flagship slice 2d.2o: compared once per
+        kind of publish, not once per pair)."""
+        key = self._script_cache.get(("jen011-sig", id(info)))
+        if key is None or key[0] is not info:
+            key = (info, (frozenset(guard_keys(info)), tuple(info.ctx.branch), info.ctx.swallow_id,
+                          info.ctx.post == "success" or any(RESULT_GUARD_SET.search(g) for g in info.ctx.guards)))
+            self._script_cache[("jen011-sig", id(info))] = key
+        return key[1]
+
+    def _publishes_after(self, info: Info) -> bool:
+        """Whether a step that holds a check whose failure it ignores publishes after that check in its own script, as
+        far as the text shows (a publish written before it cannot be stopped by it, and is no finding of this rule)."""
+        at = self._script_cache.get(("swallow-at", id(info.use.call)))
+        if not info.shell:
+            return True
+        if at and at[0] is info.use.call and at[1] >= 0:
+            pos = at[1]
+        else:
+            # `returnStatus: true`, `bat`: the first check's name in the script
+            found = _CHECK_NAME_ANYWHERE.search(info.script)
+            if not found:
+                return True
+            pos = found.start()
+        starts = [m.start() for rx in self.upload_cmds for m in [prefilter.search(rx, info.script)] if m]
+        return not starts or max(m.start() for rx in self.upload_cmds
+                                 for m in prefilter.finditer(rx, info.script)) > pos
+
+    def _checked_earlier_stage(self, publish: Info, checks: list) -> bool:
+        """A publish in a Declarative stage's own failure-path post block, where no check runs in the publish's stage
+        and a check that stops its step and stops the publish's stage runs in an earlier stage before it: a failed
+        check skips the stage, post block included, so the post block runs only after the checks passed (as
+        OBAAF-JEN-012 reads it since slice 2d.2n)."""
+        owner = publish.ctx.post_owner
+        if not owner or publish.ctx.post in (None, "catch/finally"):
+            return False
+        if any(c.ctx.stage[:len(owner)] == owner for c, _k, _w in checks if c.ctx.stage):
+            return False
+        return self._stage_post_after(publish, [c for c, k, _w in checks if k == "stops" and not c.ctx.deferred
+                                                and c.index < publish.index
+                                                and self.provenance_gates(c, publish, failing=True)])
+
     def failure_paths(self) -> None:
+        """A publish in a failure path, or a check before a publish whose failure does not stop it. Since flagship slice
+        2d.2o checks are read by the shell reader of slice 2d.2e, compared as OBAAF-JEN-012 compares them, and what the
+        file does not decide is "cannot tell"."""
         publishes = [i for i in self.infos if i.publish]
         if not publishes:
             return
         self.applicable.add("OBAAF-JEN-011")
+        called = {id(i.use.call) for i in self.infos if not i.ctx.deferred}
+        checks = [(i, *r) for i in self.infos if (r := self._failure_check(i))]
+        # A check whose shell may run another program than the one it names may not stop anything (the review of #365);
+        # one whose failure the step already ignores stays a finding.
+        checks = [(i, "unread", steered) if kind == "stops" and (steered := self._steered(i)) else (i, kind, why)
+                  for i, kind, why in checks]
         for info in publishes:
-            if info.ctx.post in FAILURE_PATHS:
-                where = "a catch or finally block" if info.ctx.post == "catch/finally" else \
-                    f"post {{ {info.ctx.post} }}"
-                self.add("OBAAF-JEN-011", info.line,
-                         f"The step at line {info.line} publishes ({info.publish}) in {where}, which runs when the "
-                         "build failed, was aborted or is unstable, so it can publish after a check failed or was "
-                         "skipped.", info.ctx.stage, severity="high")
-        checks = [i for i in self.infos if i.verify or (i.shell and CHECKSUM_VERIFY.search(i.script))]
-        for check in checks:
-            if check.ctx.post in FAILURE_PATHS:
+            if info.ctx.post not in FAILURE_PATHS:
                 continue
-            later = [p for p in publishes if p.index > check.index or concurrent(check.ctx, p.ctx)]
-            target = next((p for p in later if not self.gates(check, p)), None)
-            if target is None:
+            if info.ctx.deferred:
+                if id(info.use.call) not in called:
+                    self.unknown("OBAAF-JEN-011", info.line, f"the publish at line {info.line} is in "
+                                                             f"{info.ctx.deferred}; whether and where it runs is not known")
                 continue
-            if check.swallowed:
-                why = f"its failure is ignored ({check.swallowed})"
-            elif concurrent(check.ctx, target.ctx):
-                why = "it runs in a parallel branch beside the publish, not before it"
-            else:
-                extra = [g for g in check.ctx.guards if g not in target.ctx.guards]
-                why = (f"it runs only when a condition holds ({extra[0][:80]}) that does not also guard the publish, "
-                       "so it can be skipped" if extra else "it does not run before the publish")
-            self.add("OBAAF-JEN-011", check.line,
-                     f"The check at line {check.line} cannot stop the publish at line {target.line}: {why}.",
-                     check.ctx.stage, severity="high")
+            where = "a catch or finally block" if info.ctx.post == "catch/finally" else f"post {{ {info.ctx.post} }}"
+            if info.ctx.post != "catch/finally" and any(RESULT_GUARD_SET.search(g) for g in info.ctx.guards):
+                # Declarative sets the build's result before it runs a post block; a Scripted catch or finally block
+                # runs before anything sets it, so a guard on it there decides nothing
+                self.unknown("OBAAF-JEN-011", info.line, f"the publish at line {info.line} is in {where} under a "
+                                                         "condition on the build's result, which is not read")
+                continue
+            if self._checked_earlier_stage(info, checks):
+                continue
+            self.add("OBAAF-JEN-011", info.line,
+                     f"The step at line {info.line} publishes ({info.publish}) in {where}, which runs when the "
+                     "build failed, was aborted or is unstable, so it can publish after a check failed or was "
+                     "skipped.", info.ctx.stage, severity="high")
+        # A publish in a failure path is reported above; it is still compared here, as before slice 2d.2o, so a check
+        # that cannot stop it is named against the first publish after it (the finding's message is its identity)
+        live = [p for p in publishes if not p.ctx.deferred]
+        groups: dict = {}
+        for p in live:
+            groups.setdefault(self._sig(p), []).append(p)
+        for group in groups.values():
+            group.sort(key=lambda p: p.index)
+        indexes = {key: [p.index for p in group] for key, group in groups.items()}
+        for check, kind, why in checks:
+            if check.ctx.deferred:
+                if id(check.use.call) not in called and live:
+                    self.unknown("OBAAF-JEN-011", check.line,
+                                 f"the check at line {check.line} is in {check.ctx.deferred}; whether and where it "
+                                 "runs, and so whether it can stop a publish, is not known")
+                continue
+            if check.ctx.post in FAILURE_PATHS and kind != "swallowed":
+                continue
+            candidates = []
+            for key, group in groups.items():
+                if concurrent(check.ctx, group[0].ctx):
+                    candidates.append(group[0])
+                    continue
+                # the first publish after the check's step, and the check's own step when it publishes
+                at = bisect.bisect_right(indexes[key], check.index)
+                if at < len(group) and not (kind == "stops" and self._failure_gates(check, group[at])):
+                    candidates.append(group[at])
+                same = bisect.bisect_left(indexes[key], check.index)
+                if same < len(group) and group[same] is check and kind != "stops" and self._publishes_after(check):
+                    candidates.append(check)
+            found = unknown = None
+            # a later step first, as before slice 2d.2o; the check's own step only when nothing after it publishes
+            for target in sorted(candidates, key=lambda p: (p is check, p.index)):
+                verdict = self._failure_reason(check, kind, why, target)
+                if verdict is None:
+                    continue
+                if verdict[0] == "finding":
+                    found = (target, verdict[1])
+                    break
+                unknown = unknown or verdict[1]
+            if found:
+                target, reason = found
+                self.add("OBAAF-JEN-011", check.line,
+                         f"The check at line {check.line} cannot stop the publish at line {target.line}: {reason}.",
+                         check.ctx.stage, severity="high")
+            elif unknown:
+                self.unknown("OBAAF-JEN-011", check.line, unknown)
 
     # ------------------------------------------------------------------ JEN-012
+    def provenance_gates(self, check: Info, target: Info, failing: bool = False) -> bool:
+        """Whether a check step stops `target` when it fails (flagship slice 2d.2n), as an approval does in
+        `approval_gates`: it runs before it, not in a failure path, a sibling parallel branch or a catching block
+        the publish is not in (a check in the very try or catchError block the publish is in, before it, skips it),
+        and every condition that could skip the check also guards the publish. Deferred checks are left to the
+        caller. With `failing`, a publish in a failure path is compared as if it were not in one: the caller says
+        what such a check can establish."""
+        if check.index >= target.index or check.ctx.post in FAILURE_PATHS \
+                or (target.ctx.post in FAILURE_PATHS and not failing):
+            return False      # a publish in a failure path runs when the check failed
+        if check.ctx.swallowed and not (check.ctx.swallow_id and check.ctx.swallow_id == target.ctx.swallow_id):
+            return False
+        return not concurrent(check.ctx, target.ctx) and guard_keys(check) <= guard_keys(target)
+
+    @staticmethod
+    def _stage_post_after(publish: Info, checks: list) -> bool:
+        """Whether a publish in a Declarative stage's own post block comes after a check that runs outside that stage,
+        in an earlier one, so that the check's failure skips the publish's stage, post block included (Declarative runs
+        stages in order). Not for the pipeline's own post block, which runs whatever failed."""
+        owner = publish.ctx.post_owner
+        if not owner or publish.ctx.post in (None, "catch/finally"):
+            return False
+        return any(c.ctx.stage and c.ctx.stage[:len(owner)] != owner and c.ctx.post in (None, "success")
+                   and c.ctx.post_owner != () for c in checks)
+
     def provenance_check(self) -> None:
+        """A publish with no check before it, whose failure stops it, of the artifact's provenance, approvals and
+        agent records (`obaaf verify release`). Before flagship slice 2d.2n a check was found by searching the
+        script's text, a check read where a closure nothing calls is written counted where it is written, and a
+        publish in a failure path counted as checked by any check before it."""
         publishes = [i for i in self.infos if i.publish]
         if not publishes:
             return
         self.applicable.add("OBAAF-JEN-012")
-        checks = [i for i in self.infos if i.verify in ("full", "provenance")]
-        unchecked = []
+        # A full check whose shell may run another program than the one it names does not count (the review of #365).
+        # A provenance check only is left as it is: whatever it runs, the approvals are not checked.
+        checks = [(i, "steered" if kind == "full" and self._steered(i) else kind)
+                  for i in self.infos if (kind := self._provenance_kind(i))]
+        called = {id(i.use.call) for i, _k in checks if not i.ctx.deferred}
+        # A check read only where a closure or an uncalled method is written may run through a call the checker does
+        # not follow (`parallel(verify: verify)`, a method pointer) or never: cannot tell for every publish. One that
+        # is also read where it is called is decided there.
+        loose = next((c for c, _k in checks if c.ctx.deferred and id(c.use.call) not in called), None)
+        high, medium, unknown = [], [], []
         for publish in publishes:
-            found = {c.verify for c in checks if self.gates(c, publish)}
-            if "full" not in found:
-                unchecked.append((publish, found))
-        if not unchecked:
-            return
-        # One finding for the file, on the worst step: a step that publishes with no check at all
-        # before one that has a provenance check only. Taking the first in the file let an earlier,
-        # better checked step stand in for a later one that nothing checks, at a lower severity.
-        first, kinds = next((pair for pair in unchecked if "provenance" not in pair[1]), unchecked[0])
-        if "provenance" in kinds:
-            self.add("OBAAF-JEN-012", first.line,
-                     f"The step at line {first.line} publishes after a provenance check only; approvals and agent "
-                     "records are not checked (use obaaf verify release).", first.ctx.stage, severity="medium")
-        else:
+            if publish.ctx.deferred:
+                # read where a closure or an uncalled method is written: it may run anywhere, also before a check
+                # it is written after, or through a call the checker does not follow besides the one it reads
+                unknown.append((publish, f"the publish at line {publish.line} is in {publish.ctx.deferred}; whether "
+                                         "and where it runs is not known"))
+                continue
+            failing = publish.ctx.post in FAILURE_PATHS
+            found = []        # (kind, check)
+            for check, kind in checks:
+                if not check.ctx.deferred and check.index < publish.index and self.provenance_gates(check, publish,
+                                                                                                  failing=failing):
+                    found.append((kind, check))
+            if failing and publish.ctx.post != "catch/finally":
+                # A Declarative post block: a check in an earlier stage stops a stage's post block (a failed check skips
+                # the stage); nothing before the pipeline's own post block, or in the same stage, stops it.
+                found = [(k, c) for k, c in found if self._stage_post_after(publish, [c])]
+                if not found:
+                    if any(RESULT_GUARD.search(g) for g in publish.ctx.guards):
+                        # `post { always { if (currentBuild.currentResult == 'SUCCESS') { ... } } }`: not read
+                        unknown.append((publish, f"the publish at line {publish.line} is in post "
+                                                 f"{{ {publish.ctx.post} }} under a condition on the build's result, "
+                                                 "which is not read"))
+                    else:
+                        high.append(publish)
+                    continue
+            elif failing:
+                # A catch or finally block: a check before it stops the publish only when it runs before the try body
+                # whose failure runs the publish, which is not compared
+                if found:
+                    unknown.append((publish, f"the publish at line {publish.line} is in a catch or finally block; the "
+                                             "check before it stops it only if it runs before the try body whose "
+                                             "failure runs the publish, which is not read"))
+                else:
+                    high.append(publish)
+                continue
+            kinds = {k for k, _c in found}
+            if "full" in kinds:
+                continue
+            if "unread" in kinds or "steered" in kinds or loose is not None:
+                check, kind = max(((c, k) for k, c in found if k in ("unread", "steered")), key=lambda ck: ck[0].index,
+                                  default=(loose, "unread"))
+                where = (f"is in {check.ctx.deferred} and is not seen called"
+                         if check.ctx.deferred else
+                         f"may not run the program it names: {self._steered(check)}"
+                         if kind == "steered" else
+                         "is written in a form the checker does not read: Groovy puts text into the script, "
+                         "returnStatus is computed, the command is named by a path or is not on a line of its own, "
+                         "its arguments hold a shell expansion, a line before it is one the shell reader cannot vouch "
+                         "for, or the step is bat, powershell, pwsh or another #! program")
+                unknown.append((publish, f"the check at line {check.line} before the publish at line {publish.line} "
+                                         f"{where}"))
+            elif "provenance" in kinds:
+                medium.append(publish)
+            else:
+                high.append(publish)
+        # One finding for the file, on the worst step: a step that publishes with no check at all before one that
+        # has a provenance check only. Taking the first in the file let an earlier, better checked step stand in for
+        # a later one that nothing checks, at a lower severity.
+        if high:
+            first = high[0]
             self.add("OBAAF-JEN-012", first.line,
                      f"The step at line {first.line} publishes ({first.publish}) without an earlier check that stops "
                      "the build when verification fails.", first.ctx.stage)
+        elif medium:
+            first = medium[0]
+            self.add("OBAAF-JEN-012", first.line,
+                     f"The step at line {first.line} publishes after a provenance check only; approvals and agent "
+                     "records are not checked (use obaaf verify release).", first.ctx.stage, severity="medium")
+        elif unknown:
+            self.unknown("OBAAF-JEN-012", unknown[0][0].line, unknown[0][1])
 
     # ------------------------------------------------------------------ JEN-013
+    def secret_names(self, variables: set) -> set:
+        """The secret's variables and every variable of this file whose assigned values read one of them,
+        transitively: `def t = TOKEN`, `def cmd = "curl ${TOKEN}"`, a method parameter given TOKEN,
+        withEnv(["T2=${TOKEN}"]) (flagship slice 2d.2i)."""
+        names = set(variables)
+        changed = True
+        while changed:
+            changed = False
+            for name, refs in self.p.refs.items():
+                if name not in names and refs & names:
+                    names.add(name)
+                    changed = True
+        return names
+
     def secret_interpolation(self) -> None:
         if any(info.ctx.creds for info in self.infos):
             self.applicable.add("OBAAF-JEN-013")
         for info in self.infos:
-            if not info.shell or not info.ctx.creds:
+            if not info.ctx.creds:
                 continue
-            variables = {v for b in info.ctx.creds for v in b.variables if v not in b.paths}
-            used = sorted({w for e in info.exprs for w in re.findall(r"[A-Za-z_]\w*", e) if w in variables})
+            exprs = info.exprs
+            if not info.shell:
+                # The arguments of docker.image(...).inside/withRun/run and withDockerContainer become the
+                # `docker run` command line (flagship slice 2d.2i).
+                name = info.use.name
+                if not (name.endswith((".inside", ".withRun", ".run")) and name.startswith("docker.") or
+                        name == "withDockerContainer"):
+                    continue
+                exprs = [e for a in list(info.use.call.args) + [v for _, v in info.use.call.named]
+                         for e in source_texts(a)]
+            variables = {v for b in info.ctx.creds for v in b.variables if v not in b.paths and v != "?"}
+            secrets = self.secret_names(variables)
+            used = sorted({w for e in exprs for w in re.findall(r"[A-Za-z_]\w*", e) if w in secrets})
+            envs = {"env"} | {n for n, refs in self.p.refs.items() if refs == {"env"}}
+            computed_env = re.compile(
+                r"\b(" + "|".join(sorted(map(re.escape, envs))) + r")\s*(\[\s*[^'\"\s\]]|\.\s*[\"']|"
+                r"\.\s*(getProperty|getAt|get)\s*\(\s*[^'\"\s)])|\bSystem\s*\.\s*getenv\s*\(\s*[^'\"\s)]|"
+                r"(^|[^.\w])(getProperty|getVariable)\s*\(\s*[^'\"\s)]|\bbinding\s*\.\s*(getVariable|getProperty)\s*\("
+                r"\s*[^'\"\s)]")
+            if not used and any(computed_env.search(e) for e in exprs):
+                self.unknown("OBAAF-JEN-013", info.line,
+                             f"the {info.use.name} step at line {info.line} interpolates an environment variable whose "
+                             "name is computed, inside a credential binding; the checker cannot tell whether it is the "
+                             "secret")
+                continue
+            # A name of this file whose value the checker never saw (a closure's parameter, `it`, a name a
+            # destructuring assignment sets) may be the secret (the review of slice 2d.2i).
+            # The first name of each path a step interpolates, when it starts with a lower-case letter (upper-case
+            # names are environment variables), is not one of Jenkins's globals, and the file never gave it a
+            # value the checker saw; and any name whose value reads an environment variable by a computed name.
+            computed = self.secret_names({COMPUTED_ENV}) - {COMPUTED_ENV}
+            unaccounted = sorted({w for e in exprs for w in _NAME_IN_EXPR.findall(_unquoted(e))
+                                  if (w in computed) or (w[:1].islower() and w not in _JENKINS_GLOBALS
+                                                         and w not in self.p.refs and w not in self.p.literals
+                                                         and w not in self.p.lists)})
+            if not used and unaccounted:
+                self.unknown("OBAAF-JEN-013", info.line,
+                             f"the {info.use.name} step at line {info.line} interpolates {', '.join(unaccounted[:3])} "
+                             "inside a credential binding, and the checker cannot tell what it holds")
+                continue
+            if not used and any(b.variables == () or "?" in b.variables for b in info.ctx.creds) and exprs:
+                self.unknown("OBAAF-JEN-013", info.line,
+                             f"the {info.use.name} step at line {info.line} interpolates values inside a credential "
+                             "binding whose variables the Jenkinsfile does not name; the checker cannot tell whether "
+                             "one of them is the secret")
+                continue
             if used:
+                where = "script" if info.shell else "arguments"
+                fix = ("Reference it as a shell variable inside single quotes." if info.shell else
+                       "Pass it as `-e NAME` with no value, so docker takes it from the environment.")
                 self.add("OBAAF-JEN-013", info.line,
                          f"The {info.use.name} step at line {info.line} puts secret variable(s) {', '.join(used)} into "
-                         "its script with Groovy interpolation, so the secret appears in the command line, where other "
-                         "processes on the agent can read it. Reference it as a shell variable inside single quotes.",
+                         f"its {where} with Groovy interpolation, so the secret appears in the command line, where "
+                         f"other processes on the agent can read it. {fix}",
                          info.ctx.stage)
 
     # ------------------------------------------------------------------ JEN-014
+    def publishes_near(self, stage: tuple) -> bool:
+        """The stage, or the stage a `post` block belongs to, publishes (flagship slice 2d.2i: a publish
+        in `post { success { } }` did not make a signing finding high)."""
+        base = base_stage(stage)
+        return any(base_stage(s) == base and self.stage_publishes(s) for s in self.stages())
+
+    def script_text(self, info: Info) -> str:
+        """The script as the shell reads it: backslash-continued lines joined, and `${name}` placeholders
+        for variables of this file that hold a literal replaced by it (flagship slice 2d.2i)."""
+        cached = self._script_texts.get(id(info.use.call))
+        if cached is not None and cached[0] is info.use.call:
+            return cached[1]
+        text = info.script
+        for _ in range(3):
+            changed = re.sub(r"\$\{([A-Za-z_]\w*)\}", lambda m: (
+                self.p.literals[m.group(1)].text() if m.group(1) in self.p.literals else m.group(0)), text)
+            if changed == text:
+                break
+            text = changed
+        # A line continued with `\` (shell), `^` (cmd) or a backtick (PowerShell) is one line.
+        text = re.sub(r"[\\^`]\r?\n[ \t]*", " ", text)
+        self._script_texts[id(info.use.call)] = (info.use.call, text)
+        return text
+
     def signing_keys(self) -> None:
         patterns = [re.compile(x, re.I) for x in self.detection.get("signing_secret_patterns", [])]
         commands = [re.compile(x, re.M) for x in self.detection.get("signing_commands", [])]
@@ -1000,29 +4888,86 @@ class JenkinsRules:
         for b, infos in scopes.items():
             names = [n for n in list(b.ids) + list(b.variables) if n != "?"]
             hits = [n for n in names if any(p.search(re.sub(r"[-.]", "_", n)) for p in patterns)]
+            # A certificate binding is a PKCS#12 keystore: signing material whatever it is called.
+            if b.how.endswith((":certificate", ":CertificateMultiBinding")):
+                hits.append(f"certificate binding {self.ids(b)}")
             if hits:
                 stage = infos[0].ctx.stage if infos else ()
-                severity = "high" if any(self.stage_publishes(i.ctx.stage) for i in infos) else "medium"
+                severity = "high" if any(self.publishes_near(i.ctx.stage) for i in infos) else "medium"
                 self.add("OBAAF-JEN-014", b.line,
                          f"Signing material ({', '.join(sorted(set(hits)))}) is bound by {b.how} for the steps of "
                          f"stage '{stage_label(stage)}', so any build step there can read the key.", stage,
                          severity=severity)
+        loads: dict[int, tuple] = {}
         for info in self.infos:
-            if info.shell and any(rx.search(info.script) for rx in commands):
-                severity = "high" if self.stage_publishes(info.ctx.stage) else "medium"
+            if not info.shell:
+                continue
+            hit = loads.get(id(info.use.call))
+            if hit is None or hit[0] is not info.use.call:
+                # Once per call, however many times the method holding it is expanded.
+                hit = (info.use.call, any(prefilter.search(rx, self.script_text(info)) for rx in commands))
+                loads[id(info.use.call)] = hit
+            if hit[1]:
+                severity = "high" if self.publishes_near(info.ctx.stage) else "medium"
                 self.add("OBAAF-JEN-014", info.line,
                          f"The step at line {info.line} loads a signing key into the build environment.",
                          info.ctx.stage, severity=severity)
 
 
     # ------------------------------------------------------------------ JEN-015
+    def resolve_text(self, node, depth: int = 0) -> str | None:
+        """The text of an expression built only from literals written in this file: a string, a variable
+        whose last assignment is one, `+` of those, `.trim()` and similar; None otherwise."""
+        if node is None or depth > 20:
+            return None
+        if isinstance(node, Str):
+            if not node.interpolated:
+                return node.text()
+            parts = []
+            for kind, value in node.tok.parts:
+                if kind == "lit":
+                    parts.append(value)
+                else:
+                    inner = self.p.literals.get(value.strip().removeprefix("env.")) if \
+                        re.fullmatch(r"\s*(env\.)?[A-Za-z_]\w*\s*", value) else None
+                    text = self.resolve_text(inner, depth + 1) if inner is not None else None
+                    if text is None:
+                        return None
+                    parts.append(text)
+            return "".join(parts)
+        if isinstance(node, Binary) and node.op == "+":
+            left, right = self.resolve_text(node.left, depth + 1), self.resolve_text(node.right, depth + 1)
+            return None if left is None or right is None else left + right
+        if isinstance(node, Call) and isinstance(node.callee, Prop) and not node.args and \
+                node.callee.name in ("trim", "toString", "stripIndent"):
+            text = self.resolve_text(node.callee.target, depth + 1)
+            return text.strip() if text is not None and node.callee.name == "trim" else text
+        p = path_of(node)
+        if p:
+            name = p.removeprefix("env.")
+            value = self.p.literals.get(name)
+            if value is None:
+                env = self.p.env_values.get(name)
+                value = env if env is not None else None
+            return self.resolve_text(value, depth + 1) if value is not None else None
+        return None
+
     def webhook_tokens(self) -> None:
         for trig in self.p.triggers:
             self.applicable.add("OBAAF-JEN-015")
-            if not trig.token:
+            token = trig.token
+            if not token and trig.token_node is not None:
+                # A token built from literals in this file is written in the file (flagship slice 2d.2i).
+                token = self.resolve_text(trig.token_node)
+                if token is None:
+                    self.unknown("OBAAF-JEN-015", trig.line,
+                                 f"{trig.name}'s {trig.token_key} is computed; the checker cannot tell whether it is "
+                                 "written in the repository")
+                    continue
+            if not token:
                 continue
             privileged = any(i.ctx.creds or i.publish or i.ai for i in self.infos)
-            hint = trig.token[:3] + "..." if len(trig.token) > 6 else "..."
+            hint = token[:3] + "..." if len(token) > 6 else "..."
             self.add("OBAAF-JEN-015", trig.line,
                      f"{trig.name} at line {trig.line} has its webhook token written in the Jenkinsfile ('{hint}'), "
                      "so anyone who can read the file can start the job and choose every webhook value it reads. "

@@ -25,13 +25,15 @@ checked here, value by value, before they are used.
 from __future__ import annotations
 
 import fnmatch
+import heapq
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 
 from obaaf.audit.github import plain, quoted
-from obaaf.audit.settings import BY_KEY, CLASSIC_TOP
-from obaaf.audit.workflows import PULL_REQUEST_EVENTS
-from obaaf.audit.workflows import called_path
+from obaaf.audit.settings import BY_KEY, CLASSIC_TOP, CUSTOM_RULES
+from obaaf.audit.workflows import HEAD_COMMIT_EVENTS, PULL_REQUEST_EVENTS
+from obaaf.audit.workflows import called_path, self_repository_call
 from obaaf.checker.workflow import PRIVILEGED_UNTRUSTED_TRIGGERS
 
 FORMAT = "obaaf-settings-findings/v0.1"
@@ -43,7 +45,9 @@ ACTIONS_APP = 15368
 ROLE_BY_ID = {2: "maintain", 4: "write", 5: "admin"}
 PUSH_ROLES = ("admin", "maintain", "write")
 DEFAULT_POLICY_DATE = "2026-12-02"
-WILDCARDS = "*?["
+# The characters that make an environment's branch or tag policy a pattern. GitHub's reference names Ruby's
+# File.fnmatch, where a backslash escapes the next character (`ma\\in` matches `main`; flagship slice 2d.2g).
+WILDCARDS = "*?[\\"
 # The characters that make an entry of a workflow's branch filter a pattern (GitHub's filter patterns also
 # know `+`, and `!` negates an entry of `branches`).
 FILTER_CHARS = "*?[]+!"
@@ -59,19 +63,35 @@ class Rule:
     description: str
     fix: str
     files: bool = True       # whether it reads the workflow files at all
+    # Why a finding of this rule matters, in one sentence of at most 160 characters (WHY_MAX), as for the
+    # rules of `obaaf check` (flagship slice 3.2c, from #202). It must hold for every kind of finding the rule
+    # gives, with "may" where a kind does not show the consequence; it is required, so a rule cannot be
+    # added without one.
+    why: str = field(kw_only=True)
 
 
 RULES: tuple[Rule, ...] = (
     Rule("OBAAF-SET-001", "An environment's secrets can be reached from any branch", "high",
-         ("environments", "environment_secrets"), "the environment each job names",
+         ("environments", "environment_secrets", "branch_rules", "branch_protection", "branches"),
+         "the environment each job names",
          "A job names an environment, and the environment does not limit which branches may use it (or the "
          "limit is a pattern anyone with write access can match by naming a branch or pushing a tag). Anyone "
          "who can push a branch can add a job that names the environment and reads its secrets. With required "
-         "reviewers the only gate left is one person's approval; without them there is none. An environment a "
-         "job names that the settings do not have gets no protection from them.",
+         "reviewers the only gate left is one person's approval; without them there is none. A custom deployment "
+         "protection rule (a GitHub App that must approve the job) counts as reviewers do, and what it decides on "
+         "is not read: beside one, an environment any branch may use is medium (low with no secret), and a narrower "
+         "limit that reviewers "
+         "would make no finding is \"cannot tell\". Where such rules were not read (a snapshot an earlier version "
+         "took, or an answer that failed), the finding stands and says that it may overstate. An environment a "
+         "job names that the settings do not have gets no protection from them. Not followed: who may bypass the "
+         "rules of a branch the environment is limited to (OBAAF-SET-004), approvals a new push does not dismiss "
+         "and approvals a workflow can give (OBAAF-SET-013), which branches GitHub counts as protected, what a "
+         "pattern matches, and what trusts an environment that holds no secret.",
          "In the environment's settings, limit deployment to selected branches and name the default branch. "
          "Add required reviewers where a person should decide; a wildcard or a tag pattern is reported until "
-         "there are reviewers."),
+         "there are reviewers.",
+         why="Anyone who can push a branch may run a job in the environment, using its secrets or what trusts it, "
+             "with at most a reviewer's and apps' approval in the way."),
     Rule("OBAAF-SET-002", "A job outsiders can start gets an environment that asks nobody", "high",
          ("environments", "environment_secrets", "repository"),
          "jobs started by pull_request_target, issue and comment events",
@@ -79,18 +99,28 @@ RULES: tuple[Rule, ...] = (
          "issue_comment, issues, workflow_run and the like) names an environment that has no required "
          "reviewers. Those events run as the default branch (pull_request_target too, since 2025-12-08), so a "
          "limit on which branches may deploy lets them through whenever it admits the default branch: nothing "
-         "stands between the event and the environment's secrets.",
+         "stands between the event and the environment's secrets. An environment with a custom deployment "
+         "protection rule does ask someone, an app whose decisions are not read, so beside one this is \"cannot "
+         "tell\". Not followed: what a pattern in the limit matches, "
+         "and the callers of a reusable workflow in another repository.",
          "Add required reviewers to the environment, or move the step that needs the secret to a workflow "
-         "that only people with write access can start."),
+         "that only people with write access can start.",
+         why="An event people without write access can cause may run a job in the environment, with its secrets or "
+             "those the job reads, and no reviewer to approve."),
     Rule("OBAAF-SET-003", "A secret kept behind an environment is also stored where every job can read it", "high",
          ("environment_secrets", "repository_secrets", "organization_secrets", "environments"),
          "protected_secrets in .github/obaaf.yml, and the secrets jobs read",
          "A secret that the configuration says must stay behind an environment, or that is stored in one, "
          "also exists as a repository or organisation secret. A job that does not declare the environment "
          "gets that copy, on any branch, so the environment protects nothing. The same holds when the "
-         "environment the configuration names does not exist.",
+         "environment the configuration names does not exist, and for a copy in another environment that any "
+         "branch may use and that asks nobody; beside a custom deployment protection rule there, whose app's "
+         "decisions are not read, that copy is \"cannot tell\". Not followed: a copy in an environment with a "
+         "limit or reviewers, and Dependabot or Codespaces secrets.",
          "Delete the repository or organisation secret so that the environment holds the only copy, and "
-         "create the environment the configuration names, limited to the default branch."),
+         "create the environment the configuration names, limited to the default branch.",
+         why="A job on any branch may read the secret without the environment meant to keep it, so whatever branch "
+             "limit and reviewers that environment has may not apply."),
     Rule("OBAAF-SET-004", "Those who author changes can bypass the branch's rules", "high",
          ("ruleset_bypass_actors", "branch_rules", "branch_protection", "branches", "rulesets", "collaborators",
           "repository"),
@@ -98,71 +128,107 @@ RULES: tuple[Rule, ...] = (
          "A ruleset in force on the branch requires checks or reviews and lists who may bypass it, or classic "
          "branch protection does not hold administrators to it, or names people who may skip its reviews. "
          "Whoever is on such a list can push or merge without what the rule requires. When everyone who can "
-         "push is on it, the rules hold nobody.",
+         "push is on it, the rules hold nobody. Not followed: who is in a team, whether a role extends to higher "
+         "roles, and a bypass list GitHub did not show.",
          "Remove the bypass. If one must stay for emergencies, give it to a team nobody works from day to "
          "day; it is still reported, at medium. For classic protection, hold administrators to the rule and "
-         "empty the list of who may bypass required pull requests.", files=False),
+         "empty the list of who may bypass required pull requests.", files=False,
+         why="Anyone who may bypass, or an agent or token acting as them, can put a change on the branch without "
+             "the checks, reviews or other results its rules require."),
     Rule("OBAAF-SET-005", "Required approvals cannot be given", "medium",
          ("branch_rules", "branch_protection", "branches", "collaborators"),
          "nothing in the workflow files: it reads the approvals a branch requires and who can give them",
          "The branch requires more approvals than the people who can approve can give: an author cannot "
          "approve their own pull request, and only accounts with write access count. Every merge then needs "
-         "a bypass, which trains everyone to bypass.",
+         "a bypass, which trains everyone to bypass. Not followed: the CODEOWNERS file and who is in a team.",
          "Lower the required approvals to what the team can give, or give a second person write access. Do "
-         "not solve it with a bypass.", files=False),
+         "not solve it with a bypass.", files=False,
+         why="Pull requests by those who can push cannot get the approvals the branch requires from a person, so "
+             "they may merge only by a bypass, making bypassing routine."),
     Rule("OBAAF-SET-006", "A required check that no workflow job reports", "medium",
-         ("branch_rules", "branch_protection", "branches", "workflow_permissions"),
+         ("branch_rules", "branch_protection", "branches", "workflow_permissions", "actions_permissions",
+          "actions_policies"),
          "the check names the jobs report",
          "The branch requires a check from GitHub Actions under a name that no job in the workflow files "
          "reports (a job was renamed or removed, or the name was mistyped), and no job holds a token that "
          "could report it another way. The check stays pending on every pull request, so nothing merges "
-         "without a bypass.",
-         "Correct the name in the ruleset or branch protection to the one the job reports, or remove it."),
+         "without a bypass. Not followed: check runs GitHub has recorded, other apps, and what a step with a "
+         "token that may write checks reports.",
+         "Correct the name in the ruleset or branch protection to the one the job reports, or remove it.",
+         why="The required check never reports, so every pull request into the branch stays blocked and can merge "
+             "only by a bypass of its rules."),
     Rule("OBAAF-SET-007", "A required check that does not report on every pull request", "medium",
-         ("branch_rules", "branch_protection", "branches", "workflow_permissions"),
+         ("branch_rules", "branch_protection", "branches", "workflow_permissions", "actions_permissions",
+          "actions_policies"),
          "the triggers of the job that reports each required check, and their filters",
          "The branch requires a check, and the job that reports it does not run for every pull request into "
          "the branch: its workflow has a paths filter, or runs only for some kinds of pull request activity, "
          "or is started by something else altogether. On the pull requests it does not run for, the check "
-         "never reports and the merge stays blocked.",
+         "never reports and the merge stays blocked. Not followed: branch patterns, `concurrency`, fork pull "
+         "requests (a push trigger counts for every pull request), and how GitHub counts a pull_request_target "
+         "check.",
          "Let the workflow run on every pull request and skip inside the job instead (a job skipped by `if:` "
-         "reports as passed), or stop requiring the check."),
+         "reports as passed), or stop requiring the check.",
+         why="Pull requests the job does not run for wait on a required check that does not report, so they stay "
+             "blocked until it reports on their commit or someone bypasses."),
     Rule("OBAAF-SET-008", "A pull-request job whose failure does not block a merge", "medium",
-         ("branch_rules", "branch_protection", "branches"), "the jobs that run on every pull request",
+         ("branch_rules", "branch_protection", "branches", "actions_permissions", "actions_policies"),
+         "the jobs that run on every pull request",
          "A job runs on every pull request into the branch and is not among the required checks, so a merge "
-         "goes through while it is red. If that is intended, the workflow should say so.",
+         "goes through while it is red. If that is intended, the workflow should say so. Not followed: a job "
+         "that `if: false` or a called job's `if:` keeps from running, and how GitHub weighs two check runs of one "
+         "name.",
          "Add the job's check to the required checks. If the job is advisory, give it "
          "`continue-on-error: true` at job level, which says in the workflow that its failure is not meant "
-         "to block."),
+         "to block.",
+         why="A pull request may merge while such a job is failing, so whatever it checks may not stop a change "
+             "from reaching the branch."),
     Rule("OBAAF-SET-009", "An Actions policy blocks an event a workflow uses", "medium",
          ("actions_policies",), "the events under each workflow's `on:`",
          "An Actions policy allows only some events to start a workflow, and the workflow names another. A "
          "run for that event fails at startup with no job, so whatever it was meant to check is not checked "
-         "and nothing reports it.",
-         "Add the event to the policy's allowed events, or remove the trigger from the workflow."),
+         "and nothing reports it. Not followed: how GitHub matches a path pattern, and a policy's repository "
+         "conditions other than \"every repository\".",
+         "Add the event to the policy's allowed events, or remove the trigger from the workflow.",
+         why="A run for the blocked event fails at startup with no job, now or once the policy is enforced, so "
+             "whatever the workflow does for that event does not happen."),
     Rule("OBAAF-SET-010", "A pull_request_target workflow and GitHub's default policy of 2026-12-02", "medium",
          ("actions_policies", "repository"), "workflows started by pull_request_target",
          "By GitHub's changelog of 2026-11-02, from 2026-12-02 a default policy blocks the "
          "pull_request_target event in public repositories that have no policy allowing it. A workflow that "
-         "uses the event then fails at startup.",
+         "uses the event then fails at startup. Not followed: GitHub Enterprise Server, and a policy's repository "
+         "conditions other than \"every repository\".",
          "Move the workflow off pull_request_target where it does not need the base repository's secrets or "
          "write token. Where it does, add an Actions policy that allows the event for that workflow file, "
-         "and read OBAAF-GHA-001 and OBAAF-GHA-002 on what such a workflow must not do."),
-    Rule("OBAAF-SET-011", "A reusable workflow is passed a secret its caller cannot read", "medium",
+         "and read OBAAF-GHA-001 and OBAAF-GHA-002 on what such a workflow must not do.",
+         why="From 2026-12-02 GitHub's announced default policy blocks this event here, so the workflow's runs for "
+             "it will fail at startup and do nothing for pull requests."),
+    Rule("OBAAF-SET-011", "A reusable workflow gets an empty value for a secret kept in an environment", "medium",
          ("environment_secrets", "repository_secrets", "organization_secrets"),
-         "the secrets a job passes to a reusable workflow",
-         "A job that calls a reusable workflow cannot declare an environment, so it cannot read a secret "
-         "that is stored only in one: what it passes on is empty. The tempting repair is to copy the secret "
-         "to the repository, which removes the environment's protection.",
-         "Declare the environment on the job inside the reusable workflow, let that job read the "
-         "environment's secret under its own name, and stop passing it from the caller. Do not copy the "
-         "secret to the repository."),
+         "the secrets the jobs of a called workflow read, and what each calling job passes",
+         "A job in a reusable workflow reads a secret that is kept in an environment. By GitHub's page on reusing "
+         "workflows, the job that calls it cannot declare an environment, so the called job gets the "
+         "environment's value only when it declares that environment itself and the caller still passes the "
+         "secret, by name or with secrets: inherit. Otherwise it gets an empty value, and the run shows no "
+         "error: the caller passes nothing, or passes a secret kept only in an environment, which the caller "
+         "cannot read. The tempting repair is to copy the secret to the repository, which removes the "
+         "environment's protection. Not followed: what a reusable workflow in another repository declares (it is "
+         "\"cannot tell\"), and a secret kept outside every environment that the caller does not pass.",
+         "Declare the environment on the job inside the reusable workflow, and pass the secret from the caller "
+         "by name (NAME: ${{ secrets.NAME }}) or with secrets: inherit. Mark it required under "
+         "on.workflow_call.secrets, so that a caller that does not pass it fails at the start. Do not copy the "
+         "secret to the repository.",
+         why="The called job may run with an empty secret and no error, and the tempting fix, copying it to the "
+             "repository, would remove the environment's protection."),
     Rule("OBAAF-SET-012", "Jobs with no permissions block get a token that can write", "medium",
          ("workflow_permissions",), "jobs that declare no `permissions`",
          "The repository's default for the workflow token is read and write, and a job declares no "
-         "permissions, so it gets a token that can push, comment and release.",
+         "permissions, so it gets a token that can push, comment and release. Not followed: the callers of a "
+         "workflow in another repository, and an organisation's limit on the token.",
          "Set the default to read in the repository's Actions settings, and give each job the permissions it "
-         "needs."),
+         "needs.",
+         why="Any command run in such a job, its own or one injected into it, may get a token that can push, "
+             "comment and release in the repository."),
     Rule("OBAAF-SET-013", "A workflow can give a required approval", "medium",
          ("workflow_permissions", "branch_rules", "branch_protection", "branches"),
          "nothing in the workflow files: a workflow on any branch can ask for the token, so it reads whether "
@@ -170,12 +236,14 @@ RULES: tuple[Rule, ...] = (
          "Workflows are allowed to approve pull requests and a branch requires approvals. A workflow can ask "
          "for a token that writes to pull requests whatever the repository's default, and anyone who can push "
          "a branch can add such a workflow there, so a run of it can approve their own pull request, which is "
-         "not the review by a person that a required approval is meant to be.",
+         "not the review by a person that a required approval is meant to be. Not followed: the CODEOWNERS file.",
          "Turn off \"Allow GitHub Actions to create and approve pull requests\" in the repository's Actions "
          "settings. Where a workflow has to open pull requests, which needs the same switch (OBAAF's effect "
          "lane does), require a code owner's review, keep the required approvals at one, and give every file "
          "a code owner: the rule then answers \"cannot tell\", because it does not read the CODEOWNERS file.",
-         files=False),
+         files=False,
+         why="Anyone who can push a branch can have a workflow approve their own pull request, so a required "
+             "approval may not be a person's review."),
     Rule("OBAAF-SET-014", "Fork pull requests run on the repository's runners or with its secrets", "high",
          ("fork_pull_requests", "repository"),
          "the runners the jobs name (a fork's pull request runs its own copy of the workflows)",
@@ -183,16 +251,23 @@ RULES: tuple[Rule, ...] = (
          "has a self-hosted runner: a stranger's code runs on a machine that keeps state, because a fork's "
          "pull request runs its own copy of the workflow files and can name any runner. Or, in a private "
          "repository, fork pull requests are sent secrets or a write token, which a fork's own workflow can "
-         "read whatever the jobs here do.",
+         "read whatever the jobs here do. Not followed: whether the repository has self-hosted runners that no "
+         "job here names.",
          "Require approval for all external contributors, or move the job to a GitHub-hosted runner. In a "
-         "private repository, do not send secrets or write tokens to fork pull requests."),
+         "private repository, do not send secrets or write tokens to fork pull requests.",
+         why="Code in a fork's pull request may run on the repository's self-hosted runner, which may keep state, "
+             "or with its secrets or a write token."),
     Rule("OBAAF-SET-015", "Pinning actions to a commit: the setting and the workflows disagree", "medium",
          ("actions_permissions",), "the actions each job's steps use",
          "The repository requires actions to be pinned to a full commit and a workflow uses one that is not, "
          "so that workflow is refused. Or every action is pinned today and the repository does not require "
-         "it, so nothing stops the next change from adding one that is not.",
+         "it, so nothing stops the next change from adding one that is not. Not followed: the actions a local "
+         "composite action or a called workflow uses, and GitHub's lockfile (an action that is not pinned beside "
+         "one is \"cannot tell\").",
          "Pin each action to a full commit SHA, and turn on the requirement in the repository's Actions "
-         "settings."),
+         "settings.",
+         why="Either a workflow is refused and runs nothing, or nothing stops the next change from adding an "
+             "action whose code can change under the same reference."),
 )
 RULE_BY_ID = {rule.id: rule for rule in RULES}
 
@@ -240,6 +315,7 @@ class _Run:
         self.results: list[dict] = []
         self.compared = ""       # what was compared, when something was
         self.idle = ""           # why there was nothing to compare
+        self.assumed = ""        # what an answer took for granted, shown whatever the rule's status
         self.failed = False
 
     # -- results
@@ -551,6 +627,20 @@ def _classic_fields(out: dict, rule: dict) -> None:
                 out["parameters_unread"].append(clause)
 
 
+def _classic_checks(out: dict, checks: dict) -> None:
+    """The required checks of a classic rule, each with every app it is required from. A name listed twice
+    keeps both apps (flagship slice 2d.2g: one was dropped, so a requirement from another app was lost); a
+    name in ``contexts`` with no entry in ``checks`` is required from any app."""
+    listed = checks["checks"] or []
+    for check in listed:
+        app = check["app_id"]
+        out["apps"].setdefault(check["context"], set()).add(app if _is_int(app) and app > 0 else None)
+    named = {check["context"] for check in listed}
+    for context in checks["contexts"]:
+        if context not in named:
+            out["apps"].setdefault(context, set()).add(None)
+
+
 def _requirements(run: _Run, branch: str) -> dict:
     out = {"apps": {}, "checks_whole": True, "approvals": None, "approvals_whole": True, "gaps": [],
            "rulesets": {}, "from_public_view": False, "classic": None, "classic_unknown": False,
@@ -635,10 +725,7 @@ def _requirements(run: _Run, branch: str) -> dict:
         if rule["exists"]:
             checks, reviews = rule["required_status_checks"], rule["required_pull_request_reviews"]
             if checks["required"]:
-                apps = {c["context"]: c["app_id"] for c in checks["checks"] or []}
-                for context in set(checks["contexts"]) | set(apps):
-                    app = apps.get(context)
-                    out["apps"].setdefault(context, set()).add(app if _is_int(app) and app > 0 else None)
+                _classic_checks(out, checks)
             if reviews["required"]:
                 count = reviews["required_approving_review_count"]
                 out["code_owner"] = out["code_owner"] or reviews["require_code_owner_reviews"] is True
@@ -670,10 +757,7 @@ def _requirements(run: _Run, branch: str) -> dict:
     checks = shown["required_status_checks"] if shown else None
     if checks is not None and checks["enforcement_level"] in ("non_admins", "everyone"):
         out["from_public_view"] = True
-        apps = {c["context"]: c["app_id"] for c in checks["checks"] or []}
-        for context in set(checks["contexts"]) | set(apps):
-            app = apps.get(context)
-            out["apps"].setdefault(context, set()).add(app if _is_int(app) and app > 0 else None)
+        _classic_checks(out, checks)
     else:
         out["checks_whole"] = False
     out["approvals_whole"] = False
@@ -689,7 +773,8 @@ def _reports(job: dict, context: str):
     if check["kind"] == "computed":
         return None
     if check["names"] is not None:
-        return context in check["names"]
+        # A job in a file GitHub may read otherwise (slice 2d.2g) is never counted as reporting.
+        return (None if job.get("doubt") else True) if context in check["names"] else False
     name = check["name"]
     if check["kind"] == "calls":
         fits = (context.startswith(name + " (") and " / " in context[len(name):] if check["matrix"]
@@ -735,46 +820,318 @@ def _every_update(types) -> bool:
     return types is None or {"opened", "synchronize"} <= set(types)
 
 
-ORDER = ("always", "maybe", "paths", "types", "manual", "never")
+ORDER = ("always", "maybe", "target", "paths", "types", "manual", "never")
 
 
-def _report_run(file: dict, job: dict, branch: str, pushes: bool = True) -> str:
+def _report_run(file: dict, job: dict, branch: str, pushes: bool = True, skipped: bool = False,
+                blocked=frozenset()) -> str:
     """How the job comes to run on the head commit of a pull request into the branch:
 
     - "always": for every pull request, whenever it is opened or updated;
     - "maybe": a branch pattern decides, and patterns are not evaluated;
+    - "target": only by pull_request_target, which runs on the base branch's latest commit (GitHub's
+      changelog of 2025-11-07), so whether its check counts on the pull request is not established;
     - "paths": only when certain paths change;
     - "types": only for some kinds of activity (labeled, closed ...);
     - "manual": only when someone or something dispatches the workflow;
     - "never": nothing in its triggers runs it there.
 
     With ``pushes`` a push trigger with no filter counts as "always": a push to the pull request's branch
-    runs the job on the same commit. That holds for a branch in this repository and not for a fork's."""
+    runs the job on the same commit. That holds for a branch in this repository and not for a fork's.
+
+    With ``skipped`` a job counts for every event its workflow runs on, whatever its `if:` or the jobs it
+    needs: a job they skip still reports its check, as passed (slice 2d.2g; OBAAF-SET-007 asks whether the
+    check reports, not whether the job's steps run). Events in ``blocked`` (an enforced Actions policy's)
+    start nothing."""
     found = "never"
+    events = set(file["triggers"]) if skipped else set(job["triggers"])
+    events -= set(blocked)
 
     def better(kind: str) -> str:
         return kind if ORDER.index(kind) < ORDER.index(found) else found
 
     for event in PULL_REQUEST_EVENTS:
         filters = file["triggers"].get(event)
-        if filters is None or event not in job["triggers"]:
+        if filters is None or event not in events:
             continue
         admitted = _admits(filters, branch)
         if admitted is False:
             continue
-        found = better("maybe" if admitted is None else "paths" if filters["paths"]
-                       else "always" if _every_update(filters["types"]) else "types")
+        kind = ("maybe" if admitted is None else "paths" if filters["paths"]
+                else "always" if _every_update(filters["types"]) else "types")
+        found = better("target" if event not in HEAD_COMMIT_EVENTS and kind == "always" else kind)
     push = file["triggers"].get("push")
-    if pushes and push is not None and "push" in job["triggers"]:
+    if pushes and push is not None and "push" in events:
         if push["branches"] is None and push["branches_ignore"] is None:
             if not push["tags"]:
                 found = better("paths" if push["paths"] else "always")
         elif any(_pattern(name) for name in (push["branches"] or []) + (push["branches_ignore"] or [])) \
                 or push["branches_ignore"] is not None:
             found = better("maybe")
-    if "workflow_dispatch" in file["triggers"] and "workflow_dispatch" in job["triggers"]:
+    if "workflow_dispatch" in file["triggers"] and "workflow_dispatch" in events:
         found = better("manual")
     return found
+
+
+def _stops(run: _Run):
+    """What the settings say about whether GitHub runs each workflow file at all (flagship slice 2d.2g): the
+    files it does not run, each with why; the events an enforced Actions policy blocks for each file; and the
+    settings this depends on that were not read in full, as clauses. A check reported only by a job GitHub
+    does not run never reports."""
+    stopped: dict = {}
+    maybe: dict = {}            # files GitHub may not run, with why: never counted as reporting
+    blocked: dict = {}
+    unread: list = []
+    value, whole = run.got("actions_permissions")
+    if value is None or not whole:
+        unread.append(run.why("actions_permissions"))
+    if value is not None:
+        for file in run.files():
+            path = file["path"]
+            loose = sorted({a for job in file["jobs"] for a in job["unpinned"]})
+            # An action from another repository, or a reusable workflow from one (the third review of 2d.2g).
+            # A call written `./` or `$/` is this repository's (issue #182).
+            actions = sorted({a for job in file["jobs"] for a in job["remote_actions"]})
+            workflows = sorted({job["calls"] for job in file["jobs"] if job["calls"] and called_path(job) is None})
+            remote = actions + workflows
+            if value.get("enabled") is False:
+                stopped[path] = "GitHub Actions is turned off for the repository"
+            elif value.get("sha_pinning_required") is True and loose and not run.usage.get("actions_lock"):
+                stopped[path] = (f"the repository requires actions pinned to a full commit and it uses "
+                                 f"{_names([_q(a, 100) for a in loose], 2)}, so GitHub refuses it")
+            elif value.get("sha_pinning_required") is True and loose:
+                maybe[path] = (f"the repository requires actions pinned to a full commit and it uses "
+                               f"{_names([_q(a, 100) for a in loose], 2)}; .github/workflows/actions.lock may pin "
+                               "them, and it is not read")
+            elif value.get("allowed_actions") == "local_only" and remote:
+                # GitHub's own words for this value, by the second review of slice 2d.2g, are "Allow OWNER actions
+                # and reusable workflows": which owner's actions that lets through is not matched here.
+                maybe[path] = ("the repository allows only some owners' actions and reusable workflows "
+                               "(allowed_actions: local_only), which is not matched against those it uses")
+            elif value.get("allowed_actions") == "selected" and remote:
+                # Issue #182: an empty list of selected actions was read as letting everything run.
+                unsure = _not_selected(actions, workflows, value.get("selected_actions"))
+                if unsure:
+                    maybe[path] = _selection_doubt(unsure, value.get("selected_actions"))
+            if path not in stopped and path not in maybe and value.get("allowed_actions") not in (
+                    None, "all", "local_only", "selected"):
+                # A value of its own (the second review of slice 2b.7: it counted every file as running).
+                maybe[path] = (f"the repository's setting for which actions may run is {_q(value['allowed_actions'], 40)}, "
+                               "a value the audit does not know")
+            if path not in stopped and path not in maybe and value.get("allowed_actions") in ("local_only", "selected"):
+                # A local action's own steps, and whether the setting covers a container image, are not read
+                # (the review of slice 2b.7): a local composite action can use an action the setting blocks.
+                unread_here = sorted({a for job in file["jobs"] for a in job["unread_actions"]})
+                if unread_here:
+                    maybe[path] = (f"the repository allows only some actions and reusable workflows (allowed_actions: "
+                                   f"{value['allowed_actions']}), and it uses {_names([_q(a, 100) for a in unread_here], 2)}, "
+                                   "whose own steps, or whether the setting covers it, the audit does not read")
+    policies, whole = run.got("actions_policies")
+    if policies is None or not whole:
+        unread.append(run.why("actions_policies"))
+    for file in run.files():
+        applying, unclear = _policy_verdicts(file, policies or [])
+        for policy, allowed in applying:
+            if policy["enforcement"] == "active":
+                blocked.setdefault(file["path"], set()).update(e for e in file["triggers"] if e not in allowed)
+        events = set(file["triggers"]) - {"workflow_call"}
+        for policy in unclear:
+            if policy["enforcement"] == "evaluate" or file["path"] in stopped:
+                continue            # evaluate mode blocks nothing
+            lists = _event_rules(policy)
+            if lists and all(events <= set(allowed) for allowed in lists):
+                continue            # whatever it applies to, it allows every event the file uses
+            maybe.setdefault(file["path"], f"the Actions policy {_q(policy['name'])}, which this audit does not "
+                                           "understand, may block its events")
+    for file in run.files():
+        if file["path"] in stopped or file["path"] in maybe:
+            continue
+        # A call written with `$/`: whether GitHub takes `$/` in a job's `uses:` was not established (issue #182).
+        odd = next((job for job in file["jobs"] if self_repository_call(job)), None)
+        if odd is not None:
+            maybe[file["path"]] = (f"it calls {_q(odd['calls'], 120)}, written with $/, and whether GitHub "
+                                   "accepts $/ in a job's uses was not established")
+        elif file.get("may_refuse"):
+            maybe[file["path"]] = file["may_refuse"][0]     # a job id GitHub may refuse (slice 2b.7)
+    _spread_to_callers(run, stopped, maybe)
+    return stopped, maybe, blocked, unread
+
+
+def _spread_to_callers(run: _Run, stopped: dict, maybe: dict) -> None:
+    """A workflow that calls one GitHub does not run, or may not run, may not run either (the second review of
+    slice 2d.2g): the whole calling file is taken as one GitHub may not run, and so are its own callers. A
+    called file that is missing, or was not read (one GitHub refuses among them), counts the same, and so does
+    `uses: ./` alone (issue #182: it was skipped). Each file is looked at once from each file it calls, so a
+    chain of calls costs its length (it cost the square of it), and the reason a file is given is its first
+    call, in the order the jobs are written, to a file found not to run, or not to be sure to run, one step
+    nearer the cause (so a cycle of calls never gives a file its own caller as the reason)."""
+    files = run.files()
+    read = {file["path"] for file in files}
+    calls = {file["path"]: [t for t in (called_path(job) for job in file["jobs"]) if t is not None] for file in files}
+    for path, why in _call_graph_doubts(calls, read).items():
+        if path not in stopped and path not in maybe:
+            maybe[path] = why
+    callers: dict = {}
+    for path, targets in calls.items():
+        for target in dict.fromkeys(targets):
+            callers.setdefault(target, []).append(path)
+    bad = set(stopped) | set(maybe) | {t for targets in calls.values() for t in targets if t not in read}
+    frontier = set(bad)
+    reasons: dict = {}
+    while frontier:
+        reached = {path for target in frontier for path in callers.get(target, ()) if path not in bad}
+        for path in reached:
+            reasons[path] = next(t for t in calls[path] if t in bad)
+        bad |= reached
+        frontier = reached
+    for file in files:
+        target = reasons.get(file["path"])
+        if target is not None:
+            maybe[file["path"]] = (f"it calls {plain(target, 120) if target else _q('./')}, which GitHub "
+                                   + ("does not run" if target in stopped else "may not run" if target in read
+                                      else "may not run: it is not among the workflow files that were read"))
+
+
+# How deep calls may nest before GitHub refuses the run, at the least: its reference allowed "four levels of
+# workflows", the caller and three levels of reusable workflows, as the author knew it; a later limit may be higher
+# (not read in the session that wrote this, so a deeper chain is a doubt, the review of slice 2b.7).
+MAX_CALL_DEPTH = 3
+
+
+def _call_graph_doubts(calls: dict, read: set) -> dict:
+    """The files GitHub may not run because of how they call one another (the review of slice 2b.7): one in a
+    cycle of calls, which cannot be expanded (a file that calls itself included), and one that starts a chain of
+    more nested calls than MAX_CALL_DEPTH. Iterative, so a long chain does not exhaust the stack."""
+    graph = {path: list(dict.fromkeys(t for t in targets if t in read)) for path, targets in calls.items()}
+    # Tarjan's strongly connected components, without recursion.
+    index: dict = {}
+    low: dict = {}
+    on_stack: set = set()
+    stack: list = []
+    component: dict = {}
+    counter = 0
+    for root in graph:
+        if root in index:
+            continue
+        work = [(root, 0)]
+        while work:
+            node, i = work.pop()
+            if i == 0:
+                index[node] = low[node] = counter
+                counter += 1
+                stack.append(node)
+                on_stack.add(node)
+            targets = graph.get(node, [])
+            if i < len(targets):
+                work.append((node, i + 1))
+                target = targets[i]
+                if target not in index:
+                    work.append((target, 0))
+                elif target in on_stack:
+                    low[node] = min(low[node], index[target])
+                continue
+            for target in targets:
+                if target in on_stack:
+                    low[node] = min(low[node], low[target])
+            if low[node] == index[node]:
+                members = []
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    members.append(member)
+                    if member == node:
+                        break
+                for member in members:
+                    component[member] = members
+    doubts: dict = {}
+    cyclic = set()
+    first: dict = {}     # each component's first three members, found once (the second review of 2b.7)
+    for path, targets in graph.items():
+        members = component[path]
+        if len(members) > 1 or path in targets:
+            cyclic.add(path)
+            key = id(members)
+            if key not in first:
+                first[key] = heapq.nsmallest(3, members)
+            others = [m for m in first[key] if m != path][:2]
+            more = len(members) - 1 - len(others)
+            named = ", ".join(plain(m, 120) for m in others) + (f" and {more} more" if more else "")
+            doubts[path] = ("it calls itself, a cycle GitHub cannot expand" if len(members) == 1 else
+                            f"it is in a cycle of calls with {named}, which GitHub cannot expand")
+    # The longest chain of calls below each file outside a cycle, in calls: one past MAX_CALL_DEPTH is a doubt.
+    # Callers of a file in a cycle are not measured through it: they become files GitHub may not run anyway.
+    depth: dict = {}
+    for root in graph:
+        if root in cyclic or root in depth:
+            continue
+        work = [(root, False)]
+        while work:
+            node, done = work.pop()
+            below = [t for t in graph[node] if t not in cyclic]
+            if done:
+                depth[node] = 1 + max((depth[t] for t in below), default=-1)
+                continue
+            if node in depth:
+                continue
+            work.append((node, True))
+            work.extend((t, False) for t in below if t not in depth)
+    for path, n in depth.items():
+        if n > MAX_CALL_DEPTH and path not in doubts:
+            doubts[path] = (f"it starts a chain of {n} nested calls, and GitHub allowed the caller and "
+                            f"{MAX_CALL_DEPTH} levels of reusable workflows (as its reference was known when this was "
+                            "written; a later limit was not read)")
+    return doubts
+
+
+# A reference to another repository's action or reusable workflow, `owner/repo[/path]@ref`, as plainly as it can be
+# written (issue #182): each part letters, digits, `.`, `_` and `-`, no part `.` or `..`, a ref of the same with `/`
+# and no `..` (which no git ref holds), no space, no wildcard. Only such a reference is matched against the list.
+_PART = r"(?!\.\.?[/@])[A-Za-z0-9._-]+"
+PLAIN_REFERENCE_RE = re.compile(rf"(?P<owner>{_PART})/{_PART}(?:/{_PART})*@(?!.*\.\.)[A-Za-z0-9._/-]+")
+
+
+def _not_selected(actions: list[str], workflows: list[str], selected) -> list[str]:
+    """The references, of actions or reusable workflows in another repository, that the list of selected
+    actions (`allowed_actions: selected`), as written, does not allow (issue #182). What an allowed reference
+    uses in turn (a remote composite action's steps, a remote reusable workflow's jobs) is not read. GitHub's matching of the list
+    was not read from its pages in the session that wrote this, so only two things count: a step's action of
+    the `actions` or `github` organisation, written so in lower case, where GitHub's own actions are allowed;
+    and an entry that is the reference itself, character for character. Either only for a reference written
+    plainly (PLAIN_REFERENCE_RE), and neither while any entry holds a `!`, which may block. Another
+    repository's reusable workflow is never allowed as written, an equal entry included, because its jobs are
+    not read; actions of the repository's own owner and of verified creators are not matched. A list that was
+    not read lets nothing through."""
+    if not isinstance(selected, dict):
+        return actions + workflows
+    patterns = [p for p in selected.get("patterns_allowed") or [] if isinstance(p, str)]
+    if any("!" in p for p in patterns):
+        return actions + workflows
+
+    def allowed(uses: str) -> bool:
+        plain_ref = PLAIN_REFERENCE_RE.fullmatch(uses)
+        if plain_ref is None:
+            return False        # a wildcard, a space or an odd part: never matched, even by an equal entry
+        owned = selected.get("github_owned_allowed") is True and plain_ref["owner"] in ("actions", "github")
+        return owned or uses in patterns
+
+    # Another repository's reusable workflow is never taken as allowed: its jobs, and what they use, are not read
+    # (the third review of 2b.7), as a local action's steps are not.
+    return [uses for uses in actions if not allowed(uses)] + list(workflows)
+
+
+def _selection_doubt(unsure: list[str], selected) -> str:
+    """Why a file GitHub may refuse under `allowed_actions: selected` may not run."""
+    names = ", ".join(_q(a, 100) for a in unsure[:2]) + (f" and {len(unsure) - 2} more" if len(unsure) > 2 else "")
+    if not isinstance(selected, dict):
+        return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), "
+                f"the list was not read, and it uses {names}")
+    if any("!" in p for p in selected.get("patterns_allowed") or [] if isinstance(p, str)):
+        return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), an "
+                f"entry of the list holds a !, which may block, so nothing is matched, and it uses {names}")
+    return (f"the repository allows only selected actions and reusable workflows (allowed_actions: selected), and "
+            f"it uses {names}, which the list as written does not allow: only a step's action of GitHub's own, "
+            "where allowed, or one an entry names exactly is matched, and another repository's reusable workflow, "
+            "whose jobs are not read, never is")
 
 
 def _api_reporters(run: _Run) -> str:
@@ -826,6 +1183,57 @@ def _open_pattern(policy: dict) -> bool:
     return bool(policy["name"]) and set(policy["name"]) <= {"*", "/"}
 
 
+def _other_gates(env: dict) -> tuple[list[str], str]:
+    """What else an environment makes a job wait for besides its required reviewers (flagship slice 2b.9b), and
+    why that is not known in full.
+
+    The first is each enabled custom deployment protection rule, named by the GitHub App that runs it, and each
+    protection rule of a type this version does not know (``other_protection_rules``), named by its type. Each
+    is a gate whose decisions the audit cannot read: by GitHub's page on custom rules, the app is sent the run
+    and approves or rejects it, on whatever grounds it is written to use. So it is weighed as required reviewers
+    are where they leave a finding standing (an environment any branch may use: medium, naming the app), and
+    makes "cannot tell" of a finding they would have suppressed. The second is "" when the custom rules were
+    read, and otherwise why not: an environment of a snapshot an earlier version took has no such field, and
+    one whose answer failed has null. Then each rule keeps the finding it gives without such a gate, and says
+    that it may overstate."""
+    gates = [f"a custom deployment protection rule run by the app {_q(r['app'])}"
+             for r in env.get(CUSTOM_RULES) or () if r["enabled"] is True]
+    gates += [f"a protection rule of the type {_q(kind)}, which this version does not know and which may be such a gate"
+              for kind in env["other_protection_rules"]]
+    if CUSTOM_RULES not in env:
+        unread = ("its custom deployment protection rules were not read: the snapshot was taken by a version of "
+                  "obaaf that did not read them")
+    elif env[CUSTOM_RULES] is None:
+        unread = "its custom deployment protection rules could not be read"
+    else:
+        unread = ""
+    return gates, unread
+
+
+def _listed_whole(run: _Run) -> bool:
+    """Whether the list of environments is whole, so that an environment it does not hold does not exist.
+
+    The reader records a list it could not read as not read, and the whole setting as not read when an entry of
+    it has another shape. So a setting read in part is a whole list of which some environment's parts (its
+    branch patterns, its custom deployment protection rules) were not read, and those do not say that an
+    environment is missing. A problem keyed by a name the list does not hold, which only an edited file has, may
+    be an environment left out, and then the list is not whole (the review of slice 2b.9b: before it, any part
+    not read made every environment's existence "cannot tell", and the low finding of OBAAF-SET-003 vanish)."""
+    entry = run.settings["environments"]
+    if entry["status"] == "read":
+        return True
+    if entry["status"] != "partial":
+        return False
+    names = {env["name"] for env in entry["value"]}
+    return all(problem["key"] in names for problem in entry.get("problems", []))
+
+
+def _unread_gate_clause(unread: str) -> str:
+    """The sentence a finding ends with when an environment's custom deployment protection rules are not known."""
+    return (f" Whether a custom deployment protection rule also stands in the way is not known ({unread}); with one, "
+            "this finding may overstate what is open.") if unread else ""
+
+
 def _events(job: dict) -> set:
     """The events that reach the job, those of the jobs that call its workflow included."""
     return set(job["triggers"]) | set(job["called_from"])
@@ -845,7 +1253,8 @@ def rule_001(run: _Run) -> None:
         if not run.results:
             run.idle = "no job names an environment"
         return
-    environments, whole = run.got("environments")
+    environments, _ = run.got("environments")
+    whole = _listed_whole(run)
     if environments is None:
         run.unread("environments", f"{_n(len(wanted), 'environment')} that jobs name could not be compared",
                    "environments")
@@ -870,9 +1279,23 @@ def rule_001(run: _Run) -> None:
                             "Whatever protection the job counts on from it is not in the settings.")
             continue
         reviewers = bool(env["reviewers"])
-        gate = ("Its only protection is its required reviewers"
-                + {True: ", and self-review is prevented", False: ", and a reviewer may approve their own run"}.get(
-                    env["prevent_self_review"], "") + "." if reviewers else "It has no required reviewers.")
+        others, unread = _other_gates(env)
+        # A custom deployment protection rule counts as reviewers do (slice 2b.9b): beside a finding they leave
+        # standing it makes the finding medium and is named; a finding they would suppress is "cannot tell".
+        guarded = reviewers or bool(others)
+        self_review = {True: ", and self-review is prevented", False: ", and a reviewer may approve their own run"}.get(
+            env["prevent_self_review"], "")
+        if others:
+            gate = ((f"Its protection is its required reviewers{self_review}, and " if reviewers else
+                     "It has no required reviewers. Its protection is ")
+                    + f"{_names(others)}, whose decisions the audit does not read.")
+        else:
+            gate = (f"Its only protection is its required reviewers{self_review}." if reviewers
+                    else "It has no required reviewers.")
+        gate += _unread_gate_clause(unread)
+        # What a narrower finding becomes beside a gate the audit cannot read.
+        undecided = (f"Its protection is {_names(others)}, whose decisions the audit does not read, so whether a "
+                     "job there gets the environment without anyone's approval is not known.")
         # An environment read to hold no secret guards only what trusts its name (a deployment, an
         # identity token), which the audit does not read: the finding is then low and says so.
         empty = held.get(key) == []
@@ -881,7 +1304,7 @@ def rule_001(run: _Run) -> None:
                  "A job on any such branch can name it and read whatever secrets it holds.")
         mode = env["deployment_branches"]
         if mode == "any":
-            run.finding(subject, "low" if empty else "medium" if reviewers else "high",
+            run.finding(subject, "low" if empty else "medium" if guarded else "high",
                         f"Any branch or tag may use the environment {_q(env['name'])}, a pull request's branch "
                         f"included, and {who}. {reach} {gate}")
         elif mode == "protected":
@@ -895,24 +1318,73 @@ def rule_001(run: _Run) -> None:
             wide = [p for p in policies if p["type"] != "tag" and _open_pattern(p)]
             loose = [p for p in policies if p not in wide and (
                 p["type"] == "tag" or any(ch in p["name"] for ch in WILDCARDS))]
-            other = [p for p in policies if p not in wide and p not in loose and p["name"] not in audited]
+            named = [p for p in policies if p not in wide and p not in loose]
+            other = [p for p in named if p["name"] not in audited]
+            # A branch that was audited counts only for what its rules show (slice 2d.2g): one that anyone
+            # with write access can push to, with no approval and no limit on who may push, limits nothing.
+            gates = {p["name"]: _push_gate(run, p["name"]) for p in named if p["name"] in audited}
+            pushable = [p for p in named if gates.get(p["name"], ("",))[0] == "open"]
+            unsure = [p for p in named if gates.get(p["name"], ("",))[0] == "unknown"]
             if wide:
-                run.finding(subject, "low" if empty else "medium" if reviewers else "high",
+                run.finding(subject, "low" if empty else "medium" if guarded else "high",
                             f"The environment {_q(env['name'])} is limited to the branch pattern "
                             f"{_q(wide[0]['name'])}, which lets nearly every branch through, and {who}. "
                             f"{reach} {gate}")
             elif loose and not reviewers:
                 shown = _names(f"{'tag' if p['type'] == 'tag' else 'branch'} pattern {_q(p['name'])}" for p in loose)
-                run.finding(subject, "low" if empty else "medium",
-                            f"The environment {_q(env['name'])} may be used from {shown}, it has no required "
-                            f"reviewers, and {who}. Anyone with write access can push a branch or tag with such "
-                            "a name from any commit, unless a ruleset restricts creating them, which this rule "
-                            "does not read.")
-            elif other and not reviewers:
+                said = (f"The environment {_q(env['name'])} may be used from {shown}, it has no required "
+                        f"reviewers, and {who}. Anyone with write access can push a branch or tag with such "
+                        "a name from any commit, unless a ruleset restricts creating them, which this rule "
+                        "does not read.")
+                if others:
+                    run.cannot_tell(subject, f"{said} {undecided}")
+                else:
+                    run.finding(subject, "low" if empty else "medium", said + _unread_gate_clause(unread))
+            elif pushable and not reviewers:
+                said = (f"The environment {_q(env['name'])} may be used from the branch "
+                        f"{_names(_q(p['name']) for p in pushable)}, it has no required reviewers, and {who}. "
+                        f"{gates[pushable[0]['name']][1]} Anyone with write access can push a job there that "
+                        "names the environment")
+                if others:
+                    run.cannot_tell(subject, f"{said}. {undecided}")
+                else:
+                    run.finding(subject, "low" if empty else "medium",
+                                f"{said}, so the limit stops nobody who can push.{_unread_gate_clause(unread)}")
+            elif (other or unsure) and not reviewers:
+                parts = ([f"{_names(_q(p['name']) for p in other)}, which was not audited (name it with --branch to "
+                          "have its rules read)"] if other else []) + [
+                    f"{_q(p['name'])}, whose rules were not read in full ({gates[p['name']][1]})" for p in unsure]
                 run.cannot_tell(subject, f"The environment {_q(env['name'])} may be used from the branch "
-                                         f"{_names(_q(p['name']) for p in other)}, which was not audited, so who "
-                                         "can push there is not known. Name it with --branch to have its rules "
-                                         "read.")
+                                         f"{'; and '.join(parts)}, so who can push there is not known.")
+
+
+def _push_gate(run: _Run, branch: str) -> tuple[str, str]:
+    """Whether anyone with write access can push to the branch, by the rules the snapshot holds for it:
+    ("closed", why) when an approval by someone else, or a limit on who may push, stands in the way; ("open",
+    why) when the rules were read in full and neither does; ("unknown", why) when they were not read in full.
+    Who may bypass those rules is OBAAF-SET-004's subject, not this one's."""
+    need = _branch_requirements(run, branch)
+    if need["approvals"]:
+        return "closed", f"it requires {_n(need['approvals'], 'approval')}"
+    if need["code_owner"]:
+        return "unknown", "it requires a code owner's review, and who the code owners are (CODEOWNERS) is not read"
+    if need["merge_unread"]:
+        # Who may push is then who may bypass that rule, or who the restrictions name, which is not compared
+        # with who can push (the review of slice 2d.2g).
+        return "unknown", need["merge_unread"][0]
+    deployments = [g for g in need["gates"] if g[0] == "required_deployments"]
+    if deployments:
+        # A deployment that must succeed first may itself wait for a reviewer; that is not weighed here.
+        return "unknown", (f"a required_deployments rule (ruleset {plain(deployments[0][1], 20)}), whose deployments "
+                           "may wait for a reviewer, which is not weighed")
+    if not need["approvals_whole"]:
+        clauses = need["approvals_unread"] + [run.why(k) for k in sorted(set(need["gaps"]))
+                                               if run.settings[k]["status"] in ("unread", "partial")]
+        return "unknown", "; ".join(clauses) or "the rules in force on it were not read in full"
+    if need["parameters_unread"]:
+        return "unknown", need["parameters_unread"][0]
+    return "open", (f"The branch {_q(branch)} has no rule that requires an approval or limits who may push "
+                    "to it.")
 
 
 def _admits_default(env: dict, default: str):
@@ -950,7 +1422,8 @@ def rule_002(run: _Run) -> None:
         if not run.results:
             run.idle = "no job that outsiders' events can start names an environment"
         return
-    environments, whole = run.got("environments")
+    environments, _ = run.got("environments")
+    whole = _listed_whole(run)
     repository, _ = run.got("repository")
     if environments is None or repository is None:
         run.unread("environments", f"{_do(len(exposed), 'job', 'that', 'that')} outsiders' events can start "
@@ -989,10 +1462,17 @@ def rule_002(run: _Run) -> None:
                  "the default branch, so the limit does not stop them." if admitted else
                  "These events run as the default branch; whether its limit on which branches may deploy "
                  "admits the default branch was not read or rests on a pattern.")
-        run.finding(subject, "high",
-                    f"The job can be started by {_names(events)}, which people without write access can cause, "
-                    f"and it names the environment {_q(name)}, {what}. The environment has no required "
-                    f"reviewers. {limit}")
+        said = (f"The job can be started by {_names(events)}, which people without write access can cause, "
+                f"and it names the environment {_q(name)}, {what}. The environment has no required reviewers")
+        others, unread = _other_gates(env)
+        if others:
+            # Slice 2b.9b: an app's rule is asked first, so "asks nobody" would be false; what it decides on is
+            # not read.
+            run.cannot_tell(subject, f"{said}, but its protection is {_names(others)}, whose decisions the audit "
+                                     "does not read, so whether such an event gets the environment without anyone's "
+                                     "approval is not known.")
+            continue
+        run.finding(subject, "high", f"{said}. {limit}{_unread_gate_clause(unread)}")
 
 
 def _called(run: _Run, job: dict):
@@ -1006,7 +1486,8 @@ def rule_003(run: _Run) -> None:
     env_secrets, env_whole = run.got("environment_secrets")
     repo, repo_whole = run.got("repository_secrets")
     org, org_whole = run.got("organization_secrets")
-    environments, envs_whole = run.got("environments")
+    environments, _ = run.got("environments")
+    envs_whole = _listed_whole(run)
     read_by_jobs = {name.upper() for _, job in run.jobs() for name in job["secrets"]}
     # A job that can read every secret (toJSON(secrets), a computed index, `secrets: inherit`) reads each.
     reads_all = any(job["all_secrets"] or (job["passes"] and (job["passes"]["inherit"] or job["passes"]["all"]))
@@ -1045,6 +1526,39 @@ def rule_003(run: _Run) -> None:
                             f"{_q(name)} matches the protected_secrets entry {_q(pattern)} and is stored as "
                             f"{where}. Every job on every branch can read that copy, whichever environment the "
                             "jobs that should use it declare.")
+        if env and environments is not None:
+            # A copy in another environment that any branch may use and that asks nobody is a copy every job
+            # can reach: it only has to name that environment (slice 2d.2g).
+            open_envs = {e["name"].lower(): e for e in environments
+                         if not e["reviewers"] and e["name"].lower() != env.lower() and (
+                             e["deployment_branches"] == "any" or any(
+                                 p["type"] != "tag" and _open_pattern(p) for p in e.get("branch_policies") or []))}
+            for name in sorted(n for n in in_env if fnmatch.fnmatchcase(n, pattern) and n not in reported):
+                found = [open_envs[e.lower()] for e in in_env[name] if e.lower() in open_envs]
+                # Slice 2b.9b: a copy behind a custom deployment protection rule (or a protection rule of a type
+                # this version does not know) waits for an app whose decisions the audit does not read.
+                copies = sorted((e for e in found if not _other_gates(e)[0]), key=lambda e: e["name"])
+                gated = sorted((e for e in found if _other_gates(e)[0]), key=lambda e: e["name"])
+                if copies:
+                    reported.add(name)
+                    unread = "; ".join(dict.fromkeys(u for u in (_other_gates(e)[1] for e in copies) if u))
+                    run.finding(f"secret {_q(name)}", "high",
+                                f"{_q(name)} matches the protected_secrets entry {_q(pattern)}, which says it must stay "
+                                f"in {_q(env)}, and it is also stored in the environment "
+                                f"{_names(_q(c['name']) for c in copies)}, which any branch may use and which has no "
+                                "required reviewers. A job on any branch can name that environment and read the copy."
+                                + _unread_gate_clause(unread))
+                elif gated:
+                    reported.add(name)
+                    run.cannot_tell(f"secret {_q(name)}",
+                                    f"{_q(name)} matches the protected_secrets entry {_q(pattern)}, which says it must "
+                                    f"stay in {_q(env)}, and it is also stored in the environment "
+                                    f"{_names(_q(e['name']) for e in gated)}, which any branch may use and which has no "
+                                    "required reviewers. Its protection is "
+                                    f"{_names(dict.fromkeys(g for e in gated for g in _other_gates(e)[0]))}, whose "
+                                    "decisions the "
+                                    "audit does not read, so whether a job on any branch can read the copy is not "
+                                    "known.")
         if env and env_secrets is not None and envs_whole and env_whole:
             kept = [n for n in in_env if fnmatch.fnmatchcase(n, pattern)
                     and env.lower() in {e.lower() for e in in_env[n]}]
@@ -1052,6 +1566,12 @@ def rule_003(run: _Run) -> None:
                 run.finding(f"protected_secrets entry {_q(pattern)}", "low",
                             f"No secret that matches {_q(pattern)} is stored in the environment {_q(env)}, "
                             "which the configuration names for it. The entry protects nothing that is there.")
+        elif env and env_secrets is not None and env_whole and environments is not None:
+            # The list of environments may not be whole: whether the entry protects anything is not known, and
+            # that is said, never left out (the review of slice 2b.9b).
+            run.unread(f"protected_secrets entry {_q(pattern)}",
+                       f"whether a secret that matches {_q(pattern)} is stored in the environment {_q(env)} is not "
+                       "known, because the list of environments may not be whole", "environments")
     for name in sorted(set(in_env) & set(stored_wide) - reported):
         if name in read_by_jobs or reads_all:
             run.finding(f"secret {_q(name)}", "medium",
@@ -1067,80 +1587,366 @@ def rule_003(run: _Run) -> None:
         run.unread("where the secrets are stored", what + " is not known", *missing)
 
 
+def _given(names, only_env: dict) -> str:
+    """"X is stored only in the environment E", for one or more secrets kept only in environments."""
+    names = sorted(names)
+    envs = sorted({e for n in names for e in only_env[n]})
+    where = f"the environment {_names(_q(e) for e in envs)}" if len(envs) == 1 else \
+        f"the environments {_names(_q(e) for e in envs)}"
+    return f"{_names(_q(n) for n in names)} {'is' if len(names) == 1 else 'are'} stored only in {where}"
+
+
+class _Secrets:
+    """Where the settings say each secret is kept, in upper case as GitHub compares secret names."""
+
+    def __init__(self, env_secrets: dict, wide: set) -> None:
+        self.stored: dict = {}      # secret -> the environments that hold it
+        self.by_env: dict = {}      # environment, in lower case as GitHub compares the names -> its secrets
+        for env, names in env_secrets.items():
+            self.by_env.setdefault(env.lower(), set()).update(n.upper() for n in names)
+            for name in names:
+                self.stored.setdefault(name.upper(), set()).add(env)
+        self.wide = frozenset(wide)
+        self.only_env = {name: envs for name, envs in self.stored.items() if name not in wide}
+        self.only_env_names = frozenset(self.only_env)
+
+    def held_by(self, env: dict, names) -> list[str]:
+        """Which of the names the environment a job declares holds: only for a name written plainly (an
+        expression, a number, or a name with space round it, whose reading by GitHub is not established, is
+        never taken to hold anything)."""
+        name = env.get("name")
+        if name is None or name != name.strip():
+            return []
+        held = self.by_env.get(name.lower(), set())
+        return sorted(n for n in names if n in held)
+
+
+def _plainly_named(env: dict) -> bool:
+    name = env.get("name")
+    return not env or (name is not None and name == name.strip())
+
+
+def _reaches_called_job(run: _Run, subject: str, target: str, passes: dict, called: dict, name: str,
+                        kept: _Secrets, missing: dict) -> None:
+    """What a job of a called workflow in this repository gets for a secret it reads, by GitHub's page on
+    reusing workflows (https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows, read
+    on 2026-11-26 for flagship slice 2b.9): "The job that calls the reusable workflow can't use the
+    `environment` keyword"; "To use an environment secret in a reusable workflow, set `environment` on the
+    job in the reusable workflow. The caller workflow must still pass the secret. Use `secrets: inherit` or
+    pass the secret by name"; "You can pass a secret by name even if it only exists in the environment";
+    "The job that sets `environment` receives the environment secret's value"; and "If the caller workflow
+    doesn't pass an environment secret, the secret resolves to an empty string in the reusable workflow. The
+    workflow run doesn't show an error." What the page does not say (a secret passed under another name or
+    with another value to a job whose environment holds it, a second call that is not passed the secret) is
+    "cannot tell"."""
+    upper = name.upper()
+    key = passes["keys"].get(upper)
+    inherit = passes["inherit"] and not passes["odd_keys"]
+    passed = inherit or key is not None
+    where = f"whose job {_q(called['id'])} reads secrets.{plain(name, 60)}"
+    env = called["environment"] or {}
+    reads = set((key or {}).get("reads", ()))
+    reads_env = sorted(reads & kept.only_env_names)
+    concerns = upper in kept.stored or bool(reads_env) or bool(key and key["all"])
+    if not concerns:
+        return      # kept outside every environment, or nowhere, and passed from secrets every job can read
+    if passes["odd_keys"] or (key and key.get("ambiguous")):
+        run.cannot_tell(subject, f"The job calls {_q(target, 120)}, {where}. Its secrets: "
+                                 + ("names it twice, in two letter cases" if key and key.get("ambiguous") else
+                                    "holds a key this reader does not take as a plain name, or is text other than "
+                                    "inherit")
+                                 + f", so whether and how it passes {_q(name)} is not known.")
+        return
+    if called["calls"]:
+        # The called job passes it on to a workflow of its own. That call is read as a caller of its own; this
+        # call counts only when it hands the job the secret as the page documents, by name or with inherit.
+        if not (inherit or (key is not None and key["plain"] == upper)):
+            run.cannot_tell(subject, f"The job calls {_q(target, 120)}, {where} and passes it on to "
+                                     f"{_q(called['calls'], 120)}. "
+                                     + ("This job does not pass it" if not passed else
+                                        "This job passes it under another name or with another value")
+                                     + "; whether a job there that declares an environment holding it gets its "
+                                       "value is not documented, so the second call was not followed.")
+        return
+    if not passed:
+        if upper not in kept.stored:
+            return
+        # Reported once for the call, with every secret and job it concerns (see _missing_finding).
+        entry = missing.setdefault(upper, {"name": name, "jobs": [], "declared": []})
+        entry["jobs"].append(called["id"])
+        if kept.held_by(env, [upper]):
+            entry["declared"].append(called["id"])
+        return
+    if not _plainly_named(env):
+        # Passed, so what the job gets depends on whether the environment it names holds the secret.
+        run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)}, {where} and names its "
+                                 "environment in a form this reader does not take as a plain name (an expression, "
+                                 "a number, a mapping without a name, or space round it). Whether that is an "
+                                 f"environment that holds {_q(name)}, and so which value the job gets, is not known.")
+        return
+    if inherit:
+        if kept.held_by(env, [upper]):
+            return      # the job declares the environment and is passed the secret: it gets the environment's value
+        if upper in kept.only_env:
+            run.finding(subject, "medium",
+                        f"The job passes every secret to {_q(target, 120)}, {where}. {_given([upper], kept.only_env)}, "
+                        "and that job does not declare it, so the value it gets is empty.")
+        return
+    held = kept.held_by(env, sorted({upper} | reads))
+    if held:
+        if key["plain"] == upper:
+            return      # passed as NAME: ${{ secrets.NAME }} to a job whose environment holds NAME: documented
+        if upper in held and key["plain"] in kept.wide and not kept.held_by(env, [key["plain"]]):
+            return      # either the environment's NAME or a secret every job can read: neither is empty
+        run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)} with a value other than "
+                                 f"${{{{ secrets.{plain(name, 60)} }}}}, {where} and declares the environment "
+                                 f"{_q(env['name'])}, which holds {_names(_q(n) for n in held)}. Which value that job "
+                                 "gets is not documented.")
+        return
+    # The job's environment holds neither the name it reads nor what the value reads: it gets what the caller
+    # passes, which the caller, which cannot declare an environment, evaluates without one.
+    if key["all"]:
+        run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)} as a secret it picks with an "
+                                 f"expression, {where}. Whether that is one stored only in an environment is not "
+                                 "known.")
+        return
+    if not reads_env:
+        return      # the value comes from secrets every job can read, or from text
+    shown = "" if key["plain"] == upper else f" as {_q(name)}"
+    if key["plain"] in kept.only_env:
+        run.finding(subject, "medium",
+                    f"The job passes secrets.{plain(key['plain'], 60)} to {_q(target, 120)}{shown}, {where}. "
+                    f"{_given([key['plain']], kept.only_env)}, and a job that calls a reusable workflow cannot "
+                    "declare an environment, so what it passes is empty; the called job does not declare an "
+                    "environment that holds either name.")
+        return
+    run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)} with a value that reads "
+                             f"{_names(_q(n) for n in reads_env)} among other things, {where}. "
+                             f"{_given(reads_env, kept.only_env)}, so that part of the value is empty; whether the "
+                             "whole value is is not known.")
+
+
+def _missing_finding(run: _Run, subject: str, target: str, missing: dict, kept: _Secrets,
+                     declared: dict, passes: dict) -> None:
+    """One finding for a call that does not pass secrets kept in an environment which jobs of the called
+    workflow read: the first adopter's incident (Expectrail `ad3e0775`, 2026-11-10). A secret the called
+    workflow marks required makes the run fail at its start, by the page; the others are empty."""
+    if not missing:
+        return
+    names = [missing[k]["name"] for k in sorted(missing)]
+    jobs = sorted({j for k in missing for j in missing[k]["jobs"]})
+    envs = sorted({e for k in missing for e in kept.stored[k]})
+    holds: dict = {}
+    for k in sorted(missing):
+        for j in missing[k]["declared"]:
+            holds.setdefault(j, []).append(missing[k]["name"])
+    by_names: dict = {}     # the secrets held -> the jobs whose environment holds just those
+    for j, ns in sorted(holds.items()):
+        by_names.setdefault(tuple(sorted(set(ns))), []).append(j)
+    said = "".join(f" {'Its job' if len(js) == 1 else 'Its jobs'} {_names(_q(j) for j in js)} "
+                   f"{'declares' if len(js) == 1 else 'declare'} an environment that holds {_names(_q(n) for n in ns)}, "
+                   f"but the caller must still pass a secret for {'the job' if len(js) == 1 else 'a job'} to get it."
+                   for ns, js in sorted(by_names.items()))
+    listed, whole = declared.get("names") or {}, declared.get("whole", False)
+    # A secret passed that the called workflow does not declare: by a GitHub community thread ("Invalid secret,
+    # ... is not defined in the referenced workflow"), not by the page, the run may then fail at its start.
+    refused = whole and any(k not in listed for k in passes["keys"])
+    # Only a declaration read whole says what GitHub does; otherwise every one of them is "either".
+    required = sorted(missing[k]["name"] for k in missing if whole and not refused and listed.get(k) is True)
+    unsure = sorted(missing[k]["name"] for k in missing
+                    if not whole or refused or (k in listed and listed[k] is None))
+    empty = sorted(set(names) - set(required) - set(unsure))
+    outcome = []
+    if required:
+        outcome.append(f"GitHub fails the run at its start for {_names(_q(n) for n in required)}, which the called "
+                       "workflow marks required")
+    if empty:
+        outcome.append(f"{_names(_q(n) for n in empty)} {'is' if len(empty) == 1 else 'are'} empty in the called "
+                       "workflow, and the run shows no error")
+    if unsure:
+        why = ("the call also passes a secret the called workflow does not declare" if refused else
+               "the called workflow's declaration of its secrets was not read whole" if not whole else
+               "the called workflow's declaration of it was not read as true or false")
+        outcome.append(f"for {_names(_q(n) for n in unsure)} the run either fails at its start or gets an empty "
+                       f"value ({why})")
+    many = len(names) > 1
+    run.finding(subject, "medium",
+                f"The job calls {_q(target, 120)} without passing {_names(_q(n) for n in names)}, which "
+                f"{'its job' if len(jobs) == 1 else 'its jobs'} {_names(_q(j) for j in jobs)} "
+                f"{'reads' if len(jobs) == 1 and not many else 'read'}, and "
+                f"{'which are' if many else 'which is'} stored in the "
+                f"{'environment' if len(envs) == 1 else 'environments'} {_names(_q(e) for e in envs)}.{said} A "
+                "called workflow gets only the secrets its caller passes, by name or with secrets: inherit, so "
+                + "; ".join(outcome) + ".")
+
+
+def _call_graph_parts(run: _Run) -> dict:
+    """For each workflow file whose own calls reach a file in a cycle or a chain deeper than GitHub allows (by
+    _call_graph_doubts), itself included, why: a run of it GitHub may refuse whole, so no job in it may run at
+    all (the second review of slice 2b.9: a finding there said "the run shows no error"). Only what a file's
+    own calls reach counts, never another caller of the same workflow (the third review: one cyclic file made
+    every caller of a shared workflow "cannot tell"). One pass up the calls from every such file at once."""
+    files = run.files()
+    read = {file["path"] for file in files}
+    calls = {file["path"]: [t for t in (called_path(job) for job in file["jobs"]) if t is not None] for file in files}
+    doubts = _call_graph_doubts(calls, read)
+    for file in files:
+        if not file.get("triggers") and file["path"] not in doubts:
+            # No event starts it, and GitHub calls only a workflow that has `workflow_call` (the fourth review).
+            doubts[file["path"]] = "no event starts it, so GitHub never runs it"
+    if not doubts:
+        return {}
+    callers: dict = {}
+    for path, targets in calls.items():
+        for target in dict.fromkeys(targets):
+            callers.setdefault(target, []).append(path)
+    out = {path: [f"{plain(path, 120)}: {why}"] for path, why in doubts.items()}
+    frontier = list(out)
+    while frontier:
+        reached = []
+        for target in frontier:
+            for path in callers.get(target, ()):
+                if path not in out:
+                    out[path] = out[target]
+                    reached.append(path)
+        frontier = reached
+    # A file that runs only when called runs only inside its callers' runs: when every caller in this repository
+    # is a run GitHub may refuse, so is each of its own (the third review: a chain a→b→c→d→e, whose files below
+    # `a` run only from it). Each file is settled once, when its last caller is.
+    only_called = {f["path"] for f in files if f.get("triggers") and set(f["triggers"]) <= {"workflow_call"}}
+    left = {path: len(set(callers.get(path, ()))) for path in only_called}
+    frontier = list(out)
+    settled = set(out)
+    while frontier:
+        reached = []
+        for path in frontier:
+            for target in dict.fromkeys(calls.get(path, ())):
+                if target in left and target not in settled:
+                    left[target] -= 1
+                    if left[target] == 0:
+                        out[target] = [f"{plain(target, 120)}: it runs only when called, and every workflow here "
+                                       f"that calls it is one GitHub may refuse ({out[path][0]})"]
+                        settled.add(target)
+                        reached.append(target)
+        frontier = reached
+    return out
+
+
+def _weighed_call(run: _Run, job: dict) -> bool:
+    """Whether OBAAF-SET-011 has something to weigh for a calling job: it passes a secret (by name, with
+    `secrets: inherit`, or as an input), it calls a workflow that was not read (in another repository, or one
+    that does not parse or was not found), or a job of the workflow it calls reads one."""
+    passes = job["passes"]
+    if passes["inherit"] or passes["keys"] or passes["odd_keys"] or passes["inputs"] or passes["inputs_all"] \
+            or passes["all"]:
+        return True
+    local = _called(run, job)
+    return local is None or any(j["secrets"] or j["all_secrets"] or j["passes"] for j in local["jobs"])
+
+
+def _weigh_call(run: _Run, file: dict, job: dict, kept: _Secrets, listed: str, graph: dict) -> None:
+    """OBAAF-SET-011 for one calling job."""
+    subject = f"job {_job_label(file, job)}"
+    target = job["calls"] or ""
+    passes = job["passes"]
+    local = _called(run, job)
+    doubt = list(job.get("doubt") or []) + list(file.get("may_refuse") or []) + \
+        (list(local.get("may_refuse") or []) if local else []) + graph.get(file["path"], [])
+    if doubt:
+        # The caller's file, or the file it calls, may be read by GitHub otherwise than by this reader (a YAML
+        # merge key may give the environment or the secrets passed), or not run.
+        run.cannot_tell(subject, f"The job calls {_q(target, 120)}, and GitHub may read the files otherwise "
+                                 f"than the audit does, or not run them ({_names(doubt, 2)}), so what the called "
+                                 "jobs get for the secrets they read is not known.")
+        return
+    # Handed over as an input, under `with:`: an input is not a secret, so no environment the called job
+    # declares stands in for it.
+    for name in passes["inputs"]:
+        if name.upper() in kept.only_env:
+            run.finding(subject, "medium",
+                        f"The job hands secrets.{plain(name, 60)} to {_q(target, 120)} as an input. "
+                        f"{_given([name.upper()], kept.only_env)}, and a job that calls a reusable workflow "
+                        "cannot declare an environment, so the called workflow cannot get its value that way, "
+                        "whatever it declares.")
+    if passes["inputs_all"]:
+        run.cannot_tell(subject, f"The job hands {_q(target, 120)} a secret it picks with an expression as an "
+                                 "input. Whether that is one stored only in an environment is not known.")
+    if local is None:
+        unread = "which was not read (it is in another repository, could not be parsed, or is not among the files read)"
+        said = len(run.results)
+        if passes["odd_keys"]:
+            run.cannot_tell(subject, f"The job calls {_q(target, 120)}, {unread}, and its secrets: holds a key "
+                                     "this reader does not take as a plain name, or is text other than inherit. "
+                                     "What a job there gets for a secret kept in an environment is not known.")
+        elif passes["inherit"]:
+            run.cannot_tell(subject, f"The job passes every secret to {_q(target, 120)}, {unread}. Whether a "
+                                     "job there reads a secret kept in an environment without declaring that "
+                                     f"environment ({listed or 'none is kept only in one'}) is not known.")
+        for name, key in sorted(passes["keys"].items()):
+            reads = sorted(set(key["reads"]) & kept.only_env_names)
+            if key["all"]:
+                run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)} as a secret it picks "
+                                         f"with an expression, {unread}. Whether that is one stored only in "
+                                         "an environment is not known.")
+            elif reads:
+                run.cannot_tell(subject, f"The job passes {_q(name)} to {_q(target, 120)}, {unread}. "
+                                         f"{_given(reads, kept.only_env)}: a job there gets a value for it only "
+                                         "if it declares an environment that holds it, and whether one does is "
+                                         "not known.")
+        if len(run.results) == said:
+            run.cannot_tell(subject, f"The job calls {_q(target, 120)}, {unread}. Whether a job there reads a "
+                                     "secret kept in an environment that this job does not pass, which it would "
+                                     "then get empty, is not known.")
+        return
+    missing: dict = {}
+    for called in local["jobs"]:
+        onward = called["passes"] and (called["passes"]["inherit"] or called["passes"]["all"])
+        if called["all_secrets"] or onward:
+            # It can read any secret, or passes them all on: which it relies on is not known.
+            run.cannot_tell(subject, f"The job calls {_q(target, 120)}, whose job {_q(called['id'])} "
+                                     + ("passes every secret on to another call" if onward and not
+                                        called["all_secrets"] else "can read any secret")
+                                     + ". Whether it relies on one kept in an environment, and what it gets "
+                                       "for it, is not known.")
+        # Each secret it names is still weighed, once in any letter case, as GitHub compares the names.
+        spelled: dict = {}
+        for name in called["secrets"]:
+            spelled.setdefault(name.upper(), name)
+        for name in spelled.values():
+            _reaches_called_job(run, subject, target, passes, called, name, kept, missing)
+    _missing_finding(run, subject, target, missing, kept, local.get("call_secrets") or {}, passes)
+
+
 def rule_011(run: _Run) -> None:
-    callers = [(file, job) for file, job in run.jobs()
-               if job["passes"] and (job["passes"]["inherit"] or job["passes"]["names"] or job["passes"]["all"])]
+    callers = [(file, job) for file, job in run.jobs() if job["calls"] and _weighed_call(run, job)]
     if not callers:
-        run.idle = "no job passes a secret to a reusable workflow"
+        run.idle = "no job passes a secret to a reusable workflow, or calls one that reads a secret or was not read"
         return
     env_secrets, env_whole = run.got("environment_secrets")
     repo, repo_whole = run.got("repository_secrets")
     org, org_whole = run.got("organization_secrets")
     if not (env_whole and repo_whole and org_whole):
         run.unread("where the secrets are stored",
-                   f"{_do(len(callers), 'job', 'passes', 'pass')} secrets to a reusable workflow, and whether any "
-                   "of those secrets is stored only in an environment is not known",
+                   f"{_do(len(callers), 'job', 'calls', 'call')} a reusable workflow, and whether a secret that "
+                   "workflow reads is kept in an environment is not known",
                    "environment_secrets", "repository_secrets", "organization_secrets")
         return
-    wide = {name.upper() for name in list(repo) + list(org)}
-    only_env: dict = {}
-    for env, names in env_secrets.items():
-        for name in names:
-            if name.upper() not in wide:
-                only_env.setdefault(name.upper(), []).append(env)
-    run.compared = f"{_n(len(callers), 'job')} passing secrets to a reusable workflow"
-    if not only_env:
-        return  # every secret is stored where a caller can read it
-    listed = _names(_q(n) for n in sorted(only_env))
+    kept = _Secrets(env_secrets, {name.upper() for name in list(repo) + list(org)})
+    run.compared = f"{_n(len(callers), 'job')} calling a reusable workflow"
+    if not kept.stored:
+        return  # no secret is kept in an environment
+    listed = _names(_q(n) for n in sorted(kept.only_env))
+    graph = _call_graph_parts(run)
     for file, job in callers:
-        subject = f"job {_job_label(file, job)}"
-        target = job["calls"] or ""
-        passes = job["passes"]
-        # Passed by name, as a secret or as an input: the called workflow sees what the caller could read.
-        for name in passes["names"]:
-            envs = only_env.get(name.upper())
-            if envs:
-                run.finding(subject, "medium",
-                            f"The job passes secrets.{plain(name, 60)} to {_q(target, 120)}. {_q(name)} is stored "
-                            f"only in the environment {_names(_q(e) for e in sorted(envs))}, and a job that "
-                            "calls a reusable workflow cannot declare an environment, so what it passes is "
-                            "empty, whatever the called workflow declares.")
-        if passes["all"]:
-            run.cannot_tell(subject, f"The job passes a secret it picks with an expression to {_q(target, 120)}. "
-                                     f"Whether that is one of {listed}, stored only in an environment, is not "
-                                     "known.")
-        if not passes["inherit"]:
-            continue
-        local = _called(run, job)
-        if local is None:
-            run.cannot_tell(subject, f"The job passes every secret to {_q(target, 120)}, which was not read "
-                                     "(it is in another repository, or could not be parsed). Whether that "
-                                     f"workflow reads {listed}, stored only in an environment, is not known.")
-            continue
-        for called in local["jobs"]:
-            env = called["environment"] or {}
-            where = f"whose job {_q(called['id'])}"
-            if called["all_secrets"] or (called["passes"] and (called["passes"]["inherit"] or called["passes"]["all"])):
-                run.cannot_tell(subject, f"The job passes every secret to {_q(target, 120)}, {where} can read "
-                                         f"any of them or passes them on. Whether it relies on {listed}, "
-                                         "stored only in an environment, is not known.")
-                continue
-            for name in called["secrets"]:
-                envs = only_env.get(name.upper())
-                if not envs:
-                    continue
-                if env.get("computed"):
-                    run.cannot_tell(subject, f"The job passes every secret to {_q(target, 120)}, {where} reads "
-                                             f"secrets.{plain(name, 60)} and names its environment with an "
-                                             f"expression. {_q(name)} is stored only in the environment "
-                                             f"{_names(_q(e) for e in sorted(envs))}; whether that is the "
-                                             "environment the job gets is not known.")
-                elif env.get("name", "").lower() not in {e.lower() for e in envs}:
-                    run.finding(subject, "medium",
-                                f"The job passes every secret to {_q(target, 120)}, {where} reads "
-                                f"secrets.{plain(name, 60)}. {_q(name)} is stored only in the environment "
-                                f"{_names(_q(e) for e in sorted(envs))}, and that job does not declare it, so "
-                                "the value it gets is empty.")
+        mark = len(run.results)
+        _weigh_call(run, file, job, kept, listed, graph)
+        if self_repository_call(job):
+            # D-076 reads a `$/` call as this repository's, though whether GitHub takes `$/` in a job's `uses:` was
+            # not established: a finding then rests on that, wherever the weighing ended (the third review).
+            for result in run.results[mark:]:
+                if result["state"] == "finding":
+                    result["message"] += (" This holds if GitHub runs a call written with $/, which was not "
+                                          "established.")
 
 
 # ---------------------------------------------------------------- rules about branches
@@ -1221,6 +2027,10 @@ def rule_004(run: _Run) -> None:
             covered = sum(roles[ROLE_BY_ID[a["actor_id"]]] for a in always
                           if roles and a["actor_type"] == "RepositoryRole" and a["actor_id"] in ROLE_BY_ID)
             by_role = bool(pushers) and covered >= pushers
+            # The GitHub Actions app may bypass: any workflow's token (github-actions[bot]) then can, and
+            # anyone who can push a branch can add a workflow there that asks for `contents: write` and
+            # pushes past the ruleset (slice 2d.2g; that the app's id is the actor id is not verified).
+            by_actions = any(a["actor_type"] == "Integration" and a["actor_id"] == ACTIONS_APP for a in always)
             # An organisation always has an owner, and an owner administers every repository in it. So
             # when one account can push and it is an administrator, it is an organisation administrator.
             sole_owner = (pushers == 1 and roles["admin"] == 1 and repository is not None
@@ -1232,19 +2042,26 @@ def rule_004(run: _Run) -> None:
                                 f"{plain(mine, 30)}.")
             if counted:
                 evidence.append(counted)
-            if always or mine == "always":
+            # GitHub's word for how the token's account may bypass: "pull_requests_only" (or "pull_request") is
+            # the narrower mode and "never" none; "always", "exempt" and any word this version does not know
+            # are read as the wider one, as for the listed actors (slice 2d.2g: "exempt" was read as narrower).
+            mine_wide = bool(mine) and mine not in ("never", "pull_request", "pull_requests_only")
+            if always or mine_wide:
                 who = _names(_actor_text(a) + ("" if a["bypass_mode"] == "always" else
                                                f" (mode: {plain(a['bypass_mode'] or 'not given', 30)})")
                              for a in always) or "the account whose token ran this audit"
-                tail = (" Every account that can push holds one of those roles, so the ruleset holds nobody "
+                tail = (" The GitHub Actions app is among them, so any workflow's token can bypass it, and "
+                        "anyone who can push a branch can add a workflow that asks for `contents: write` and "
+                        "pushes: the ruleset holds nobody who can author a change." if by_actions else
+                        " Every account that can push holds one of those roles, so the ruleset holds nobody "
                         "who can author a change." if by_role else
                         " One account can push and it is an administrator. An organisation always has an "
                         "owner, who administers every repository, so that account is an organisation "
                         "administrator: the ruleset holds nobody who can author a change." if sole_owner else "")
-                bypass("high" if by_role or sole_owner else "medium",
+                bypass("high" if by_role or sole_owner or by_actions else "medium",
                        f"The {label} is in force on {_q(branch)}, and {who} may always bypass it: push or "
                        f"merge without {asks}.{tail}", evidence)
-                if always and not (by_role or sole_owner) and roles is None:
+                if always and not (by_role or sole_owner or by_actions) and roles is None:
                     run.unread(subject + ": how many it covers",
                                "whether the bypass covers everyone who can push is not known", "collaborators")
             elif others or (mine and mine != "never"):
@@ -1257,7 +2074,8 @@ def rule_004(run: _Run) -> None:
         if classic is not None and classic["exists"]:
             compared += 1
             subject = f"branch {_q(branch)}: classic protection"
-            if not classic["enforce_admins"]:
+            gating = classic["required_status_checks"]["required"] or classic["required_pull_request_reviews"]["required"]
+            if not classic["enforce_admins"] and gating:
                 admins = roles["admin"] if roles else None
                 everyone = bool(pushers) and admins == pushers
                 run.finding(subject, "high" if everyone else "medium",
@@ -1404,10 +2222,19 @@ def rule_005(run: _Run) -> None:
 def _check_rules(run: _Run, kind: str) -> None:
     """OBAAF-SET-006, 007 and 008 share their reading of the required checks."""
     branches = _branches(run)
-    reporting = [(f, j) for f, j in run.jobs() if _stands_alone(f)]
+    stopped, maybe, blocked, runs_unread = _stops(run)
+
+    def reports(file: dict, job: dict, context: str):
+        """_reports, and never True for a job in a file GitHub may not run (slice 2d.2g)."""
+        verdict = _reports(job, context)
+        return None if verdict is True and file["path"] in maybe else verdict
+
+    reporting = [(f, j) for f, j in run.jobs() if _stands_alone(f) and f["path"] not in stopped]
+    idle_files = [(f, j) for f, j in run.jobs() if _stands_alone(f) and f["path"] in stopped]
     broken = run.broken()
     compared = 0
     foreign_only = 0  # required checks OBAAF-SET-007 leaves to OBAAF-SET-006: another app is named
+
     for branch in branches:
         need = _branch_requirements(run, branch)
         subject = f"branch {_q(branch)}"
@@ -1447,14 +2274,34 @@ def _check_rules(run: _Run, kind: str) -> None:
                                           f"{plain(app, 20)}, which is not GitHub Actions. What that app reports "
                                           "is not something the audit reads.")
                     continue
-                verdicts = [_reports(job, context) for _, job in reporting]
+                verdicts = [reports(file, job, context) for file, job in reporting]
                 if any(v is True for v in verdicts):
+                    continue
+                idle = [(f, j) for f, j in idle_files if _reports(j, context) is not False]
+                off = any(why == "GitHub Actions is turned off for the repository" for why in stopped.values())
+                if idle and app == ACTIONS_APP and not broken and not any(v is None for v in verdicts) and (
+                        off or _api_reporters(run) == "no"):
+                    file, job = idle[0]
+                    run.finding(item, "medium",
+                                f"{_q(branch)} requires the check {_q(context)} from GitHub Actions. The only job "
+                                f"known to report it, {_job_label(file, job)}, is in a workflow GitHub does not "
+                                f"run: {stopped[file['path']]}. It stays pending on every pull request, so "
+                                f"nothing merges without a bypass.{source}")
+                    continue
+                if idle:
+                    file, job = idle[0]
+                    run.cannot_tell(item, f"The only job known to report {_q(context)}, {_job_label(file, job)}, is "
+                                          f"in a workflow GitHub does not run ({stopped[file['path']]}), and something "
+                                          "else may report it (another file that could not be read or whose names "
+                                          "could not be written out, or a step whose token may write checks), so "
+                                          "whether anything does is not known.")
                     continue
                 unsure = sum(1 for v in verdicts if v is None)
                 if broken or unsure:
                     why = ([f"{_n(len(broken), 'workflow file')} could not be read"] if broken else []) + (
                         [f"{_do(unsure, 'job', 'reports', 'report')} under names that could not be written "
-                         "out (a computed name, a matrix or a called workflow that was not read)"] if unsure else [])
+                         "out (a computed name, a matrix or a called workflow that was not read), or in a file "
+                         "GitHub may read otherwise than the audit does or may not run"] if unsure else [])
                     run.cannot_tell(item, f"No job is known to report {_q(context)}, and {' and '.join(why)}, so "
                                           "whether anything reports it is not known.")
                     continue
@@ -1478,6 +2325,9 @@ def _check_rules(run: _Run, kind: str) -> None:
                                           "that name; whether one does is not known.")
         elif kind == "filtered":
             for context in sorted(required):
+                # A job in a file GitHub may not run counts here (the review of slice 2b.7): whether its paths filter,
+                # its activity types or its triggers keep the check from reporting holds whether or not the file
+                # runs, since a file that does not run reports nothing. One GitHub may read otherwise does not.
                 matches = [(f, j) for f, j in reporting if _reports(j, context) is True]
                 if not matches:
                     continue  # nothing is known to report it: OBAAF-SET-006's subject
@@ -1485,16 +2335,75 @@ def _check_rules(run: _Run, kind: str) -> None:
                     foreign_only += 1
                     continue  # required from another app: what that app reports is not read (OBAAF-SET-006)
                 compared += 1
-                runs = sorted(((_report_run(f, j, branch), f, j) for f, j in matches),
-                              key=lambda item: ORDER.index(item[0]))
-                how, file, job = runs[0]
+                # Only a plain job that is skipped reports its check as passed: `if:` is decided before a matrix
+                # expands and before a called workflow runs, so a skipped matrix job or caller reports its bare
+                # name, not the required one (the review of slice 2d.2g).
+                runs = sorted(((_report_run(f, j, branch, skipped=j["check"]["kind"] == "static",
+                                            blocked=blocked.get(f["path"], ())), f, j)
+                               for f, j in matches), key=lambda item: ORDER.index(item[0]))
                 item = f"{subject}: required check {_q(context)}"
+                # A route through a file GitHub may not run never stands for the check (the second review of slice
+                # 2b.7), and neither does a job that may report it under names that could not be written out, or in
+                # a file GitHub may read otherwise (the third review). Where the route that decides gives a finding
+                # (a paths filter, activity types, or no run on a pull request's commit where nothing else can
+                # report it), the answer is "cannot tell" if any other job may report the check on a route that
+                # gives no finding, or two filtered routes may cover every pull request between them (the fourth
+                # review): ranks do not say which pull requests a route covers. A job that never runs on a pull
+                # request's commit changes nothing (whatever its token: the fifth review). Jobs whose names could not
+                # be written out are read at their widest: a plain job skipped by `if:` still reports, and one in a
+                # file GitHub may read otherwise runs on every pull request.
+                sure = [r for r in runs if r[1]["path"] not in maybe]
+                how, file, job = sure[0] if sure else runs[0]
+                writers = _api_reporters(run)
+                failing = {"paths", "types"} | ({"never"} if writers == "no" else set())
+                if how in failing:
+                    unknown = []
+                    for f, j in reporting:
+                        if _reports(j, context) is None:
+                            widest = j["check"]["kind"] in ("static", "computed")
+                            unknown.append(("always" if j.get("doubt") else _report_run(
+                                f, j, branch, skipped=widest, blocked=blocked.get(f["path"], ())), f, j))
+                    # Two filtered routes in different files may cover every pull request between them (paths and
+                    # paths-ignore); jobs of one file share its filters (the fifth review of 2b.7).
+                    filtered = list({r[1]["path"]: r for r in runs if r[0] in ("paths", "types")}.values())
+                    rival = next((r for r in runs if r[0] not in failing and r[0] != "never"), None) or next(
+                        (r for r in unknown if r[0] != "never"), None) or (filtered[1] if len(filtered) > 1 else None)
+                    if rival is not None:
+                        _, other, other_job = rival
+                        why = (f", in a workflow GitHub may not run ({maybe[other['path']]})," if other["path"] in maybe
+                               else ", under names that could not be written out or in a file GitHub may read "
+                               "otherwise than the audit does," if _reports(other_job, context) is None else "")
+                        where = "on no pull request's commit" if how == "never" else "on only some pull requests"
+                        run.cannot_tell(item, f"{_q(branch)} requires the check {_q(context)}. "
+                                              f"{_job_label(file, job)} reports it {where}, and "
+                                              f"{_job_label(other, other_job)}{why} may also report it, so whether "
+                                              "it reports on every pull request is not known.")
+                        continue
+                    how, file, job = runs[0]    # the one route that reports it on some pull requests, if any
+                elif how == "always" and not sure:
+                    # Every known route is in a file GitHub may not run (the fifth review of 2b.7): if that file does
+                    # not run, any other job that may report the check decides, so the answer is "cannot tell".
+                    others = [r for r in runs[1:] if r[0] != "always"] + [
+                        (None, f, j) for f, j in reporting if _reports(j, context) is None]
+                    if others:
+                        _, other, other_job = others[0]
+                        run.cannot_tell(item, f"{_q(branch)} requires the check {_q(context)}. {_job_label(file, job)} "
+                                              f"reports it on every pull request, in a workflow GitHub may not run "
+                                              f"({maybe[file['path']]}), and {_job_label(other, other_job)} may also "
+                                              "report it, on a route of its own, so whether it reports on every pull "
+                                              "request is not known.")
+                        continue
                 lead = f"{_q(branch)} requires the check {_q(context)}, which {_job_label(file, job)} reports"
                 if how == "always":
-                    continue
+                    continue  # in a file GitHub may not run: whether it runs at all is OBAAF-SET-006's subject
                 if how == "maybe":
                     run.cannot_tell(item, f"{lead}. Whether that workflow runs for pull requests into {_q(branch)} "
                                           "rests on a branch pattern, which is not evaluated.")
+                elif how == "target":
+                    run.cannot_tell(item, f"{lead}, and that job reaches pull requests only through "
+                                          "pull_request_target, which runs on the latest commit of the default "
+                                          "branch (GitHub's changelog of 2025-11-07), not on the pull request's. "
+                                          "Whether its check counts for the pull request is not established.")
                 elif how == "paths":
                     run.finding(item, "medium",
                                 f"{lead}, and that workflow runs only when certain paths change. On any other "
@@ -1526,11 +2435,29 @@ def _check_rules(run: _Run, kind: str) -> None:
         else:
             if not need["checks_whole"]:
                 continue
-            unrequired, unsure, foreign = [], 0, []
+            unrequired, unsure, foreign, shared, targets = [], 0, [], [], []
+            hows = {(file["path"], job["id"]): _report_run(file, job, branch, pushes=False,
+                                                           blocked=blocked.get(file["path"], ()))
+                    for file, job in reporting}
+            # A check name more than one job that may run on a pull request into the branch reports: GitHub
+            # weighs one check run of a name (not verified), so which job's result holds a merge up is not
+            # known (slice 2d.2g).
+            reported_by: dict = {}
+            for file, job in reporting:
+                if hows[(file["path"], job["id"])] not in ("manual", "never"):
+                    for name in set(job["check"]["names"] or []):
+                        reported_by[name] = reported_by.get(name, 0) + 1
             for file, job in reporting:
                 if job["advisory"]:
                     continue
-                how = _report_run(file, job, branch, pushes=False)
+                how = hows[(file["path"], job["id"])]
+                if how == "target":
+                    # Whether its check counts on the pull request is OBAAF-SET-007's question; a check nobody
+                    # requires fails without blocking a merge either way (the review of slice 2d.2g).
+                    how = "always"
+                if how == "always" and (job.get("doubt") or file["path"] in maybe):
+                    targets.append((file, job, maybe.get(file["path"], "")))
+                    continue
                 if how == "maybe":
                     # A branch pattern decides whether it runs for pull requests into this branch.
                     unsure += 1
@@ -1539,6 +2466,13 @@ def _check_rules(run: _Run, kind: str) -> None:
                     continue
                 names = job["check"]["names"]
                 if job["check"]["kind"] != "computed" and names is not None:
+                    # A job of a called workflow with `continue-on-error: true` reports as passed (slice 2d.2g).
+                    advisory = set(job["check"].get("advisory_names") or [])
+                    names = [name for name in names if name not in advisory]
+                    twice = [name for name in names if reported_by.get(name, 0) > 1 and name in need["apps"]]
+                    if twice:
+                        shared.append((file, job, twice))
+                        continue
                     # Every check the job reports must be required: one of a matrix's checks, or one of a
                     # called workflow's, being required leaves the others free to fail.
                     loose = [name for name in names if name not in need["apps"]]
@@ -1552,7 +2486,7 @@ def _check_rules(run: _Run, kind: str) -> None:
                         # holds the merge up is not established.
                         foreign.append((file, job, [n for n in names if not _held_by_actions(need["apps"][n])]))
                     continue
-                verdicts = [_reports(job, context) for context in need["apps"]]
+                verdicts = [reports(file, job, context) for context in need["apps"]]
                 if job["check"]["kind"] != "computed" and not any(v is not False for v in verdicts):
                     compared += 1
                     unrequired.append((file, job, None, None))
@@ -1582,6 +2516,18 @@ def _check_rules(run: _Run, kind: str) -> None:
                             f"{_job_label(file, job)} runs on every pull request into {_q(branch)} and {shape} "
                             f"required ({_do(len(required), 'check', 'is', 'are')} required there). A pull "
                             f"request can merge while the job is failing.{source}{waiting}")
+            for file, job, stop in targets:
+                why = (f"GitHub may not run its file ({stop})" if stop else
+                       f"GitHub may read it otherwise than the audit does ({_names(job['doubt'], 2)})")
+                run.cannot_tell(f"{subject}: job {_job_label(file, job)}",
+                                f"{_job_label(file, job)} may run on pull requests into {_q(branch)}, and {why}, so "
+                                "whether it can fail without blocking a merge was not compared.")
+            for file, job, names in shared:
+                run.cannot_tell(f"{subject}: job {_job_label(file, job)}",
+                                f"{_job_label(file, job)} runs on every pull request into {_q(branch)} and reports "
+                                f"{_names(_q(n) for n in names)}, which another job reports too. GitHub weighs one "
+                                "check run of a name (not verified), so whether a failing run of this job holds a "
+                                "merge up is not known.")
             for file, job, names in foreign:
                 run.cannot_tell(f"{subject}: job {_job_label(file, job)}",
                                 f"{_job_label(file, job)} runs on every pull request into {_q(branch)} and reports "
@@ -1598,10 +2544,17 @@ def _check_rules(run: _Run, kind: str) -> None:
                                 "pattern in the triggers decides whether it runs there (patterns are not "
                                 f"evaluated), so whether {'it' if unsure == 1 else 'each'} can fail without "
                                 "blocking a merge was not compared.")
+    if runs_unread and (compared or run.results):
+        # Not a "cannot tell": these settings need an administrator's token, and without one every check rule
+        # would answer nothing. The rule's line says what its answers took for granted, whatever they are
+        # (slice 2d.2g).
+        run.assumed = ("every workflow file was taken as running, because whether GitHub Actions is on, requires "
+                       "pinning, or has a policy that blocks an event was not read (" + "; ".join(runs_unread) + ")")
     if compared:
         run.compared = {"missing": f"{_n(compared, 'required check')} and the names the jobs report",
                         "filtered": f"{_n(compared, 'required check')} that a job reports, and its triggers",
                         }.get(kind, f"{_n(compared, 'job')} running on every pull request, and the required checks")
+
     elif not run.results:
         run.idle = {"missing": "no audited branch requires a check",
                     "filtered": ("the required checks a workflow job reports are required from another app, which "
@@ -1631,6 +2584,13 @@ def _policy_scope(policy: dict, path: str):
         return None
     if set(conditions) - {"workflow_path", "repository_name", "repository_id"}:
         return None
+    # Which repositories it is for (slice 2d.2g: these were accepted and ignored, so a policy that leaves this
+    # repository out counted as one that applies). Only "every repository" is read; any other list is not
+    # evaluated, and the policy is then one this rule does not understand.
+    for key in ("repository_name", "repository_id"):
+        if key in conditions and conditions[key] != {"include": ["~ALL"], "exclude": []} \
+                and conditions[key] != {"include": ["~ALL"]}:
+            return None
     scope = conditions.get("workflow_path")
     if not isinstance(scope, dict) or set(scope) - {"include", "exclude"}:
         return None
@@ -1767,10 +2727,28 @@ def rule_010(run: _Run) -> None:
         # An enforced policy that applies and does not allow the event is OBAAF-SET-009's finding.
 
 
+def _token_from_elsewhere(run: _Run, file: dict, job: dict) -> bool:
+    """Whether a job with no permissions block still does not get the repository's default (flagship slice
+    2d.2g). A job that calls a workflow in this repository whose every job declares its permissions passes
+    on a token they narrow ("can be only downgraded", GitHub's page on reusing workflows). A job in a workflow
+    only other workflows start gets its caller's token: when every job here that calls it declares its
+    permissions, that token is theirs, not the default. A workflow nothing here calls may be called from
+    elsewhere, so it is not taken to be covered."""
+    called = _called(run, job) if job["calls"] else None
+    if called is not None:
+        return bool(called["jobs"]) and all(j["permissions"]["declared"] for j in called["jobs"])
+    if _stands_alone(file):
+        return False
+    callers = [j for _, j in run.jobs() if called_path(j) == file["path"]]
+    # A call written with `$/` may not be one GitHub makes (issue #182): it never counts as the caller that
+    # covers the file, and an undeclared one still uncovers it.
+    return any(not self_repository_call(j) for j in callers) and all(j["permissions"]["declared"] for j in callers)
+
+
 def rule_012(run: _Run) -> None:
-    bare = [(f, j) for f, j in run.jobs() if not j["permissions"]["declared"]]
+    bare = [(f, j) for f, j in run.jobs() if not j["permissions"]["declared"] and not _token_from_elsewhere(run, f, j)]
     if not bare:
-        run.idle = "every job declares its permissions"
+        run.idle = "every job declares its permissions, or gets a token that another job declares"
         return
     value, _ = run.got("workflow_permissions")
     if value is None:
@@ -1935,6 +2913,15 @@ def rule_015(run: _Run) -> None:
         for file, job in unpinned:
             by_file.setdefault(file["path"], set()).update(job["unpinned"])
         for path, actions in sorted(by_file.items()):
+            if run.usage.get("actions_lock"):
+                # GitHub's lockfile may pin a tag (its changelog of 2026-10-28, as the review of slice 2d.2g
+                # read it); the lockfile is not read here.
+                run.cannot_tell(f"workflow {plain(path, 120)}",
+                                f"The repository requires actions to be pinned to a full commit, and {plain(path, 120)} "
+                                f"uses {_names(sorted(_q(a, 100) for a in actions), 4)}. The repository has "
+                                ".github/workflows/actions.lock, which may pin them; it is not read, so whether "
+                                "GitHub refuses the workflow is not known.")
+                continue
             run.finding(f"workflow {plain(path, 120)}", "medium",
                         f"The repository requires actions to be pinned to a full commit, and {plain(path, 120)} "
                         f"uses {_names(sorted(_q(a, 100) for a in actions), 4)}. GitHub refuses a workflow "
@@ -1994,10 +2981,12 @@ def evaluate(snapshot: dict, usage: dict) -> dict:
         status = ("findings" if findings else "cannot-tell" if unknown else
                   "no-finding" if run.compared else "not-applicable")
         note = run.compared if status == "no-finding" else run.idle if status == "not-applicable" else ""
-        rules.append({"id": rule.id, "title": rule.title, "status": status, "findings": len(findings),
+        # `why` and `fix` are the rule's own sentences, the same on every run (flagship slice 3.2c).
+        rules.append({"id": rule.id, "title": rule.title, "why": rule.why, "fix": rule.fix, "status": status,
+                      "findings": len(findings),
                       "cannot_tell": len(unknown),
                       "note": note or ("" if findings or unknown else "nothing to compare"),
-                      "failed": run.failed})
+                      "assumed": run.assumed, "failed": run.failed})
         results += run.results
     results.sort(key=_order)
     findings = [r for r in results if r["state"] == "finding"]

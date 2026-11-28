@@ -11,7 +11,7 @@ from helpers import RISKY, TEMPLATES, TempDir, install_templates, template_workf
 
 from obaaf import checker
 from obaaf.checker import repo
-from obaaf.checker.workflow import PR_HEAD_REF_RE
+from obaaf.checker.workflow import pr_code
 
 
 class TemplateTest(unittest.TestCase):
@@ -23,7 +23,7 @@ class TemplateTest(unittest.TestCase):
             for step in job.steps:
                 if step.uses_action("actions/checkout"):
                     ref = str(step.with_.get("ref", ""))
-                    self.assertFalse(PR_HEAD_REF_RE.search(ref), f"{job.id}: {ref}")
+                    self.assertNotEqual(pr_code(ref).state, "head", f"{job.id}: {ref}")
 
     def test_pull_request_changes_reach_the_agent_only_as_labeled_data(self):
         wf = template_workflow("obaaf-agent-propose.yml")

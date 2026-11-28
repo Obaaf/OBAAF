@@ -10,9 +10,11 @@ import itertools
 import json
 import os
 import random
+import shlex
 import shutil
 import unittest
 from datetime import date, datetime, timedelta
+from unittest.mock import patch
 
 from helpers import FIXTURES, RISKY, TEMPLATES, TempDir, run_cli
 
@@ -421,10 +423,17 @@ class IgnoreEntryTest(unittest.TestCase):
                 f"    reason: {REASON}\n    until: {SOON}\n")
             out = tmp / "new.json"
             code, _, err = run_cli("check", repo, "--write-baseline", out, *ACCEPT)
-            self.assertEqual(code, 0, err)
-            self.assertIn("1 finding(s) whose ignore entry has expired or does not count were not written", err)
+            # The baseline is written, and the command ends as a check with it would (slice 3.2b): the
+            # fixture's "no CODEOWNERS file" is medium and no entry can accept it.
+            self.assertEqual(code, 1, err)
+            self.assertIn("error: 2 finding(s) were not written to the baseline, 1 of them at or above --fail-on "
+                          "medium", err)
+            self.assertIn("not written: low OBAAF-GHA-001 .github/workflows/ci.yml:8 [job test] - the ignore entry "
+                          "that names it does not count, because it names no owner", err)
+            self.assertIn("not written: medium OBAAF-REPO-001 .github/CODEOWNERS:1 - The repository has no CODEOWNERS file. No ignore "
+                          "or baseline entry can accept", err)
             written = json.loads(out.read_text())["findings"]
-            self.assertEqual(len(written), 15)
+            self.assertEqual(len(written), 14)      # nor is "no CODEOWNERS file", which no entry accepts (2d.2h)
             self.assertFalse([e for e in written if e["path"].endswith("ci.yml")])
 
 
@@ -507,23 +516,158 @@ class OldFormatTest(unittest.TestCase):
 class MigrateTest(unittest.TestCase):
     """`obaaf baseline migrate`: from the old format to the new, with somebody's name on it."""
 
-    def test_it_carries_over_what_the_old_file_covered_and_the_check_passes_again(self):
+    def test_it_carries_over_only_matches_the_gate_can_accept(self):
         with TempDir() as tmp:
             repo, old = fixture_repo(tmp)
             code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
             self.assertEqual(code, 0, err)
-            self.assertIn(f"16 finding(s) carried over, accepted by {OWNER} until {SOON}.", err)
+            self.assertIn(f"15 finding(s) carried over, accepted by {OWNER} until {SOON}.", err)
             data = json.loads(old.read_text())
             self.assertEqual(data["format"], baseline.FORMAT)
-            self.assertEqual(len(data["findings"]), 16)
+            self.assertEqual(len(data["findings"]), 15)
             for item in data["findings"]:
                 self.assertEqual((item["owner"], item["reason"], item["expires"]), (OWNER, REASON, SOON))
                 self.assertNotIn("fingerprint", item)
                 self.assertNotIn("message", item)
             code, out, _ = run_cli("check", repo, "--baseline", old, "--fail-on", "low", "--no-fixes")
-            self.assertEqual(code, 0, out)
-            self.assertIn("Baseline: 16 finding(s) accepted by the baseline, 0 new.", out)
-            self.assertNotIn("Not accepted", out)
+            # Since slice 2d.2h the fixture's "no CODEOWNERS file" cannot be accepted (no file has an owner,
+            # the baseline included); the other 15 pass as before.
+            self.assertEqual(code, 1, out)
+            self.assertIn("Baseline: 15 finding(s) accepted by the baseline, 1 new.", out)
+            self.assertIn("matched but not carried over: OBAAF-REPO-001", err)
+            self.assertIn("vouching for itself", err)
+            self.assertFalse(any(e["rule"] == "OBAAF-REPO-001" for e in data["findings"]))
+
+    def test_a_prohibited_match_alone_preserves_input_and_output(self):
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            data = json.loads(old.read_text())
+            data["findings"] = [e for e in data["findings"] if e["rule"] == "OBAAF-REPO-001"]
+            self.assertEqual(len(data["findings"]), 1)
+            old.write_text(json.dumps(data))
+            before = old.read_bytes()
+            output = tmp / "destination.json"
+            output.write_bytes(b"existing output")
+            for options in ((), ("--output", output), ("--output", tmp / "absent.json")):
+                code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT, *options)
+                self.assertEqual(code, 1, err)
+                self.assertIn("vouching for itself", err)
+                self.assertIn("Nothing was written", err)
+                self.assertNotIn("none of the", err)
+                self.assertEqual(old.read_bytes(), before)
+                self.assertEqual(output.read_bytes(), b"existing output")
+                self.assertFalse((tmp / "absent.json").exists())
+            # Once the files have an owner the finding has gone and the entry matches nothing:
+            # migration says the file has nothing left to carry over.
+            (repo / ".github" / "CODEOWNERS").write_text(f"* {OWNER}\n")
+            code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
+            self.assertEqual(code, 1, err)
+            self.assertIn("none of the 1 entries", err)
+            self.assertIn("nothing left to carry over: delete it", err)
+            self.assertEqual(old.read_bytes(), before)
+
+    def test_findings_outside_the_old_file_are_counted_and_those_no_entry_can_accept_named(self):
+        # Review of #313: the receipt counted only findings a new entry could accept, so a finding
+        # outside the old file that no entry can accept went unmentioned while the gate failed on it.
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            data = json.loads(old.read_text())
+            data["findings"] = [e for e in data["findings"] if e["rule"] != "OBAAF-REPO-001"]
+            old.write_text(json.dumps(data))
+            code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
+            self.assertEqual(code, 0, err)
+            self.assertIn("15 finding(s) carried over", err)
+            self.assertIn("1 finding(s) were not in the old baseline and are not accepted by the new one", err)
+            self.assertIn("among them: OBAAF-REPO-001", err)
+            self.assertIn("no entry can accept this finding", err)
+            self.assertIn("vouching for itself", err)
+            code, out, _ = run_cli("check", repo, "--baseline", old, "--fail-on", "low")
+            self.assertEqual(code, 1, out)
+            self.assertIn("Baseline: 15 finding(s) accepted by the baseline, 1 new.", out)
+
+    def test_findings_outside_the_old_file_waiting_on_an_ignore_entry_are_counted_and_named(self):
+        # Second review pass of #313: a finding outside the old file whose ignore entry is not valid
+        # counts at the gate, and the receipt left it out (it did before #313 too).
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            (repo / ".github" / "CODEOWNERS").write_text(f"* {OWNER}\n")
+            (repo / ".github" / "obaaf.yml").write_text(
+                "ignore:\n  - rule: OBAAF-GHA-006\n    path: .github/workflows/release.yml\n"
+                f"    reason: {REASON}\n    until: {SOON}\n")
+            data = json.loads(old.read_text())
+            data["findings"] = [e for e in data["findings"] if e["rule"] not in ("OBAAF-GHA-006", "OBAAF-REPO-001")]
+            old.write_text(json.dumps(data))
+            code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
+            self.assertEqual(code, 0, err)
+            self.assertIn("14 finding(s) carried over", err)
+            self.assertIn("1 finding(s) were not in the old baseline and are not accepted by the new one", err)
+            self.assertIn("among them: OBAAF-GHA-006", err)
+            self.assertIn("renew, complete or remove the ignore entry in the configuration: it names no owner", err)
+            code, out, _ = run_cli("check", repo, "--baseline", old, "--fail-on", "low")
+            self.assertEqual(code, 1, out)
+            self.assertIn("Baseline: 14 finding(s) accepted by the baseline, 1 new.", out)
+
+    def test_entries_an_ignore_entry_accepts_are_counted_and_the_file_converted(self):
+        # Review of #313: completing an ignore entry, as the receipt advises, used to leave a file
+        # that migration refused ("Nothing was written", no reason) and the gate still asked to convert.
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            (repo / ".github" / "CODEOWNERS").write_text(f"* {OWNER}\n")
+            data = json.loads(old.read_text())
+            data["findings"] = [e for e in data["findings"] if e["rule"] == "OBAAF-GHA-008"]
+            self.assertEqual(len(data["findings"]), 2)
+            old.write_text(json.dumps(data))
+            before = old.read_bytes()
+            config = repo / ".github" / "obaaf.yml"
+            ignore = ("ignore:\n  - rule: OBAAF-GHA-008\n    path: .github/workflows/agent.yml\n"
+                      f"    reason: {REASON}\n    until: {SOON}\n")
+            config.write_text(ignore)
+            code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
+            self.assertEqual(code, 1, err)
+            self.assertEqual(err.count("matched but not carried over: OBAAF-GHA-008"), 2, err)
+            self.assertIn("it names no owner", err)
+            self.assertIn("Act on the lines above and run this again", err)
+            self.assertEqual(old.read_bytes(), before)
+            config.write_text(ignore + f"    owner: \"{OWNER}\"\n")
+            code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
+            self.assertEqual(code, 0, err)
+            self.assertIn("0 finding(s) carried over", err)
+            self.assertIn("2 old entries name findings that an ignore entry in the configuration accepts, "
+                          "so they are not carried over.", err)
+            self.assertNotIn("matched but not carried over", err)
+            converted = json.loads(old.read_text())
+            self.assertEqual((converted["format"], converted["findings"]), (baseline.FORMAT, []))
+            _, out, _ = run_cli("check", repo, "--baseline", old, "--fail-on", "low")
+            self.assertNotIn("baseline migrate", out)
+
+    def test_a_matched_invalid_ignore_stays_with_its_original_owner(self):
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            (repo / ".github" / "obaaf.yml").write_text(
+                "ignore:\n  - rule: OBAAF-GHA-001\n    path: .github/workflows/ci.yml\n"
+                f"    reason: {REASON}\n    until: {SOON}\n")
+            code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT)
+            self.assertEqual(code, 0, err)
+            self.assertIn("matched but not carried over: OBAAF-GHA-001", err)
+            self.assertIn("it names no owner", err)
+            self.assertFalse(any(e["rule"] == "OBAAF-GHA-001" and e["path"] == ".github/workflows/ci.yml"
+                                 for e in json.loads(old.read_text())["findings"]))
+
+    def test_metadata_and_check_share_one_day_even_across_midnight(self):
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            real_check = checker.check
+
+            def check_next_day(target, **kwargs):
+                kwargs.setdefault("today", TODAY + timedelta(days=1))
+                return real_check(target, **kwargs)
+
+            with patch.object(checker, "check", side_effect=check_next_day) as checked:
+                code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT[:-1], TODAY.isoformat())
+            self.assertEqual(code, 0, err)
+            self.assertIn("15 finding(s) carried over", err)
+            self.assertIn("until " + TODAY.isoformat(), err)
+            self.assertEqual(checked.call_args.kwargs["today"], TODAY)
 
     def test_it_needs_an_owner_a_reason_and_a_date_that_count(self):
         with TempDir() as tmp:
@@ -546,14 +690,14 @@ class MigrateTest(unittest.TestCase):
             new = tmp / "new.json"
             code, _, err = run_cli("baseline", "migrate", old, repo, *ACCEPT, "--output", new)
             self.assertEqual(code, 0, err)
-            self.assertIn("15 finding(s) carried over", err)
+            self.assertIn("14 finding(s) carried over", err)
             self.assertIn("1 old entry matches no finding any more and was dropped:", err)
             self.assertIn("Job 'test' receives CODECOV_TOKEN", err)
             self.assertIn("1 finding(s) were not in the old baseline and are not accepted by the new one", err)
             self.assertEqual(json.loads(old.read_text())["format"], baseline.FORMAT_V1)     # --output leaves it
             code, out, _ = run_cli("check", repo, "--baseline", new, "--fail-on", "low", "--no-fixes")
             self.assertEqual(code, 1)
-            self.assertIn("Baseline: 15 finding(s) accepted by the baseline, 1 new.", out)
+            self.assertIn("Baseline: 14 finding(s) accepted by the baseline, 2 new.", out)
 
     def test_it_writes_nothing_when_no_entry_matches(self):
         with TempDir() as tmp:
@@ -602,6 +746,56 @@ class MigrateTest(unittest.TestCase):
 class WriteBaselineTest(unittest.TestCase):
     """`--write-baseline` accepts findings in somebody's name, and never renews an acceptance by itself."""
 
+    def test_legacy_write_refusal_preserves_file_and_replays_the_original_scope(self):
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            before = old.read_bytes()
+            previous = os.getcwd()
+            try:
+                os.chdir(tmp)
+                repo.rename("-team repo")
+                old.rename("-old baseline.json")
+                old = tmp / "-old baseline.json"
+                config = tmp / "team policy.yml"
+                config.write_text("{}")
+                for name in ("team\tpolicy.yml", "team policy.yml"):
+                    config.rename(tmp / name)
+                    config = tmp / name
+                    code, out, err = run_cli("check", "--write-baseline=-old baseline.json",
+                                             "--config=" + name, "--platform", "github", "--fail-on", "never",
+                                             *ACCEPT, "--", "-team repo")
+                    self.assertEqual((code, out, old.read_bytes()), (2, "", before))
+                    if "\t" in name:
+                        self.assertNotIn("\t", err)
+                        self.assertIn("Run obaaf baseline migrate yourself", err)
+                        self.assertFalse(any(line.strip().startswith("obaaf baseline migrate ") for line in err.splitlines()))
+                    else:
+                        command, = [line.strip() for line in err.splitlines()
+                                    if line.strip().startswith("obaaf baseline migrate ")]
+                        words = shlex.split(command)
+                        self.assertEqual(words, ["obaaf", "baseline", "migrate", "./-old baseline.json",
+                                                 "./-team repo", "--owner", "OWNER", "--reason", "REASON",
+                                                 "--expires", "YYYY-MM-DD", "--config=" + name, "--platform=github"])
+                        decisions = dict(zip(("OWNER", "REASON", "YYYY-MM-DD"), (OWNER, REASON, SOON)))
+                        status, out, err = run_cli(*(decisions.get(word, word) for word in words[1:]))
+                        self.assertEqual(status, 0, out + err)
+                        migrated = json.loads(old.read_bytes())
+                        self.assertEqual(migrated["format"], baseline.FORMAT)
+                        self.assertTrue(migrated["findings"])
+            finally:
+                os.chdir(previous)
+
+    def test_legacy_write_refusal_escapes_the_destination_in_stderr(self):
+        with TempDir() as tmp:
+            repo, old = fixture_repo(tmp)
+            destination = old.rename(tmp / "old\nbaseline.json")
+            before = destination.read_bytes()
+            code, out, err = run_cli("check", repo, "--write-baseline", destination)
+            self.assertEqual((code, out, destination.read_bytes()), (2, "", before))
+            self.assertIn(r"old\nbaseline.json", err)
+            self.assertNotIn(destination.name, err)
+            self.assertIn("Run obaaf baseline migrate yourself", err)
+
     def test_new_acceptances_need_an_owner_a_reason_and_a_date(self):
         with TempDir() as tmp:
             repo, _ = fixture_repo(tmp)
@@ -611,7 +805,7 @@ class WriteBaselineTest(unittest.TestCase):
                          ("--owner", "nobody", "--reason", REASON, "--expires", SOON)):
                 code, _, err = run_cli("check", repo, "--write-baseline", out, *args)
                 self.assertEqual(code, 2, args)
-                self.assertIn("would accept 16 finding(s)", err)
+                self.assertIn("would accept 15 finding(s)", err)
                 self.assertIn("Nothing was written.", err)
                 self.assertFalse(out.exists())
 
@@ -626,16 +820,19 @@ class WriteBaselineTest(unittest.TestCase):
         with TempDir() as tmp:
             repo, _ = fixture_repo(tmp)
             out = tmp / "new.json"
-            self.assertEqual(run_cli("check", repo, "--write-baseline", out, *ACCEPT)[0], 0)
+            # 1, not 0: the fixture's "no CODEOWNERS file" is left out and fails --fail-on medium (slice 3.2b).
+            self.assertEqual(run_cli("check", repo, "--write-baseline", out, *ACCEPT)[0], 1)
             workflow = repo / ".github" / "workflows" / "ci.yml"
             workflow.write_text(workflow.read_text().replace("secrets.CODECOV_TOKEN", "secrets.OTHER_TOKEN"))
             later = (TODAY + timedelta(days=200)).isoformat()
             code, _, err = run_cli("check", repo, "--write-baseline", out, "--owner", "@octocat", "--reason",
                                    "The new token is read-only", "--expires", later)
-            self.assertEqual(code, 0, err)
-            self.assertIn(f"1 finding(s) newly accepted by @octocat until {later}, 15 kept", err)
+            self.assertEqual(code, 1, err)
+            self.assertIn("not written: medium OBAAF-REPO-001 .github/CODEOWNERS:1 - The repository has no CODEOWNERS file. No ignore "
+                          "or baseline entry can accept", err)
+            self.assertIn(f"1 finding(s) newly accepted by @octocat until {later}, 14 kept", err)
             entries = json.loads(out.read_text())["findings"]
-            self.assertEqual(len(entries), 16)
+            self.assertEqual(len(entries), 15)      # "no CODEOWNERS file" is never written (slice 2d.2h)
             new = [e for e in entries if e["owner"] == "@octocat"]
             self.assertEqual([(e["rule"], e["facts"], e["expires"]) for e in new],
                              [("OBAAF-GHA-001", {"secrets": ["OTHER_TOKEN"]}, later)])
@@ -656,7 +853,7 @@ class WriteBaselineTest(unittest.TestCase):
             self.assertEqual(json.loads(out.read_text()), data)
             code, _, err = run_cli("check", repo, "--write-baseline", out, "--owner", "@octocat", "--reason",
                                    "Looked at again", "--expires", SOON)
-            self.assertEqual(code, 0, err)
+            self.assertEqual(code, 1, err)      # the fixture's "no CODEOWNERS file" (slice 3.2b)
             renewed = [e for e in json.loads(out.read_text())["findings"] if e["owner"] == "@octocat"]
             self.assertEqual(len(renewed), 1)
 
@@ -665,16 +862,21 @@ class WriteBaselineTest(unittest.TestCase):
         with TempDir() as tmp:
             repo, _ = fixture_repo(tmp)
             out = tmp / "new.json"
-            self.assertEqual(run_cli("check", repo, "--write-baseline", out, *ACCEPT)[0], 0)
+            self.assertEqual(run_cli("check", repo, "--write-baseline", out, *ACCEPT)[0], 1)
             (repo / ".github" / "obaaf.yml").write_text(
                 "ignore:\n  - rule: OBAAF-GHA-001\n    path: .github/workflows/ci.yml\n"
                 f"    reason: {REASON}\n    until: {SOON}\n")
             before = json.loads(out.read_text())
             code, _, err = run_cli("check", repo, "--write-baseline", out)
-            self.assertEqual(code, 0, err)
-            self.assertIn("0 finding(s) newly accepted, 16 kept", err)
+            # The same two left out as the check below finds: 1 with --fail-on medium, 0 with high.
+            self.assertEqual(code, 1, err)
+            self.assertIn("0 finding(s) newly accepted, 15 kept", err)
             self.assertEqual(json.loads(out.read_text())["findings"], before["findings"])
-            self.assertEqual(run_cli("check", repo, "--baseline", out, "--fail-on", "low")[0], 0)
+            self.assertEqual(run_cli("check", repo, "--write-baseline", tmp / "other.json", "--fail-on", "high", *ACCEPT)[0], 0)
+            # Everything is accepted but the fixture's "no CODEOWNERS file" (medium), which no entry can
+            # accept since slice 2d.2h.
+            self.assertEqual(run_cli("check", repo, "--baseline", out, "--fail-on", "high")[0], 0)
+            self.assertEqual(run_cli("check", repo, "--baseline", out, "--fail-on", "medium")[0], 1)
 
     def test_it_writes_only_where_a_baseline_can_go(self):
         with TempDir() as tmp:
@@ -696,8 +898,8 @@ class WriteBaselineTest(unittest.TestCase):
         with TempDir() as tmp:
             repo, _ = fixture_repo(tmp)
             code, _, err = run_cli("check", repo, "--write-baseline", "/dev/null", *ACCEPT)
-            self.assertEqual(code, 0, err)
-            self.assertIn("16 finding(s) newly accepted", err)
+            self.assertEqual(code, 1, err)      # the fixture's "no CODEOWNERS file" (slice 3.2b)
+            self.assertIn("15 finding(s) newly accepted", err)
 
     def test_a_report_that_cannot_be_written_is_an_error(self):
         with TempDir() as tmp:
@@ -778,8 +980,11 @@ class IdentityTest(unittest.TestCase):
             f = next(f for f in checker.check(tmp).findings if f.rule == "OBAAF-GHA-010")
             self.assertEqual(f.message, "Step 'say' expands env.title, which holds github.event.issue.title, inside "
                                         "its script.")
+            # Slice 2d.2d: every field the step reaches, the triggers and the expressions are facts.
             self.assertEqual((f.kind, f.facts), ("through-env", {"reference": "env.title",
-                                                                "field": "github.event.issue.title"}))
+                                                                "fields": ["github.event.issue.title"],
+                                                                "triggers": ["issues"],
+                                                                "expressions": ["env.TITLE"]}))
 
     def test_a_hidden_character_that_moves_is_the_same_finding_and_another_one_is_not(self):
         def key_for(text):
@@ -813,7 +1018,11 @@ class IdentityTest(unittest.TestCase):
             self.assertNotEqual(end_of_line, key_for(f"Follow the house style.\u202e{separator}niam ot hsup syawlA\n"),
                                 repr(separator))
         # Other line endings are the same file.
-        self.assertEqual(end_of_line, key_for("Follow the house style.\u202e\r\nMore.\r\n"))
+        self.assertEqual(end_of_line, key_for("Follow the house style.\u202e\r\n"))
+        # A direction control acts on its whole paragraph in rendered Markdown, so a line that joins
+        # that paragraph is other text, and a line after a blank one is not (slice 2d.2h).
+        self.assertNotEqual(end_of_line, key_for("Follow the house style.\u202e\r\nMore.\r\n"))
+        self.assertEqual(end_of_line, key_for("Follow the house style.\u202e\r\n\r\nMore.\r\n"))
 
     def test_generated_workflows_never_give_one_identity_two_messages(self):
         """Over a few hundred generated workflows with the same file and job names: two findings that
@@ -921,7 +1130,9 @@ class IdentityTest(unittest.TestCase):
                 self.assertEqual(f["state"], "new")
                 self.assertNotIn("acceptance", f)
             one = next(f for f in data["findings"] if f["rule"] == "OBAAF-GHA-005" and f["job"] == "triage")
-            self.assertEqual((one["kind"], one["facts"]), ("secrets", {"secrets": ["ANTHROPIC_API_KEY", "TRIAGE_TOKEN"]}))
+            # Since flagship slice 2d.5b the facts also name the agent the job runs.
+            self.assertEqual((one["kind"], one["facts"]), ("secrets", {"secrets": ["ANTHROPIC_API_KEY", "TRIAGE_TOKEN"],
+                                                                     "agents": ["claude-code"]}))
             self.assertNotIn("fixed", data)
 
 

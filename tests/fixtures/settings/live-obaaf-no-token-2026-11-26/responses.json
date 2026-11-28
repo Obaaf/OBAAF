@@ -1,0 +1,552 @@
+{
+  "format": "obaaf-api-recording/v0.1",
+  "api": "https://api.github.com",
+  "responses": [
+    {
+      "path": "/repos/Obaaf/OBAAF",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "59",
+        "x-ratelimit-reset": "1795699822",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "id": 1409565687,
+        "node_id": "R_kgDOVARD9w",
+        "name": "OBAAF",
+        "full_name": "Obaaf/OBAAF",
+        "private": false,
+        "owner": {
+          "login": "Obaaf",
+          "id": 346524514,
+          "node_id": "O_kgDOFKeLYg",
+          "avatar_url": "https://avatars.githubusercontent.com/u/346524514?v=4",
+          "gravatar_id": "",
+          "url": "https://api.github.com/users/Obaaf",
+          "html_url": "https://github.com/Obaaf",
+          "followers_url": "https://api.github.com/users/Obaaf/followers",
+          "following_url": "https://api.github.com/users/Obaaf/following{/other_user}",
+          "gists_url": "https://api.github.com/users/Obaaf/gists{/gist_id}",
+          "starred_url": "https://api.github.com/users/Obaaf/starred{/owner}{/repo}",
+          "subscriptions_url": "https://api.github.com/users/Obaaf/subscriptions",
+          "organizations_url": "https://api.github.com/users/Obaaf/orgs",
+          "repos_url": "https://api.github.com/users/Obaaf/repos",
+          "events_url": "https://api.github.com/users/Obaaf/events{/privacy}",
+          "received_events_url": "https://api.github.com/users/Obaaf/received_events",
+          "type": "Organization",
+          "user_view_type": "public",
+          "site_admin": false
+        },
+        "html_url": "https://github.com/Obaaf/OBAAF",
+        "description": "Open Build and Agent Assurance Framework: workflow auditing, self-assessment, and build and agent security guidance (public draft)",
+        "fork": false,
+        "url": "https://api.github.com/repos/Obaaf/OBAAF",
+        "forks_url": "https://api.github.com/repos/Obaaf/OBAAF/forks",
+        "keys_url": "https://api.github.com/repos/Obaaf/OBAAF/keys{/key_id}",
+        "collaborators_url": "https://api.github.com/repos/Obaaf/OBAAF/collaborators{/collaborator}",
+        "teams_url": "https://api.github.com/repos/Obaaf/OBAAF/teams",
+        "hooks_url": "https://api.github.com/repos/Obaaf/OBAAF/hooks",
+        "issue_events_url": "https://api.github.com/repos/Obaaf/OBAAF/issues/events{/number}",
+        "events_url": "https://api.github.com/repos/Obaaf/OBAAF/events",
+        "assignees_url": "https://api.github.com/repos/Obaaf/OBAAF/assignees{/user}",
+        "branches_url": "https://api.github.com/repos/Obaaf/OBAAF/branches{/branch}",
+        "tags_url": "https://api.github.com/repos/Obaaf/OBAAF/tags",
+        "blobs_url": "https://api.github.com/repos/Obaaf/OBAAF/git/blobs{/sha}",
+        "git_tags_url": "https://api.github.com/repos/Obaaf/OBAAF/git/tags{/sha}",
+        "git_refs_url": "https://api.github.com/repos/Obaaf/OBAAF/git/refs{/sha}",
+        "trees_url": "https://api.github.com/repos/Obaaf/OBAAF/git/trees{/sha}",
+        "statuses_url": "https://api.github.com/repos/Obaaf/OBAAF/statuses/{sha}",
+        "languages_url": "https://api.github.com/repos/Obaaf/OBAAF/languages",
+        "stargazers_url": "https://api.github.com/repos/Obaaf/OBAAF/stargazers",
+        "contributors_url": "https://api.github.com/repos/Obaaf/OBAAF/contributors",
+        "subscribers_url": "https://api.github.com/repos/Obaaf/OBAAF/subscribers",
+        "subscription_url": "https://api.github.com/repos/Obaaf/OBAAF/subscription",
+        "commits_url": "https://api.github.com/repos/Obaaf/OBAAF/commits{/sha}",
+        "git_commits_url": "https://api.github.com/repos/Obaaf/OBAAF/git/commits{/sha}",
+        "comments_url": "https://api.github.com/repos/Obaaf/OBAAF/comments{/number}",
+        "issue_comment_url": "https://api.github.com/repos/Obaaf/OBAAF/issues/comments{/number}",
+        "contents_url": "https://api.github.com/repos/Obaaf/OBAAF/contents/{+path}",
+        "compare_url": "https://api.github.com/repos/Obaaf/OBAAF/compare/{base}...{head}",
+        "merges_url": "https://api.github.com/repos/Obaaf/OBAAF/merges",
+        "archive_url": "https://api.github.com/repos/Obaaf/OBAAF/{archive_format}{/ref}",
+        "downloads_url": "https://api.github.com/repos/Obaaf/OBAAF/downloads",
+        "issues_url": "https://api.github.com/repos/Obaaf/OBAAF/issues{/number}",
+        "pulls_url": "https://api.github.com/repos/Obaaf/OBAAF/pulls{/number}",
+        "milestones_url": "https://api.github.com/repos/Obaaf/OBAAF/milestones{/number}",
+        "notifications_url": "https://api.github.com/repos/Obaaf/OBAAF/notifications{?since,all,participating}",
+        "labels_url": "https://api.github.com/repos/Obaaf/OBAAF/labels{/name}",
+        "releases_url": "https://api.github.com/repos/Obaaf/OBAAF/releases{/id}",
+        "deployments_url": "https://api.github.com/repos/Obaaf/OBAAF/deployments",
+        "created_at": "2026-10-08T01:34:55Z",
+        "updated_at": "2026-11-12T05:13:48Z",
+        "pushed_at": "2026-11-26T12:29:38Z",
+        "git_url": "git://github.com/Obaaf/OBAAF.git",
+        "ssh_url": "git@github.com:Obaaf/OBAAF.git",
+        "clone_url": "https://github.com/Obaaf/OBAAF.git",
+        "svn_url": "https://github.com/Obaaf/OBAAF",
+        "homepage": "http://obaaf.com/",
+        "size": 23084,
+        "stargazers_count": 1,
+        "watchers_count": 1,
+        "language": "Python",
+        "has_issues": true,
+        "has_projects": true,
+        "has_wiki": false,
+        "has_pages": true,
+        "has_discussions": false,
+        "forks_count": 0,
+        "mirror_url": null,
+        "archived": false,
+        "disabled": false,
+        "open_issues_count": 59,
+        "license": {
+          "key": "apache-2.0",
+          "name": "Apache License 2.0",
+          "spdx_id": "Apache-2.0",
+          "url": "https://api.github.com/licenses/apache-2.0",
+          "node_id": "MDc6TGljZW5zZTI="
+        },
+        "allow_forking": true,
+        "is_template": false,
+        "web_commit_signoff_required": false,
+        "has_pull_requests": true,
+        "pull_request_creation_policy": "all",
+        "topics": [],
+        "visibility": "public",
+        "forks": 0,
+        "open_issues": 59,
+        "watchers": 1,
+        "default_branch": "main",
+        "temp_clone_token": null,
+        "custom_properties": {},
+        "organization": {
+          "login": "Obaaf",
+          "id": 346524514,
+          "node_id": "O_kgDOFKeLYg",
+          "avatar_url": "https://avatars.githubusercontent.com/u/346524514?v=4",
+          "gravatar_id": "",
+          "url": "https://api.github.com/users/Obaaf",
+          "html_url": "https://github.com/Obaaf",
+          "followers_url": "https://api.github.com/users/Obaaf/followers",
+          "following_url": "https://api.github.com/users/Obaaf/following{/other_user}",
+          "gists_url": "https://api.github.com/users/Obaaf/gists{/gist_id}",
+          "starred_url": "https://api.github.com/users/Obaaf/starred{/owner}{/repo}",
+          "subscriptions_url": "https://api.github.com/users/Obaaf/subscriptions",
+          "organizations_url": "https://api.github.com/users/Obaaf/orgs",
+          "repos_url": "https://api.github.com/users/Obaaf/repos",
+          "events_url": "https://api.github.com/users/Obaaf/events{/privacy}",
+          "received_events_url": "https://api.github.com/users/Obaaf/received_events",
+          "type": "Organization",
+          "user_view_type": "public",
+          "site_admin": false
+        },
+        "network_count": 0,
+        "subscribers_count": 1
+      }
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/rulesets?includes_parents=true&per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "58",
+        "x-ratelimit-reset": "1795699822",
+        "x-ratelimit-resource": "core"
+      },
+      "body": []
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/rules/branches/main?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "57",
+        "x-ratelimit-reset": "1795699822",
+        "x-ratelimit-resource": "core"
+      },
+      "body": []
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/branches/main",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "56",
+        "x-ratelimit-reset": "1795699822",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "name": "main",
+        "commit": {
+          "sha": "45adf5ebcd4bc0925e8b2386eca837425ab1bce7",
+          "node_id": "C_kwDOVARD99oAKDQ1YWRmNWViY2Q0YmMwOTI1ZThiMjM4NmVjYTgzNzQyNWFiMWJjZTc",
+          "commit": {
+            "author": {
+              "name": "Sean Keluo-Udeke",
+              "email": "55066947+seanudeke@users.noreply.github.com",
+              "date": "2026-11-13T21:51:53Z"
+            },
+            "committer": {
+              "name": "GitHub",
+              "email": "noreply@github.com",
+              "date": "2026-11-13T21:51:53Z"
+            },
+            "message": "Merge pull request #114 from Obaaf/flagship\n\nFlagship: running integration branch (after #107)",
+            "tree": {
+              "sha": "3e0872d5e82146162960d85da2113d085528bf54",
+              "url": "https://api.github.com/repos/Obaaf/OBAAF/git/trees/3e0872d5e82146162960d85da2113d085528bf54"
+            },
+            "url": "https://api.github.com/repos/Obaaf/OBAAF/git/commits/45adf5ebcd4bc0925e8b2386eca837425ab1bce7",
+            "comment_count": 0,
+            "verification": {
+              "verified": true,
+              "reason": "valid",
+              "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJq94Z5CRC1aQ7uu5UhlAAAn4EQAKtRxuS0B3BKZ9xloHUSN7ij\nIs9EITUWBOcy6QADmlpkxBIAsMcvqYB6o7sV6j5Ad4W0CLye3v4KW7EEV7nu/cgZ\nwcKTQ4FZ2wtPL4RJios/67e5MpUiEOWGrc++bIhxyfM0KqlewUWAxEyEqH7RSWsM\n+V6UIItdVWdS5tdBM8A+aFQucmHRnVwxJ7dU5W1HYkHgsQgQQeDg87l/l/2QKG5v\nir5Psj8DUR5dNHgZI8bkTfX/sm4eUlazGXz+MEu+72eF1359inEzQpXnvKH/SG06\n7H+xOIgPv1dAPUS9C7AO6JwdqPlMLuqsBKgFZTg3O/nv+7KvL04Hk7J9fLrUqtOc\nEI6u5JUy0+A3GpHbfDJL0QzwvT26AcJzi0H2onE3VnBOgDHyVycIk09dtYCeZwdO\neKrvoI4LsAIsm9DhyF2tFlnNPEsM51VWX11qu1F8Sbqewulo8AovdzLiEBF/lSvF\nS/Vyu92kDVG/OS9ml4rJb/t9MCJe9V7xB+Mch0FI0fvjTmvlO4zM5Q4MTZXoJLCO\nbkEUGI/9IceHW6R0JmV0Z3mMvEhvNzUN+Pq/2Zq1Q9FD9KEZR0TFYuOHog/Xp4vZ\n3UABqZ22FG50QM9SAg+gXrav872508dgCNdvz9WwDK5Fe9gNXKShKLdS7viV5TLQ\nsb1VPmTOTatOK6XEIf9l\n=P6Yu\n-----END PGP SIGNATURE-----\n",
+              "payload": "tree 3e0872d5e82146162960d85da2113d085528bf54\nparent 9acb761025bb22422f6be5f190550c919cd4eec9\nparent eca55a499920cd0ec843107a06963203bf9de613\nauthor Sean Keluo-Udeke <55066947+seanudeke@users.noreply.github.com> 1794606713 -0500\ncommitter GitHub <noreply@github.com> 1794606713 -0500\n\nMerge pull request #114 from Obaaf/flagship\n\nFlagship: running integration branch (after #107)",
+              "verified_at": "2026-11-13T21:51:53Z"
+            }
+          },
+          "url": "https://api.github.com/repos/Obaaf/OBAAF/commits/45adf5ebcd4bc0925e8b2386eca837425ab1bce7",
+          "html_url": "https://github.com/Obaaf/OBAAF/commit/45adf5ebcd4bc0925e8b2386eca837425ab1bce7",
+          "comments_url": "https://api.github.com/repos/Obaaf/OBAAF/commits/45adf5ebcd4bc0925e8b2386eca837425ab1bce7/comments",
+          "author": {
+            "login": "seanudeke",
+            "id": 55066947,
+            "node_id": "MDQ6VXNlcjU1MDY2OTQ3",
+            "avatar_url": "https://avatars.githubusercontent.com/u/55066947?v=4",
+            "gravatar_id": "",
+            "url": "https://api.github.com/users/seanudeke",
+            "html_url": "https://github.com/seanudeke",
+            "followers_url": "https://api.github.com/users/seanudeke/followers",
+            "following_url": "https://api.github.com/users/seanudeke/following{/other_user}",
+            "gists_url": "https://api.github.com/users/seanudeke/gists{/gist_id}",
+            "starred_url": "https://api.github.com/users/seanudeke/starred{/owner}{/repo}",
+            "subscriptions_url": "https://api.github.com/users/seanudeke/subscriptions",
+            "organizations_url": "https://api.github.com/users/seanudeke/orgs",
+            "repos_url": "https://api.github.com/users/seanudeke/repos",
+            "events_url": "https://api.github.com/users/seanudeke/events{/privacy}",
+            "received_events_url": "https://api.github.com/users/seanudeke/received_events",
+            "type": "User",
+            "user_view_type": "public",
+            "site_admin": false
+          },
+          "committer": {
+            "login": "web-flow",
+            "id": 19864447,
+            "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+            "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+            "gravatar_id": "",
+            "url": "https://api.github.com/users/web-flow",
+            "html_url": "https://github.com/web-flow",
+            "followers_url": "https://api.github.com/users/web-flow/followers",
+            "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+            "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+            "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+            "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+            "organizations_url": "https://api.github.com/users/web-flow/orgs",
+            "repos_url": "https://api.github.com/users/web-flow/repos",
+            "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+            "received_events_url": "https://api.github.com/users/web-flow/received_events",
+            "type": "User",
+            "user_view_type": "public",
+            "site_admin": false
+          },
+          "parents": [
+            {
+              "sha": "9acb761025bb22422f6be5f190550c919cd4eec9",
+              "url": "https://api.github.com/repos/Obaaf/OBAAF/commits/9acb761025bb22422f6be5f190550c919cd4eec9",
+              "html_url": "https://github.com/Obaaf/OBAAF/commit/9acb761025bb22422f6be5f190550c919cd4eec9"
+            },
+            {
+              "sha": "eca55a499920cd0ec843107a06963203bf9de613",
+              "url": "https://api.github.com/repos/Obaaf/OBAAF/commits/eca55a499920cd0ec843107a06963203bf9de613",
+              "html_url": "https://github.com/Obaaf/OBAAF/commit/eca55a499920cd0ec843107a06963203bf9de613"
+            }
+          ]
+        },
+        "_links": {
+          "self": "https://api.github.com/repos/Obaaf/OBAAF/branches/main",
+          "html": "https://github.com/Obaaf/OBAAF/tree/main"
+        },
+        "protected": true,
+        "protection": {
+          "enabled": true,
+          "required_status_checks": {
+            "enforcement_level": "everyone",
+            "contexts": [
+              "Build resource site",
+              "test (3.10)",
+              "test (3.13)",
+              "package",
+              "actionlint",
+              "setup-action (ubuntu-latest)",
+              "setup-action (windows-latest)",
+              "setup-action (macos-latest)"
+            ],
+            "checks": [
+              {
+                "context": "Build resource site",
+                "app_id": 15368
+              },
+              {
+                "context": "test (3.10)",
+                "app_id": 15368
+              },
+              {
+                "context": "test (3.13)",
+                "app_id": 15368
+              },
+              {
+                "context": "package",
+                "app_id": 15368
+              },
+              {
+                "context": "actionlint",
+                "app_id": 15368
+              },
+              {
+                "context": "setup-action (ubuntu-latest)",
+                "app_id": 15368
+              },
+              {
+                "context": "setup-action (windows-latest)",
+                "app_id": 15368
+              },
+              {
+                "context": "setup-action (macos-latest)",
+                "app_id": 15368
+              }
+            ]
+          }
+        },
+        "protection_url": "https://api.github.com/repos/Obaaf/OBAAF/branches/main/protection"
+      }
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/environments?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "55",
+        "x-ratelimit-reset": "1795699822",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "total_count": 2,
+        "environments": [
+          {
+            "id": 23985743836,
+            "node_id": "EN_kwDOVARD988AAAAFlaln3A",
+            "name": "github-pages",
+            "url": "https://api.github.com/repos/Obaaf/OBAAF/environments/github-pages",
+            "html_url": "https://github.com/Obaaf/OBAAF/deployments/activity_log?environments_filter=github-pages",
+            "created_at": "2026-10-11T01:49:31Z",
+            "updated_at": "2026-10-11T01:49:31Z",
+            "can_admins_bypass": true,
+            "protection_rules": [
+              {
+                "id": 68384557,
+                "node_id": "GA_kwDOVARD984EE3ct",
+                "type": "branch_policy"
+              }
+            ],
+            "deployment_branch_policy": {
+              "protected_branches": false,
+              "custom_branch_policies": true
+            }
+          },
+          {
+            "id": 25088783152,
+            "node_id": "EN_kwDOVARD988AAAAF12hzMA",
+            "name": "pypi",
+            "url": "https://api.github.com/repos/Obaaf/OBAAF/environments/pypi",
+            "html_url": "https://github.com/Obaaf/OBAAF/deployments/activity_log?environments_filter=pypi",
+            "created_at": "2026-10-23T02:01:26Z",
+            "updated_at": "2026-11-12T05:14:33Z",
+            "can_admins_bypass": false,
+            "protection_rules": [
+              {
+                "id": 69796502,
+                "node_id": "GA_kwDOVARD984EKQKW",
+                "type": "required_reviewers",
+                "prevent_self_review": true,
+                "reviewers": [
+                  {
+                    "type": "User",
+                    "reviewer": {
+                      "login": "seanudeke",
+                      "id": 55066947,
+                      "node_id": "MDQ6VXNlcjU1MDY2OTQ3",
+                      "avatar_url": "https://avatars.githubusercontent.com/u/55066947?v=4",
+                      "gravatar_id": "",
+                      "url": "https://api.github.com/users/seanudeke",
+                      "html_url": "https://github.com/seanudeke",
+                      "followers_url": "https://api.github.com/users/seanudeke/followers",
+                      "following_url": "https://api.github.com/users/seanudeke/following{/other_user}",
+                      "gists_url": "https://api.github.com/users/seanudeke/gists{/gist_id}",
+                      "starred_url": "https://api.github.com/users/seanudeke/starred{/owner}{/repo}",
+                      "subscriptions_url": "https://api.github.com/users/seanudeke/subscriptions",
+                      "organizations_url": "https://api.github.com/users/seanudeke/orgs",
+                      "repos_url": "https://api.github.com/users/seanudeke/repos",
+                      "events_url": "https://api.github.com/users/seanudeke/events{/privacy}",
+                      "received_events_url": "https://api.github.com/users/seanudeke/received_events",
+                      "type": "User",
+                      "user_view_type": "public",
+                      "site_admin": false
+                    }
+                  },
+                  {
+                    "type": "User",
+                    "reviewer": {
+                      "login": "Ofonna-N",
+                      "id": 108894366,
+                      "node_id": "U_kgDOBn2Yng",
+                      "avatar_url": "https://avatars.githubusercontent.com/u/108894366?v=4",
+                      "gravatar_id": "",
+                      "url": "https://api.github.com/users/Ofonna-N",
+                      "html_url": "https://github.com/Ofonna-N",
+                      "followers_url": "https://api.github.com/users/Ofonna-N/followers",
+                      "following_url": "https://api.github.com/users/Ofonna-N/following{/other_user}",
+                      "gists_url": "https://api.github.com/users/Ofonna-N/gists{/gist_id}",
+                      "starred_url": "https://api.github.com/users/Ofonna-N/starred{/owner}{/repo}",
+                      "subscriptions_url": "https://api.github.com/users/Ofonna-N/subscriptions",
+                      "organizations_url": "https://api.github.com/users/Ofonna-N/orgs",
+                      "repos_url": "https://api.github.com/users/Ofonna-N/repos",
+                      "events_url": "https://api.github.com/users/Ofonna-N/events{/privacy}",
+                      "received_events_url": "https://api.github.com/users/Ofonna-N/received_events",
+                      "type": "User",
+                      "user_view_type": "public",
+                      "site_admin": false
+                    }
+                  },
+                  {
+                    "type": "User",
+                    "reviewer": {
+                      "login": "FehintolaObafemi",
+                      "id": 22969702,
+                      "node_id": "MDQ6VXNlcjIyOTY5NzAy",
+                      "avatar_url": "https://avatars.githubusercontent.com/u/22969702?v=4",
+                      "gravatar_id": "",
+                      "url": "https://api.github.com/users/FehintolaObafemi",
+                      "html_url": "https://github.com/FehintolaObafemi",
+                      "followers_url": "https://api.github.com/users/FehintolaObafemi/followers",
+                      "following_url": "https://api.github.com/users/FehintolaObafemi/following{/other_user}",
+                      "gists_url": "https://api.github.com/users/FehintolaObafemi/gists{/gist_id}",
+                      "starred_url": "https://api.github.com/users/FehintolaObafemi/starred{/owner}{/repo}",
+                      "subscriptions_url": "https://api.github.com/users/FehintolaObafemi/subscriptions",
+                      "organizations_url": "https://api.github.com/users/FehintolaObafemi/orgs",
+                      "repos_url": "https://api.github.com/users/FehintolaObafemi/repos",
+                      "events_url": "https://api.github.com/users/FehintolaObafemi/events{/privacy}",
+                      "received_events_url": "https://api.github.com/users/FehintolaObafemi/received_events",
+                      "type": "User",
+                      "user_view_type": "public",
+                      "site_admin": false
+                    }
+                  }
+                ]
+              },
+              {
+                "id": 72183817,
+                "node_id": "GA_kwDOVARD984ETXAJ",
+                "type": "branch_policy"
+              }
+            ],
+            "deployment_branch_policy": {
+              "protected_branches": false,
+              "custom_branch_policies": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/environments/github-pages/deployment-branch-policies?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "54",
+        "x-ratelimit-reset": "1795699822",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "total_count": 1,
+        "branch_policies": [
+          {
+            "id": 62640866,
+            "node_id": "MDE2OkdhdGVCcmFuY2hQb2xpY3k2MjY0MDg2Ng==",
+            "name": "main",
+            "type": "branch"
+          }
+        ]
+      }
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/environments/github-pages/deployment_protection_rules?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "53",
+        "x-ratelimit-reset": "1795699822",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "total_count": 0,
+        "custom_deployment_protection_rules": []
+      }
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/environments/pypi/deployment-branch-policies?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "52",
+        "x-ratelimit-reset": "1795699822",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "total_count": 1,
+        "branch_policies": [
+          {
+            "id": 66410468,
+            "node_id": "MDE2OkdhdGVCcmFuY2hQb2xpY3k2NjQxMDQ2OA==",
+            "name": "v*",
+            "type": "tag"
+          }
+        ]
+      }
+    },
+    {
+      "path": "/repos/Obaaf/OBAAF/environments/pypi/deployment_protection_rules?per_page=100",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-github-api-version-selected": "2026-03-10",
+        "x-ratelimit-limit": "60",
+        "x-ratelimit-remaining": "51",
+        "x-ratelimit-reset": "1795699822",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "total_count": 0,
+        "custom_deployment_protection_rules": []
+      }
+    }
+  ]
+}

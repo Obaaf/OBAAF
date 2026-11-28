@@ -1,0 +1,21 @@
+name: OBAAF runner-variables probe
+description: >-
+  Slice 2c.12a (issue #198). Records which of the names in OBAAF_RV_NAMES a
+  step of a composite action sees, and with what value, when the step runs as
+  the egress action's own steps do: Python by its full path, isolated and
+  without site directories. It reads no other variable and prints no other
+  value; the names are made-up paths and words set by the escape tests.
+runs:
+  using: composite
+  steps:
+    - name: Record what this step sees
+      shell: /usr/bin/python3 -I -S {0}
+      run: |
+        import json, os
+        label = os.environ["OBAAF_RV_LABEL"]
+        names = os.environ["OBAAF_RV_NAMES"].split()
+        seen = {name: os.environ.get(name) for name in names}
+        os.makedirs("/tmp/obaaf-rv/seen", exist_ok=True)
+        with open("/tmp/obaaf-rv/seen/" + label + ".json", "w", encoding="utf-8") as out:
+            json.dump(seen, out, indent=1, sort_keys=True)
+        print("recorded " + str(len(seen)) + " names for " + label)

@@ -481,7 +481,8 @@ class TheRuleIsInTheCatalogueTest(unittest.TestCase):
         from obaaf.checker import _IDLE_TEMPLATES, rules
         kinds = {"job-not-a-lane", "workflow-not-a-lane", "job-misnamed", "workflow-misnamed", "jenkins-not-a-lane",
                  "jenkins-computed", "step-env", "container-env", "service-env", "entry-not-a-lane", "entry-no-job",
-                 "entry-no-stage", "entry-no-file"}
+                 "entry-no-stage", "entry-no-file", "elsewhere", "workflow-elsewhere", "jenkins-misnamed",
+                 "jenkins-scripted"}
         self.assertEqual(set(_IDLE_TEMPLATES), kinds)
         self.assertEqual([pair for pair in rules.CONFLICTS if pair[0] == CFG], [])
 
@@ -638,7 +639,10 @@ class WhatAnIndependentReviewFoundTest(unittest.TestCase):
         self.assertEqual(sorted((f.kind, f.severity, f.facts["name"]) for f in idle(result)),
                          [("job-misnamed", "low", "Obaaf_Lane"), ("job-misnamed", "low", "obaaf-lane"),
                           ("workflow-misnamed", "high", "obaaf_lane")])
-        self.assertEqual(idle(others), [])
+        # Flagship slice 2d.2f: one edit from OBAAF_LANE, separators aside, is another spelling of it
+        # (`OBAAF_LANES`, `OBAAFLANE`); a longer name that holds it (`MY_OBAAF_LANE`) and `LANE` are not.
+        self.assertEqual(sorted((f.kind, f.severity, f.facts["name"]) for f in idle(others)),
+                         [("job-misnamed", "high", "OBAAFLANE"), ("job-misnamed", "high", "OBAAF_LANES")])
 
     def test_the_env_of_a_parallel_group(self):
         steps = ("      - parallel:\n          - run: ./a.sh\n          - run: ./b.sh\n"

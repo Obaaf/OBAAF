@@ -1,0 +1,186 @@
+# Flagship slice 2d.25 (#411): agents named only through `env` in PowerShell and cmd steps. Each job is one case;
+# tests/test_env_shell.py says what each must give. Nothing here is run: the checker reads it.
+on: workflow_dispatch
+permissions: {}
+env:
+  WF_AGENT: claude
+jobs:
+  pwsh-step-env:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh
+        run: '& $env:AGENT --dangerously-skip-permissions -p x'
+        env: {AGENT: claude}
+  pwsh-windows-job-env-other-case:
+    runs-on: windows-latest
+    env: {AGENT: claude}
+    steps:
+      - run: '& ${env:agent} --dangerously-skip-permissions -p x'
+  pwsh-workflow-env-job-defaults:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - run: '& $env:WF_AGENT --dangerously-skip-permissions -p x'
+  pwsh-option-from-env:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh
+        run: 'claude $env:FLAGS -p x'
+        env: {FLAGS: --dangerously-skip-permissions}
+  pwsh-double-quoted:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh
+        run: '& "$env:AGENT" --dangerously-skip-permissions -p x'
+        env: {AGENT: claude}
+  pwsh-start-process:
+    runs-on: windows-latest
+    env: {AGENT: claude}
+    steps:
+      - run: "Start-Process -FilePath $env:AGENT -ArgumentList '--dangerously-skip-permissions', '-p', 'x'"
+  pwsh-continue:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh
+        run: '& $env:AGENT --auto -p x'
+        env: {AGENT: cn}
+  cmd-step-env:
+    runs-on: windows-latest
+    steps:
+      - shell: cmd
+        run: '%AGENT% --dangerously-skip-permissions -p x'
+        env: {AGENT: claude}
+  cmd-other-case-and-caret:
+    runs-on: windows-latest
+    env: {AGENT: claude}
+    steps:
+      - shell: cmd
+        run: '%agent% ^--dangerously-skip-permissions -p x'
+  pwsh-set-by-the-script:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh
+        run: |
+          & $env:AGENT --dangerously-skip-permissions -p x
+          $env:AGENT = 'echo'
+        env: {AGENT: claude}
+  cmd-set-by-the-script:
+    runs-on: windows-latest
+    steps:
+      - shell: cmd
+        run: |
+          set AGENT=echo
+          %AGENT% --dangerously-skip-permissions -p x
+        env: {AGENT: claude}
+  pwsh-self-hosted-other-case:
+    runs-on: [self-hosted]
+    env: {AGENT: claude}
+    steps:
+      - shell: pwsh
+        run: '& $env:agent --dangerously-skip-permissions -p x'
+  pwsh-after-github-env:
+    runs-on: ubuntu-latest
+    env: {AGENT: claude}
+    steps:
+      - shell: pwsh
+        run: 'Add-Content $env:GITHUB_ENV "AGENT=echo"'
+      - shell: pwsh
+        run: '& $env:AGENT --dangerously-skip-permissions -p x'
+  # From the second review of 2d.25.
+  pwsh-copied-into-a-variable:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh
+        run: |
+          $agent = $env:AGENT
+          & $agent --dangerously-skip-permissions -p x
+        env: {AGENT: claude}
+  pwsh-copied-after-github-env:
+    runs-on: ubuntu-latest
+    env: {AGENT: claude}
+    steps:
+      - shell: pwsh
+        run: 'Add-Content $env:GITHUB_ENV "X=1"'
+      - shell: pwsh
+        run: |
+          $c = "$env:AGENT --dangerously-skip-permissions -p x"
+          Invoke-Expression $c
+  pwsh-file-path-after-a-colon:
+    runs-on: windows-latest
+    env: {AGENT: claude}
+    steps:
+      - run: "Start-Process -FilePath:$env:AGENT -ArgumentList '--dangerously-skip-permissions','-p','x'"
+  cmd-copied-into-a-variable:
+    runs-on: windows-latest
+    steps:
+      - shell: cmd
+        run: |
+          echo Using AGENT
+          set BIN=%AGENT%
+          %BIN% --dangerously-skip-permissions -p x
+        env: {AGENT: claude}
+  cmd-call-label-sets-it:
+    runs-on: windows-latest
+    steps:
+      - shell: cmd
+        run: |
+          call :setup
+          %AGENT% --dangerously-skip-permissions -p x
+          exit /b
+          :setup
+          set AGENT=claude
+          exit /b
+        env: {AGENT: echo}
+  # From the third review of 2d.25: a value left out, run in a place the reader reads but no list names.
+  pwsh-typed-copy-after-github-env:
+    runs-on: windows-latest
+    env: {AGENT: claude}
+    steps:
+      - run: '"X=1" >> $env:GITHUB_ENV'
+      - run: |
+          [string]$a = $env:AGENT
+          & $a --dangerously-skip-permissions -p x
+  pwsh-foreach-after-github-env:
+    runs-on: windows-latest
+    env: {AGENT: claude}
+    steps:
+      - run: '"X=1" >> $env:GITHUB_ENV'
+      - run: 'foreach ($t in $env:AGENT) { & $t --dangerously-skip-permissions -p x }'
+  cmd-if-exist-after-github-env:
+    runs-on: windows-latest
+    env: {AGENT: claude}
+    steps:
+      - shell: cmd
+        run: 'echo X=1>> %GITHUB_ENV%'
+      - shell: cmd
+        run: 'if exist "C:\Program Files\x" %AGENT% --dangerously-skip-permissions -p x'
+  pwsh-set-by-an-unlisted-setter:
+    runs-on: windows-latest
+    steps:
+      - run: |
+          $t = [type]('System.Envir'+'onment')
+          $t::SetEnvironmentVariable('AGENT','claude')
+          & $env:AGENT --dangerously-skip-permissions -p x
+        env: {AGENT: echo}
+  cmd-set-p-without-a-space:
+    runs-on: windows-latest
+    steps:
+      - shell: cmd
+        run: |
+          echo claude> a.txt
+          set/p AGENT=<a.txt
+          %AGENT% --dangerously-skip-permissions -p x
+        env: {AGENT: echo}
+  # From the fifth review of 2d.25: a typed or indexed assignment of a command line.
+  pwsh-typed-command-line:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh
+        run: |
+          [string]$c = "$env:AGENT --dangerously-skip-permissions -p x"
+          $h = @{}
+          $h["c"] = "$env:AGENT --dangerously-skip-permissions -p x"
+          Invoke-Expression $c
+        env: {AGENT: claude}

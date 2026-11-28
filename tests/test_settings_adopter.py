@@ -10,6 +10,7 @@ this one. The page says how to make that part of the report again from the snaps
 """
 
 import json
+import re
 import unittest
 from datetime import datetime, timezone
 
@@ -17,7 +18,7 @@ from helpers import ROOT
 from test_settings_audit import SETTINGS_DIR
 
 from obaaf import audit
-from obaaf.audit import cli as audit_cli, report, rules, snapshot as snapshot_mod, workflows
+from obaaf.audit import cli as audit_cli, report, rules, settings as settings_mod, snapshot as snapshot_mod, workflows
 
 FIXTURE = SETTINGS_DIR / "live-expectrail-2026-11-13"
 PAGE = ROOT / "docs" / "expectrail-settings-audit.md"
@@ -56,10 +57,25 @@ class TheRecordIsGitHubsAnswersTest(unittest.TestCase):
 
     def test_the_snapshot_is_what_the_recorded_answers_give(self):
         # The page's reproduction starts from the snapshot; this ties the snapshot to GitHub's own answers.
+        # Since slice 2b.9b the reader also asks for each environment's custom deployment protection rules, which
+        # the recording of that day does not hold. This undoes that one change and compares the rest exactly: the
+        # extra requests, each answered with nothing, the field they fill (null), and the problems they add.
         snap, again = committed(), replayed()
+        custom = [r for r in again["requests"] if r["path"].endswith("/deployment_protection_rules?per_page=100")]
+        self.assertEqual(custom, [{"path": f"/repos/{ADOPTER}/environments/{name}/deployment_protection_rules"
+                                           "?per_page=100", "status": 0}
+                                  for name in ("github-pages", "main-only", "unity")])
+        envs = again["settings"]["environments"]
+        self.assertEqual([(p["key"], p["reason_code"]) for p in envs["problems"]],
+                         [("github-pages", "network"), ("main-only", "network"), ("unity", "network")])
+        self.assertTrue(all(p["what"].startswith("the custom deployment protection rules of environment ")
+                            for p in envs["problems"]))
+        for env in envs["value"]:
+            self.assertIsNone(env.pop(settings_mod.CUSTOM_RULES))
+        again["settings"]["environments"] = {"status": "read", "value": envs["value"]}
         self.assertEqual(again["settings"], snap["settings"])
         self.assertEqual(again["branches"], snap["branches"])
-        self.assertEqual(again["requests"], snap["requests"])
+        self.assertEqual([r for r in again["requests"] if r not in custom], snap["requests"])
 
     def test_the_recording_holds_eight_get_answers_and_nothing_a_token_could_be_in(self):
         data = json.loads((FIXTURE / "responses.json").read_text(encoding="utf-8"))
@@ -74,12 +90,42 @@ class WhatThePageSaysTest(unittest.TestCase):
         self.page = PAGE.read_text(encoding="utf-8")
         self.snap = committed()
 
-    def test_the_read_block_is_the_reports_own_to_the_character(self):
+    def page_block(self) -> str:
+        return self.page.split("```text\nREAD: 5 of 15\n")[1].split("```")[0]
+
+    def test_the_read_block_is_the_reports_own_but_for_the_quotes_added_since(self):
+        # The block is the report as the development version printed it on 2026-11-13, and the page keeps it
+        # so: a record of a dated run is not rewritten when a later version words the report otherwise (issue
+        # #125). Since flagship slice 2b.8 the report quotes each name in a list, so this takes today's report
+        # and undoes that one change: on each line, every quoted name after the first (the name the line begins
+        # with, which was quoted then too) loses its quotes. What is left must be the record to the character.
+        # A later change of wording adds its own step here; the record is not edited.
+        quoted_name = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+        def as_then(line: str) -> str:
+            first = quoted_name.search(line)
+            if not first:
+                return line
+            return line[:first.end()] + quoted_name.sub(lambda m: m.group(1), line[first.end():])
+
+        # Since slice 2b.9b the line of an environment of a snapshot that predates the read of custom deployment
+        # protection rules says so; that clause is taken out too.
+        predates = "; custom deployment protection rules: not read (this snapshot predates them)"
         usage = workflows.not_read("not part of this test")
         text = report.to_text(self.snap, assessment=rules.evaluate(self.snap, usage), usage=usage)
-        block = text.split("READ: 5 of 15\n")[1].split("\n\n")[0]
-        quoted = self.page.split("```text\nREAD: 5 of 15\n")[1].split("```")[0]
-        self.assertEqual(quoted.rstrip("\n"), block.rstrip("\n"))
+        now = text.split("READ: 5 of 15\n")[1].split("\n\n")[0]
+        self.assertEqual(now.count(predates), 3)
+        self.assertEqual(self.page_block().rstrip("\n"),
+                         "\n".join(as_then(line.replace(predates, "")) for line in now.splitlines()))
+
+    def test_the_page_says_the_block_is_worded_as_it_was_printed_then(self):
+        # The current report quotes the names the block prints bare; the page must say so (issue #125).
+        usage = workflows.not_read("not part of this test")
+        text = report.to_text(self.snap, assessment=rules.evaluate(self.snap, usage), usage=usage)
+        now = text.split("READ: 5 of 15\n")[1].split("\n\n")[0]
+        self.assertNotEqual(now.rstrip("\n"), self.page_block().rstrip("\n"))
+        self.assertIn('required_status_checks ("test", "obaaf-audit",', now)
+        self.assertIn("Since slice 2b.8 the report prints each name in such a list in double quotes", self.page)
 
     def test_the_unread_settings_are_the_ten_the_page_names(self):
         unread = report.unread_keys(self.snap)

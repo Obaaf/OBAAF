@@ -22,7 +22,7 @@ A file the checker could not read ends the check with 1 whatever `--fail-on` say
 obaaf check . --fail-on never
 ```
 
-Status 0. The report begins with the accepted risk (none yet) and one line that counts the findings. Each finding has its file and line, what is wrong, the requirement it threatens where it has one, and the fix.
+Status 0. The report begins with the accepted risk (none yet) and one line that counts the findings. Each finding has its file and line, what is wrong, why it matters in one sentence, the requirement it threatens where it has one, and the fix.
 
 Put this in CI first if you like. A step that runs it never fails a build for a finding, and still fails when a workflow cannot be read.
 
@@ -32,7 +32,7 @@ Put this in CI first if you like. A step that runs it never fails a build for a 
 obaaf check . --lanes
 ```
 
-Status 0, always, once the configuration is read: `--lanes` lists and judges nothing, which is to say it prints each job's lane and reports no finding. It does not say when a workflow could not be read, and it prints nothing and still ends with 0 for a directory with no workflows, so run step 1 first and look for errors there. One line for each job with the lane the checker put it in. If a job runs an AI agent and is not listed as `agent`, declare it: `OBAAF_LANE: agent` in the job's `env`, or an entry under `lanes:` in `.github/obaaf.yml` ([configuration guide](checker-configuration.md#telling-the-checker-about-your-agents)). An agent job gets the agent rules; a job the checker takes for an ordinary one does not, and its report is shorter than it should be.
+Status 0 when every file was read: `--lanes` lists and judges nothing, which is to say it prints each job's lane and reports no finding, whatever `--fail-on` says. A workflow or Jenkinsfile that step 1 would report as an error is an error here too, on standard error (the jobs of a file it could not read are missing from the list), and the status is 1; a path with no workflow or Jenkinsfile is status 2, as for step 1. One line for each job with the lane the checker put it in. If a job runs an AI agent and is not listed as `agent`, declare it: `OBAAF_LANE: agent` in the job's `env`, or an entry under `lanes:` in `.github/obaaf.yml` ([configuration guide](checker-configuration.md#telling-the-checker-about-your-agents)). An agent job gets the agent rules; a job the checker takes for an ordinary one does not, and its report is shorter than it should be.
 
 Do this before step 4. A declaration that does nothing (`OBAAF_LANE: agnet`) is itself a finding, `OBAAF-CFG-001`, and `--lanes` prints it as a note on standard error. If it is still there when you write the baseline, the baseline accepts it, and the findings it hides are never seen.
 
@@ -47,9 +47,9 @@ obaaf check . --write-baseline .github/obaaf-baseline.json \
   --owner @my-org/build --reason "Inherited on adoption; tracked in issue 12" --expires 2027-03-31
 ```
 
-Status 0, and a line on standard error that says how many findings were newly accepted, by whom and until when. Without `--owner`, `--reason` and `--expires` the status is 2 and nothing is written: an acceptance needs an owner (`@user`, `@org/team` or an e-mail address), a reason, and an expiry date at most 366 days ahead.
+Status 0 when nothing at or above `--fail-on` had to be left out (see below), and a line on standard error that says how many findings were newly accepted, by whom and until when. Without `--owner`, `--reason` and `--expires` the status is 2 and nothing is written: an acceptance needs an owner (`@user`, `@org/team` or an e-mail address), a reason, and an expiry date at most 366 days ahead. `--fail-on` is medium here as everywhere; give step 4 the `--fail-on` step 5 will use.
 
-One case ends with 0 and leaves out a finding that step 5 then fails on. A finding that no valid baseline entry accepts yet, and that is named by an `ignore` entry that does not count (it has expired, names no owner, gives a reason of fewer than four letters or digits, or is dated more than 366 days ahead), is not written to the baseline: the command warns on standard error, and step 5 fails on that finding. Complete or remove the entry first. (A finding ignored by a valid entry is left out as well, without a warning, and stays accepted by that entry.)
+Two kinds of finding are not written to the baseline. One that no valid baseline entry accepts yet and that an `ignore` entry names without counting (it has expired, names no owner, gives a reason of fewer than four letters or digits, or is dated more than 366 days ahead): the decision about it was made in that entry, so it is renewed, completed or removed there. And one that no entry can accept, such as `OBAAF-REPO-001` when the repository has no CODEOWNERS file or no rule in it owns the baseline: it is fixed, not accepted. Step 5 counts both. So step 4 ends as step 5 would: status 1 when one of them is at or above `--fail-on`, with an `error:` line and a `not written:` line for each on standard error, and status 0 with a `warning:` when all are below it. The baseline is written either way, without them. A finding ignored by a valid entry is left out as well, without a word, and stays accepted by that entry.
 
 Commit the file and put it under CODEOWNERS. It is a list of accepted risks: review a change to it like a change to a workflow.
 
@@ -80,10 +80,10 @@ Status 0 today. This is the gate. From now on:
 obaaf check . --format sarif --output obaaf.sarif --fail-on never
 ```
 
-Status 0. Upload the file to GitHub code scanning if you want the findings beside the code. Keep the step from step 5 as well. Going by GitHub's own page on its SARIF support (read on 2026-11-12; nobody here has uploaded a report to check it), code scanning shows an accepted finding as an open alert, and shows none of the accepted-risk total, the expiry warning or a file that could not be read.
+Status 0. Upload the file to GitHub code scanning if you want the findings beside the code. Keep the step from step 5 as well. [CI integration](ci-integration.md) has a workflow that does both, and a hook that runs the gate before each commit. Going by GitHub's own page on its SARIF support (read on 2026-11-12; nobody here has uploaded a report to check it), code scanning shows an accepted finding as an open alert, and shows none of the accepted-risk total, the expiry warning or a file that could not be read.
 
 ## What this path does not do yet
 
-- There is no `obaaf init`: the configuration and the workflow that runs the check are written by hand, or installed with `obaaf templates install` ([templates](../templates/github-actions/README.md)).
-- Two findings on an agent job, a secret in the job (`OBAAF-GHA-005`) and no egress restriction (`OBAAF-GHA-020`), cannot be cleared by anything the checker verifies today. They list the controls that would clear them and which of those are not met. Until the settings rules and the egress control exist, they are accepted or they fail.
+- There is no `obaaf init`: the configuration is written by hand, and the workflow that runs the check is copied from [CI integration](ci-integration.md) or installed with `obaaf templates install` ([templates](../templates/github-actions/README.md)).
+- An agent job that receives a secret, or uses an environment, gets `OBAAF-GHA-005` (high), and every agent job gets `OBAAF-GHA-020` (low, no egress restriction). For a job with named secrets, the checker clears `OBAAF-GHA-005` when all five controls verify, including exclusive storage in a protected environment shown by a qualifying `--settings` snapshot. A job that only declares an environment cannot clear this finding. The checker can clear `OBAAF-GHA-020` with GitHub's native firewall in enforce mode or [the listed egress action pin](egress-control.md#using-it) when the job meets the [egress control conditions](checker-configuration.md#egress-controls). Under either route, a possible artifact upload in the agent job leaves otherwise verified egress at “cannot tell”. Each lists the controls that would clear it and which of those are not met ([controls](checker-configuration.md#controls-that-clear-a-finding)). Until it is cleared, `OBAAF-GHA-005` fails the gate of step 5 unless it is accepted; `OBAAF-GHA-020` fails a gate at `--fail-on low` (step 6) unless it is accepted.
 - The times this path takes have not been measured.

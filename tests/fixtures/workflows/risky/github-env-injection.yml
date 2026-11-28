@@ -1,0 +1,18 @@
+# obaaf-models: #232: a pull request's body moved into an environment variable, as OBAAF-GHA-010's fix says, then written to GITHUB_ENV, which sets later steps' variables.
+# obaaf-expect: OBAAF-GHA-028
+name: Label from the body
+on:
+  pull_request_target:
+    types: [opened, edited]
+permissions:
+  contents: read
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Save the body
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: echo "PR_BODY=$BODY" >> "$GITHUB_ENV"
+      - name: Use it
+        run: echo "$PR_BODY"

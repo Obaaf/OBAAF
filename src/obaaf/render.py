@@ -239,12 +239,12 @@ def self_assessment_md(catalog: Catalog | None = None) -> str:
     effort = s["effort"]
     out = ["# Self-assessment checklist", "", GENERATED, "", DRAFT_NOTE, "",
            f"Version {s['version']} ({s['status']}). Source: {s['source']} ([*Securing the Game Build*](https://doi.org/10.5281/zenodo.23622802)). For a software "
-           "team without security staff: 34 yes-or-no questions in four tiers. Answer each from the evidence named "
-           "beside it, which a second person can check. Effort is an initial estimate (hours, days or weeks) that "
+           "team without security staff: 34 questions in four tiers. Answer each Yes, No or Not sure from the evidence "
+           "named beside it, which a second person can check; Not sure counts as No. Effort is an initial estimate (hours, days or weeks) that "
            "the pilot will test.", "",
-           "**How scoring works.** You reach a tier when every item at that tier and below is answered yes. An item "
-           "may be marked not applicable (N/A) only when its condition is absent, as noted beside it; N/A counts as "
-           "yes. A tier describes controls in place, not a guarantee of security.", "",
+           "**How scoring works.** You reach a tier when every item at that tier and below is answered yes. An allowed "
+           "N/A also counts as yes. Choose N/A only if the item offers it and its “N/A only if” statement is true "
+           "for your team. The tier reflects the answers you supplied; OBAAF does not verify that they are true.", "",
            "Fill it in on paper, in the [offline form](../assessment/obaaf-self-assessment.html), or as a file "
            "scored with `obaaf assess score`. Your answers never leave your machine.", ""]
     for tier_id in sorted(c.tiers):
@@ -256,7 +256,7 @@ def self_assessment_md(catalog: Catalog | None = None) -> str:
             if item["tier"] != tier_id:
                 continue
             q = item["question"] + (f" *N/A only if: {item['na_when']}*" if item.get("na_when") else "")
-            boxes = "☐ Yes ☐ No" + (" ☐ N/A" if item.get("na_when") else "")
+            boxes = "☐ Yes ☐ No ☐ Not sure" + (" ☐ N/A" if item.get("na_when") else "")
             profile = ", ".join(item["profile"]) + (f", Tier {item['isolation_tier']}" if item.get("isolation_tier")
                                                      else "")
             out.append(f"| {iid} | {q} | {item['evidence']} | {effort[item['effort']]['label']} | "
@@ -312,7 +312,8 @@ def checker_rules_md(catalog: Catalog | None = None, test_set: list[dict] | None
     for rid, rule in c.rules.items():
         refs = ", ".join(list(rule.get("requirements", [])) + list(rule.get("agent_controls", []))) or "-"
         out += [f"## {rid}", "", f"**{rule['title']}** ({rule['severity']}). Requirements: {refs}. "
-                f"Supports: {', '.join(rule.get('supports', [])) or '-'}.", "", _clean(rule["description"]), "",
+                f"Supports: {', '.join(rule.get('supports', [])) or '-'}.", "",
+                f"**Why it matters.** {_clean(rule['why'])}", "", _clean(rule["description"]), "",
                 f"**Fix.** {_clean(rule['fix'])}", ""]
         if rule.get("remediation") == "architecture":
             out += ["**Remediation.** Fixing this means adopting the agent and effect lanes, not a one-line change. "

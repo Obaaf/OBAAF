@@ -102,7 +102,9 @@ def dumps(data) -> str:
 
 # ------------------------------------------------------------------ the old format
 def _identity_v1(f) -> list:
-    return [f.rule, f.severity, f.path, f.job or "", f.step or "", f.scope or "", _EXPIRED.sub("", f.message)]
+    # A finding a later version words differently carries the message 0.3.0 wrote for it (`legacy`).
+    message = getattr(f, "legacy", "") or f.message
+    return [f.rule, f.severity, f.path, f.job or "", f.step or "", f.scope or "", _EXPIRED.sub("", message)]
 
 
 def _digest(ident: list) -> str:
@@ -254,6 +256,9 @@ def _match(findings: list, entries: list[dict], entry_key, finding_key, today: d
                 made.source, made.owner, made.reason, made.expires,
                 made.problems + [f"it accepts the finding at {entry['severity']} severity and the finding is "
                                  f"now {f.severity}"])
+        if not acceptance_mod.acceptable(f):
+            made = acceptance_mod.Acceptance(made.source, made.owner, made.reason, made.expires,
+                                             made.problems + [acceptance_mod.UNACCEPTABLE_PROBLEM])
         f.acceptance = made
         f.baselined = made.valid
     return [entry for entry in entries if id(entry) not in used]
@@ -320,7 +325,8 @@ def plan(result, previous: Baseline | None, today: date | None = None) -> tuple[
     current format, or None): (the findings to write, those that keep a valid entry of the old file,
     as finding id -> its owner, reason and expiry date, and those that would be newly accepted)."""
     today = today or date.today()
-    candidates = [f for f in result.findings if not f.suppressed and f.state != FIXED]
+    candidates = [f for f in result.findings if not f.suppressed and f.state != FIXED
+                  and acceptance_mod.acceptable(f)]
     kept: dict = {}
     if previous is not None and not previous.legacy:
         before = [(f.acceptance, f.baselined) for f in candidates]
