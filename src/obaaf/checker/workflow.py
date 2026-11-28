@@ -357,11 +357,11 @@ def _group_text(value) -> str:
     if isinstance(value, str):
         return value if value else "''"
     if isinstance(value, (int, float)):
-        return str(value)
+        return as_text(value)
     try:
         return json.dumps(value, default=str)
-    except (TypeError, ValueError):     # keys of mixed types, a circular alias
-        return str(value)
+    except (TypeError, ValueError):     # keys of mixed types, a circular alias, a number too long to print
+        return printed(value)
 # A plain value that YAML 1.2's core schema reads as null, true or false, or a number, where this
 # reader (YAML 1.1) may keep it as text: `0o0`, `0e0`, `.5`.
 _YAML12_SCALAR_RE = re.compile(r"~|null|Null|NULL|true|True|TRUE|false|False|FALSE"
@@ -389,7 +389,7 @@ def runs_after_failure(cond) -> bool:
     `success() == false`, as an argument, inside a string, beside text outside `${{ }}`) the job or
     step is taken to run regardless.
     """
-    text = str(cond or "")
+    text = as_text(cond or "")
     if _LOUD_STATUS_RE.search(text):
         return True
     written = len(_SUCCESS_RE.findall(text))
@@ -2374,7 +2374,7 @@ class Step:
         """The run script plus a github-script script, for pattern matching."""
         parts = [self.run]
         if self.action and self.action.lower().startswith("actions/github-script"):
-            parts.append(str(self.with_.get("script", "")))
+            parts.append(as_text(self.with_.get("script", "")))
         return "\n".join(p for p in parts if p)
 
     @property
@@ -3210,7 +3210,7 @@ class Job:
         if isinstance(value, str):
             return [value]
         if isinstance(value, list):
-            return [str(v) for v in value]
+            return [as_text(v) for v in value]
         return []
 
     def triggers(self, _seen: frozenset = frozenset()) -> set[str]:
@@ -4243,6 +4243,57 @@ def as_text(value) -> str:
         return str(value)
     except ValueError:
         return hex(value) if isinstance(value, int) else repr(type(value).__name__)
+
+
+class _Hex(int):
+    """An integer that prints in hexadecimal, for `printed`."""
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return hex(self)
+
+    __str__ = __repr__
+
+
+def printed(value) -> str:
+    """`str(value)` for a value that came out of a YAML file, a mapping or a list included. Where Python refuses to
+    print an integer in it (more digits than its limit; YAML reads `0xFF...` of any length as one), the same text
+    with each such integer in hexadecimal, as `as_text` gives one alone (flagship slice 2d.29, #425: it ended the
+    check in a traceback). Every other value prints as `str` prints it."""
+    try:
+        return str(value)
+    except ValueError:
+        pass
+    made: dict = {}
+
+    def hexed(item):
+        if isinstance(item, bool) or not isinstance(item, (int, dict, list, tuple)):
+            return item
+        if isinstance(item, int):
+            try:
+                repr(item)
+                return item
+            except ValueError:
+                return _Hex(item)
+        if id(item) in made:
+            return made[id(item)]
+        if isinstance(item, tuple):
+            return tuple(hexed(x) for x in item)
+        if isinstance(item, list):
+            out: list = []
+            made[id(item)] = out
+            out.extend(hexed(x) for x in item)
+            return out
+        out_map: dict = {}
+        made[id(item)] = out_map
+        for key, x in item.items():
+            out_map[hexed(key)] = hexed(x)
+        return out_map
+
+    try:
+        return str(hexed(value))
+    except ValueError:
+        return as_text(value)
 
 
 def shown_value(value) -> str:
