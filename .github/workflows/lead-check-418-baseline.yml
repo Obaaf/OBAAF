@@ -48,7 +48,7 @@ jobs:
           git diff --cached --check -- . ':(exclude)docs/bypass-attempts.md'
           git commit --no-edit
           git worktree add -q --detach "$RUNNER_TEMP/before-tests" HEAD
-          git merge --no-ff --no-edit a1d6cea678e3ab165b7e2c92cf87cb2330f22682
+          git merge --no-ff --no-edit d136ce979b34a24b1072d20ea482856d032d765d
           git diff --check 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e HEAD -- . ':(exclude)docs/bypass-attempts.md'
           test "$(git diff --name-only HEAD^1 HEAD)" = tests/test_fix_patch.py
           echo "Integration tree $(git rev-parse HEAD^{tree})"
@@ -75,7 +75,7 @@ jobs:
           python -m obaaf docs build --check
       - name: Verify the scope of the reviewer correction
         run: |
-          test "$(git diff --name-only 5554d5cb1d16ad98c8d66c02ed373fa04e559e37 a1d6cea678e3ab165b7e2c92cf87cb2330f22682)" = tests/test_fix_patch.py
+          test "$(git diff --name-only 5554d5cb1d16ad98c8d66c02ed373fa04e559e37 d136ce979b34a24b1072d20ea482856d032d765d)" = tests/test_fix_patch.py
   replay:
     strategy:
       fail-fast: false
@@ -86,7 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: a1d6cea678e3ab165b7e2c92cf87cb2330f22682
+          ref: d136ce979b34a24b1072d20ea482856d032d765d
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
