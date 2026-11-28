@@ -1,4 +1,4 @@
-name: Attribute the large-repository test time on draft 426
+name: Measure lane inference within composite-action expansion
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
@@ -44,7 +44,7 @@ jobs:
 
           def timed(name, original):
               def measure(*args, **kwargs):
-                  phase = "second" if name == "_through_view" or getattr(args[0], "_through", False) else "first"
+                  phase = "second" if name in {"_through_view", "through_job", "_inferred_lanes"} or getattr(args[0], "_through", False) else "first"
                   group = (phase, name)
                   start = time.perf_counter()
                   try:
@@ -70,7 +70,10 @@ jobs:
                   for name in sorted(methods - {"through_local_actions"}):
                       original = getattr(rules.WorkflowRules, name)
                       patches.enter_context(patch.object(rules.WorkflowRules, name, timed(name, original)))
-                  patches.enter_context(patch.object(rules, "_through_view", timed("_through_view", rules._through_view)))
+                  # These nested timers measure parts of _through_view; do not add the times together.
+                  for name in ("_through_view", "through_job", "_inferred_lanes"):
+                      original = getattr(rules, name)
+                      patches.enter_context(patch.object(rules, name, timed(name, original)))
               case = Case("test_a_large_repository_with_realistic_actions_passes")
               result = unittest.TextTestRunner(verbosity=2).run(case)
           for (phase, name), seconds in elapsed.most_common():
