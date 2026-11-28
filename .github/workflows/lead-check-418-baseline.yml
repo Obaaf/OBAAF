@@ -1,93 +1,55 @@
-name: Check integration of the runner-file rule and adoption drafts
+name: Compare the elapsed-time head check on one runner
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
 permissions:
   contents: read
 jobs:
-  merge-trees:
+  compare-timing:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
+          ref: 41eb870457a1b2b2bae46d3eb6453f8d0ab3fdb2
           fetch-depth: 0
           persist-credentials: false
-      - name: Check the three-file guide and locate conflicts with the adoption build
-        env:
-          CORE_HEAD: 87c943b89b7bac3470dd19cb58fce8c83fad0c4a
-          GUIDE_HEAD: 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
-          ADOPTION_HEAD: e49616ec3b1abe58e73273c852f2073e3dcb9f30
-        run: |
-          export TMPDIR="$RUNNER_TEMP"
-          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          git config user.name 'OBAAF integration check'
-          git config user.email 'integration@localhost'
-          python - <<'PY'
-          import os
-          import subprocess
-
-          def merge(label, left, right):
-              result = subprocess.run(
-                  ["git", "merge-tree", "--write-tree", "--name-only", left, right],
-                  capture_output=True, text=True,
-              )
-              if result.returncode not in (0, 1):
-                  raise RuntimeError(result.stderr)
-              entries = result.stdout.splitlines()
-              print(label, "CLEAN" if result.returncode == 0 else "CONFLICT", entries[0], flush=True)
-              for name in entries[1:]:
-                  if not name:
-                      break
-                  print(label, "requires resolution:", name, flush=True)
-              if result.returncode == 0:
-                  commit = subprocess.check_output(
-                      ["git", "commit-tree", entries[0], "-p", left, "-p", right, "-m", label],
-                      text=True,
-                  )
-                  return commit.strip()
-
-          core = os.environ["CORE_HEAD"]
-          guide = os.environ["GUIDE_HEAD"]
-          adoption = os.environ["ADOPTION_HEAD"]
-          merged = merge("#423 + #422", core, guide)
-          merge("#423 + #366/#297", core, adoption)
-          if merged:
-              merge("#423/#422 + #366/#297", merged, adoption)
-          PY
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
-          python-version: '3.13'
-      - name: Rehearse the catalogue resolution in the runner checkout
+          python-version: '3.10'
+      - name: Alternate flagship and draft on the existing 400-job performance test
         run: |
-          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
-          git checkout -q --detach 87c943b89b7bac3470dd19cb58fce8c83fad0c4a
-          git merge --no-ff -m 'Temporary guide integration' 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
-          if git merge --no-ff --no-commit e49616ec3b1abe58e73273c852f2073e3dcb9f30; then exit 1; fi
-          python - <<'PY'
-          import subprocess
-          from pathlib import Path
-          profile = "src/obaaf/data/profile.yaml"
-          spec = "spec/profile.md"
-          tests = "tests/test_todo_catalog.py"
-          unmerged = subprocess.check_output(["git", "diff", "--name-only", "--diff-filter=U"], text=True)
-          assert set(unmerged.splitlines()) == {profile, spec, tests}, unmerged
-          subprocess.run(["git", "checkout", "--ours", "--", profile, spec, tests], check=True)
-          for file, anchor, updated in [
-              (profile, "OBAAF-GHA-022, OBAAF-JEN-001", "OBAAF-GHA-022, OBAAF-GHA-027, OBAAF-JEN-001"),
-              (tests, '    "OBAAF-GHA-028": {""},', '    "OBAAF-GHA-027": {""},\n    "OBAAF-GHA-028": {""},'),
-          ]:
-              path = Path(file)
-              content = path.read_text(encoding="utf-8")
-              assert content.count(anchor) == 1, file
-              path.write_text(content.replace(anchor, updated), encoding="utf-8")
-          PY
+          export TMPDIR="$RUNNER_TEMP" PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          git worktree add --detach "$RUNNER_TEMP/flagship" b4985c76b8305b9463a61177a6a8904e62f1a486
           python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
-          python -m obaaf docs build
-          git add -- spec/profile.md src/obaaf/data/profile.yaml tests/test_todo_catalog.py
-          git diff --exit-code
-          git write-tree
-          python -m obaaf catalog
-          python -m obaaf docs build --check
-          python -m unittest -v test_todo_catalog test_docs test_site_claims test_first_run test_templates_install_docs test_todo_upgrade
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          case = """
+          import sys
+          import unittest
+          from test_local_composite_actions import TheReviewersSixthPassTest
+          class Measured(TheReviewersSixthPassTest):
+              def assertLess(self, actual, limit, *args, **kwargs):
+                  print(f"Observed {actual:.3f} seconds against {limit} seconds", flush=True)
+                  super().assertLess(actual, limit, *args, **kwargs)
+          suite = unittest.TestSuite([Measured("test_a_large_repository_with_realistic_actions_passes")])
+          sys.exit(0 if unittest.TextTestRunner().run(suite).wasSuccessful() else 1)
+          """
+          import textwrap
+          base = Path(os.environ["RUNNER_TEMP"]) / "flagship"
+          head = Path.cwd()
+          failures = []
+          for index, tree in enumerate([base, head, head, base, base, head], 1):
+              label = "flagship" if tree == base else "draft #366"
+              print(f"Trial {index} on {label}", flush=True)
+              env = dict(os.environ, PYTHONPATH=os.pathsep.join(map(str, [tree / "src", tree / "tests"])))
+              result = subprocess.run([sys.executable, "-c", textwrap.dedent(case)], env=env, cwd=tree)
+              if result.returncode:
+                  failures.append((index, label))
+          if failures:
+              sys.exit(f"Outside the existing test limit or execution failed: {failures}")
+          PY
