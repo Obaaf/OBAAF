@@ -1,0 +1,77 @@
+name: Check the saved acceptance and artifact attribution
+on:
+  push:
+    branches: [lead/recheck-418-e0773f7]
+permissions:
+  contents: read
+jobs:
+  recheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: e49616ec3b1abe58e73273c852f2073e3dcb9f30
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Compare a saved acceptance before and after the shell reader
+        run: |
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+          cat > "$RUNNER_TEMP/acceptance.py" <<'PY'
+          from datetime import date,timedelta
+          from pathlib import Path
+          import os,sys
+          from helpers import TempDir
+          from obaaf.checker import baseline
+          from test_local_composite_actions import check
+          text="""on: workflow_dispatch
+          permissions: {}
+          jobs:
+            j:
+              runs-on: ubuntu-24.04
+              steps:
+                - shell: pwsh
+                  run: |
+                    # picnic
+                    & $env:AGENT --auto
+                  env: {AGENT: cn}
+          """
+          path=Path(os.environ['RUNNER_TEMP'])/'prior.json'
+          with TempDir() as tmp:
+              result=check(tmp,text)
+              assert not result.errors,result.errors
+              found=[f for f in result.findings if f.rule=='OBAAF-GHA-026']
+              assert len(found)==1
+              if sys.argv[1]=='before':
+                  path.write_text(baseline.build(found,owner='@example/reviewer',reason='fixture',expires=(date.today()+timedelta(days=20)).isoformat()))
+              baseline.apply(result,baseline.load(path))
+              print(sys.argv[1],found[0].kind,found[0].state,len(result.baseline_stale),flush=True)
+          PY
+          python "$RUNNER_TEMP/acceptance.py" before
+          git config user.name 'Sean Keluo-Udeke'
+          git config user.email '55066947+seanudeke@users.noreply.github.com'
+          git merge --no-ff --no-commit e0773f72ba93f26955ec164becf4805c612c11ae
+          git write-tree
+          python "$RUNNER_TEMP/acceptance.py" after
+      - name: Read the producer and consumer fixtures through the combined checker
+        run: |
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          python - <<'PY'
+          from test_egress_recognised import workflow, run_check, FIREWALL, SHA, VERIFIED
+          from test_egress_artifact_producers import upload
+          for shell, invocation, runner in [('pwsh','& $env:TOOL -p review','ubuntu-24.04-firewall'), ('cmd','%TOOL% -p review','windows-latest')]:
+              steps=f"      - shell: {shell}\n        run: '{invocation}'\n        env: {{TOOL: claude}}\n"+upload()
+              src=workflow(steps,runs_on=runner).replace('  agent:', '  assemble:')
+              for command,wanted in [('cat result/report.txt',[]),('sh result/report.txt',['read'])]:
+                  wf=src+f"  read:\n    needs: assemble\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/download-artifact@{SHA}\n        with: {{name: report, path: result}}\n      - run: {command}\n"
+                  result=run_check(wf,config={'lanes':{}}, policy=FIREWALL)
+                  found=[f.job for f in result.findings if f.rule=='OBAAF-GHA-027']
+                  controls=[f.controls[0] for f in result.findings if f.rule=='OBAAF-GHA-020' and f.job=='assemble']
+                  assert len(controls)==1 and found==wanted
+                  if shell=='pwsh':assert controls[0].verdict==VERIFIED and 'can miss' in controls[0].detail
+                  print(shell,command,controls[0].verdict,found)
+          PY
