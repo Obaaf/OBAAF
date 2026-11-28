@@ -2242,10 +2242,11 @@ class _MadeText:
     (flagship slice 2d.25): for a PowerShell or cmd step, the lines of the text in which a value of one word was put
     in, which `agent_text` searches as it searches the step's own lines."""
 
-    __slots__ = ("text", "size", "kept", "found", "probe")
+    __slots__ = ("text", "size", "kept", "found", "probe", "assigned")
 
     def __init__(self, text, size, kept) -> None:
         self.text, self.size, self.kept, self.found, self.probe = text, size, kept, {}, None
+        self.assigned = None    # the values of the assignments a value was put in, read as command lines
 
 
 _ENV_NAME_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
@@ -2458,16 +2459,17 @@ class Step:
                 # %AGENT%`; flagship slice 2d.25), as OBAAF-GHA-026's reader of those shells reads it, and the
                 # command that matched is kept beside the reading, so that it is found where the reading is searched.
                 family = self.shell_family() if self.run else None
-                for variant in _readings(put):
-                    hit = next((candidate for segment in command_segments(variant)
-                                for form in [segment, *shell_env.command_forms(segment, family)]
-                                for candidate in _first_word_forms(form)
-                                if matches_any(commands, candidate, anchored=True)), None)
-                    if hit is not None:
-                        here.append(variant)
-                        if family is not None:
-                            here.append(hit)
-                        break
+                for text_read in (put, made.assigned):
+                    for variant in _readings(text_read or ""):
+                        hit = next((candidate for segment in command_segments(variant)
+                                    for form in [segment, *shell_env.command_forms(segment, family)]
+                                    for candidate in _first_word_forms(form)
+                                    if matches_any(commands, candidate, anchored=True)), None)
+                        if hit is not None:
+                            here.append(variant)
+                            if family is not None:
+                                here.append(hit)
+                            break
                 made.found[signature] = tuple(here)
                 found.extend(here)
         probe = made.probe if made is not None and put is not None else None
@@ -2732,30 +2734,37 @@ class Step:
             # command's program, the program's place; not an assignment, whose value the lanes do not follow), so
             # prose with a tool's name in it (`Write-Host "Using $env:TOOL"`, `$msg = "... $env:BOT ..."`) is not
             # searched as a command (the second and third reviews).
-            texts, probes = [], []
+            texts, probes, assigned = [], [], []
             context = shell_env.RunContext(base, family)
             for values in readings:
                 found = iter(values)
                 lines = []
                 offset = 0
                 for line in base.split("\n"):
-                    single = []
+                    single, assigning = [], []
 
-                    def one(m, found=found, single=single, offset=offset):
+                    def one(m, found=found, single=single, assigning=assigning, offset=offset):
                         value = next(found)
                         if value is None:
                             return m.group(0)
-                        if value and not any(ch.isspace() for ch in value) and context.runs(offset + m.start(), assignments=False)[0]:
+                        at = offset + m.start()
+                        if value and not any(ch.isspace() for ch in value) and context.runs(at, assignments=False)[0]:
                             single.append(True)
+                        if context.assigns(at):
+                            assigning.append(True)
                         return value
                     made_line = pattern.sub(one, line)
                     lines.append(made_line)
                     if single:
                         probes.append(made_line)
+                    if assigning:
+                        # An assignment's value, read as a command line, command by command (the fourth review).
+                        assigned.append(shell_env.assigned_values(made_line, family))
                     offset += len(line) + 1
                 texts.append("\n".join(lines))
             made.text = "\n".join(texts)
             made.probe = "\n".join(probes) or None
+            made.assigned = "\n".join(assigned) or None
         return made, made.text, None
 
     @property

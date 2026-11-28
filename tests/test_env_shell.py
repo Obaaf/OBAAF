@@ -52,7 +52,7 @@ AGENT_JOBS = {
     # program written out as for one put in (`$a = 'claude'; & $a`; D-153's stated limits): those jobs are in no
     # agent lane, and OBAAF-GHA-026 reads them.
     "pwsh-copied-into-a-variable": ("trusted", "high", "command-option"),
-    "pwsh-copied-after-github-env": ("trusted", "medium", "command-computed"),
+    "pwsh-copied-after-github-env": ("agent", "medium", "command-computed"),
     "pwsh-file-path-after-a-colon": ("agent", "high", "command-option"),
     "cmd-copied-into-a-variable": ("trusted", "high", "command-option"),
     "cmd-call-label-sets-it": ("trusted", "high", "command-option"),
@@ -66,7 +66,6 @@ AGENT_JOBS = {
 }
 # The jobs above where the lanes and OBAAF-GHA-026 disagree, each for a reason D-153 states.
 STATED_DISAGREEMENTS = {"pwsh-copied-into-a-variable", "cmd-copied-into-a-variable", "cmd-call-label-sets-it",
-                        "pwsh-copied-after-github-env",
                         "pwsh-typed-copy-after-github-env", "pwsh-foreach-after-github-env",
                         "pwsh-set-by-an-unlisted-setter", "cmd-set-p-without-a-space"}
 ORDINARY_JOBS = ["pwsh-region", "pwsh-tool-from-env", "cmd-greeting", "pwsh-linux-other-case",
@@ -368,7 +367,11 @@ PWSH_TEMPLATES = [
     "Write-Host hi; & {P} {F} -p x",
     "'x' | & {P} {F} -p",
     "Write-Host 'nothing runs'; Write-Host {P}",
+    # `Invoke-Expression` may set any variable, so the value is left out and OBAAF-GHA-026 cannot tell where the
+    # command written out is high: only the lane and a finding of some kind are compared for it.
+    "$c = \"{P} {F} -p x\"; Invoke-Expression $c",
 ]
+WEAKER = {"$c = \"{P} {F} -p x\"; Invoke-Expression $c"}
 CMD_TEMPLATES = [
     "{P} {F} -p x",
     "@{P} {F} -p x",
@@ -422,11 +425,15 @@ class TheLiteralFormTest(unittest.TestCase):
                         env = {"AGENT": "claude", "FLAGS": F}
                         cases.append((base + "-lit", runs_on, shell, literal, env))
                         cases.append((base + "-env", runs_on, shell, named, env))
-                        pairs.append((base, literal, named))
+                        pairs.append((base, literal, named, template in WEAKER))
         got = self.results(cases)
-        for base, literal, named in pairs:
+        for base, literal, named, weaker in pairs:
             with self.subTest(literal=literal, named=named):
-                self.assertEqual(got[base + "-env"], got[base + "-lit"])
+                if weaker:
+                    self.assertEqual(got[base + "-env"][0], got[base + "-lit"][0])
+                    self.assertTrue(got[base + "-env"][1])
+                else:
+                    self.assertEqual(got[base + "-env"], got[base + "-lit"])
 
 
 if __name__ == "__main__":

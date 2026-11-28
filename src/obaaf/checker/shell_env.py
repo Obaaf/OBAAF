@@ -448,6 +448,17 @@ _CMD_IF_RE = re.compile(r"if\s+(?:not\s+)?(?:/i\s+)?(?:(?:exist|defined|errorlev
                         + r"|" + _CMD_OPERAND + r"\s*==\s*" + _CMD_OPERAND + r"|" + _CMD_OPERAND
                         + r"\s+(?:equ|neq|lss|leq|gtr|geq)\s+" + _CMD_OPERAND + r")", re.I)
 _HEAD_SKIP = " \t@\"'‘’“”"
+# The head of an assignment, taken off so that its value is read as a command line (the fourth review: `$c = "$env:AGENT
+# -p x"` / `iex $c` is an agent job where `$c = "claude -p x"` is).
+_ASSIGNMENT_HEADS = {
+    "pwsh": re.compile(r"(^|[;{(])\s*[$@]?[\w:.\[\]{}]+\s*(?:[-+*/%]|\?\?)?=(?!=)"),
+    "cmd": re.compile(r"(^|[&(])\s*@?set(?:[\s,;=\"]+|(?=/))(?:/[ap][\s,;=\"]*)?[^=\n]*=", re.I),
+}
+
+
+def assigned_values(line: str, family_name: str) -> str:
+    """`line` with the head of each assignment taken off, so that the values are read as command lines."""
+    return _ASSIGNMENT_HEADS[family_name].sub(lambda m: m.group(1) + " ", line)
 
 
 class RunContext:
@@ -515,6 +526,12 @@ class RunContext:
             break
         return i
 
+    def assigns(self, at: int) -> bool:
+        """Whether the reference at `at` is in a command that assigns a value (`$c = "..."`, `set C=...`)."""
+        k = bisect.bisect_right(self.starts, at) - 1
+        _line, heads, commands = self._line(k)
+        return commands[max(bisect.bisect_right(heads, at) - 1, 0)][2]
+
     def runs(self, at: int, assignments: bool = True) -> tuple:
         """(whether something may run what the reference at `at` gives, its logical line); with `assignments` False,
         an assignment does not count (the lanes' probe, which does not follow a value copied into a variable)."""
@@ -579,20 +596,23 @@ def put_in(text: str, family_name: str, lookup, budget=None) -> tuple | None:
 # ...)` and cmd's `se^t`, `set,AGENT=` and `set;AGENT=`; and taking every word of the script for a name it may set
 # withdrew trusted values a later line then ran, `$agent = $env:AGENT` / `& $agent ...`). PowerShell: an assignment to
 # `$env:NAME` or `${env:NAME}` (`=`, `+=`, `??=`, or a `,` after it, a multiple assignment) sets that name; any name may
-# be set where the script holds another `env:` (`Set-Item env:X`, `"env:$n"`), the word `Environment` (`[Environment]`,
-# `Environment::`, a COM object's `.Environment(...)`), `SessionState`, `ExecutionContext`, `Invoke-Expression`, `iex`,
-# `Import-Module`, `Invoke-Command`, a provider cmdlet that can write a computed path (`Set-Item`, `New-Item`,
-# `Set-Content`, `Add-Content`, `Clear-Item`, `Remove-Item`, `Rename-Item`, `Copy-Item`, `Move-Item` and their aliases),
-# dot-sourcing, or a `.ps1` or `.psm1`. cmd, with its carets taken out as cmd takes them out: `set NAME=...` (`set`
-# followed by a space, `,`, `;` or `=`, with `/a` or `/p`, quoted or not, the name being what stands before the first
-# `=`) sets that name on its line and the lines after; a `set` whose name holds a variable and a `call` of anything but
-# a label may set any name on the lines after; and where the script holds `goto` or `call :label`, which run lines out
-# of their order, every line counts.
+# be set where the script holds another `env:` (`Set-Item env:X`, `"env:$n"`), the `Environment` class or its methods
+# (`[Environment]`, `Environment::`, a COM object's `.Environment(...)`, `SetEnvironmentVariable`, `Add-Type`), `[type]`
+# and `[scriptblock]` (a type or code built from text), `Set-Alias`, `New-Alias`, `SessionState`, `ExecutionContext`,
+# `Invoke-Expression`, `iex`, `Import-Module`, `Invoke-Command`, a provider cmdlet that can write a computed path
+# (`Set-Item`, `New-Item`, `Set-Content`, `Add-Content`, `Clear-Item`, `Remove-Item`, `Rename-Item`, `Copy-Item`,
+# `Move-Item`, and their aliases where a command starts), dot-sourcing, or a `.ps1` or `.psm1`. cmd, with its carets
+# taken out as cmd takes them out: `set NAME=...` (`set` followed by a space, `,`, `;`, `=`, `"` or `/`, with `/a` or
+# `/p`, quoted or not, the name being what stands before the first `=`) sets that name on its line and the lines after;
+# a `set` whose name holds a variable, a `call` of anything but a label, and a command whose own word is a variable may
+# set any name on the lines after; and where the script holds `goto` or `call :label`, which run lines out of their
+# order, every line counts.
 _PS_SETS_AFTER = re.compile(r"\s*(?:,|(?:[-+*/%]|\?\?)?=(?!=))")
 _PS_ENV_ANY_RE = re.compile(r"env:", re.I)
 _PS_DYNAMIC_RE = re.compile(
-    r"Environment|SessionState|ExecutionContext|Invoke-Expression|\biex\b|Import-Module|\bipmo\b"
-    r"|Set-Alias|New-Alias|(?<![\w-])(?:sal|nal)(?![\w-])|\[\s*(?:scriptblock|type)\s*\]"
+    r"\[\s*(?:System\.)?Environment\s*\]|Environment\s*::|\.Environment\s*\(|SetEnvironmentVariable|Add-Type"
+    r"|SessionState|ExecutionContext|Invoke-Expression|\biex\b|Import-Module|\bipmo\b"
+    r"|Set-Alias|New-Alias|(?<![\w-])(?:sal|nal)(?![\w-])|\[\s*(?:System\.)?(?:scriptblock|type)\s*\]"
     r"|Invoke-Command|\bicm\b|\.ps1\b|\.psm1\b|(?:Set|New|Clear|Remove|Rename|Copy|Move)-Item|(?:Set|Add)-Content"
     r"|(?:^|[;|&({}])[ \t]*(?:si|ni|sc|ac|cli|ri|rni|cpi|mi|del|erase|rm|rmdir|rd|ren|mv|cp|copy|move)(?![\w-])"
     r"|(?:^|[;|&({}\s])\.\s+\S", re.I | re.M)
