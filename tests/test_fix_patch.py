@@ -18,8 +18,8 @@ class FixPatchTest(unittest.TestCase):
         # supply their own configuration or attributes and exercise the public CLI.
         # A system attributes file that gives a target `filter`, `ident` or
         # `working-tree-encoding` still reaches the product's checks, which do not pass
-        # GIT_ATTR_NOSYSTEM on (D-103's clarification, #422): there export refuses, as it
-        # should, and the tests that expect a patch fail (review-gpt #427).
+        # GIT_ATTR_NOSYSTEM on (docs/upgrading.md, since #422): there export refuses, as it
+        # should, and the tests that expect a patch fail or error (review-gpt #427).
         environment = mock.patch.dict(os.environ, {
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": str(outside / "empty.gitconfig"),
@@ -264,13 +264,15 @@ class FixPatchReviewTest(unittest.TestCase):
         # D-103's clarification and docs/upgrading.md say so: `text`, `eol` and `crlf` are not
         # refused, and `git apply` converts the line endings as it writes the file. Pinned here so
         # that the isolation above does not hide it (review-gpt #427).
-        self.config.write_bytes(self.policy(b"\n", True))
+        before = self.policy(b"\n", True)
+        self.config.write_bytes(before)
         (self.root / ".gitattributes").write_text("*.yml text eol=crlf\n")
         self.git("add", ".")
         code, _, err = self.export()
         self.assertEqual(code, 0, err)
         self.git("apply", str(self.patch))
-        self.assertIn(b"\r\n", self.config.read_bytes())
+        proven = before.replace(b"- rule:", b'- owner: "@team"\n    rule:')
+        self.assertEqual(self.config.read_bytes(), proven.replace(b"\n", b"\r\n"))
 
     def test_a_stray_git_entry_above_a_plain_folder_is_not_a_work_tree(self):
         import shutil
