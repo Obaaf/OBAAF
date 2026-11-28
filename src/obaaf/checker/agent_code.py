@@ -2262,7 +2262,9 @@ def read_shell_lines(text: str, ctx: af._Context, family: str) -> None:
     counts where a command starts (after `&`, `.`, `call`, an assignment `$x =`), as `Start-Process`'s
     `-FilePath` or first word, and as a name given it (`$exe = 'claude'`, `set C=claude`); a command the
     checker cannot name (`& $exe`, `%C%`) in a script that names the tool is "cannot tell"."""
-    aliases: set = set()
+    # Each name given the program's name (`$exe = 'claude'`, `set C=claude`), with the program's name as `af._base`
+    # reads it: the lanes take the command `& $exe ...` runs from it (flagship slice 2d.27a).
+    aliases: dict = {}
     # A name given a value that holds the tool's letters anywhere (`$t = 'xcodex'.Substring(1)`,
     # `set X=!CODEXBIN!`): a command the checker cannot name that uses it may be the program (flagship slice
     # 2d.23, from its second review).
@@ -2272,7 +2274,7 @@ def read_shell_lines(text: str, ctx: af._Context, family: str) -> None:
         m = re.match(r"\s*\$([\w:]+)\s*=\s*['\"‘’“”]?([^'\"\s‘’“”]+)", line) \
             if family == "pwsh" else re.match(r'\s*set\s+"?(\w+)=([^"\s&]+)', line, re.I)
         if m and af._base(m.group(2)) in ctx.programs:
-            aliases.add(m.group(1).lower())
+            aliases[m.group(1).lower()] = af._base(m.group(2))
         elif m and af.appears(m.group(2), ctx.programs, ctx.packages):
             maybe.add(m.group(1).lower())
         # A loop's variable over values that hold the letters (`for /f %%i in ('where codexcli') do %%i ...`,
@@ -2309,7 +2311,7 @@ def _used_names(raw: str, ps: bool) -> set:
     return {name.lower() for name in found}
 
 
-def _shell_command(words: list, ctx: af._Context, family: str, aliases: set, mentioned: bool,
+def _shell_command(words: list, ctx: af._Context, family: str, aliases: dict, mentioned: bool,
                    maybe: set = frozenset()) -> None:
     ps = family == "pwsh"
     i = 0
@@ -2372,11 +2374,21 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: set, men
     raw, kind = words[i]
     name = raw.lower()
     program = af._base(raw) in ctx.programs or af._is_package(raw, ctx.packages)
+    # The program's name as the lanes are given it (flagship slice 2d.27a): a package as written, a program as
+    # `af._base` reads it (no folder, no `.exe`, in lower case), and a name's program for a name given one.
+    runs = (raw.casefold() if af._is_package(raw, ctx.packages) else af._base(raw)) if program else None
+    if ps and kind in ("single", "double") and not (i > 0 and words[i - 1][0] in ("&", ".")):
+        # A quoted word that no `&` or `.` calls is a string to PowerShell, not a command (`$a = 'claude'`,
+        # `'claude' + ' -p x'`): the lanes are not given it (2d.27a). OBAAF-GHA-026's own reading is unchanged.
+        runs = None
     if ps and kind == "plain" and raw.startswith("$") and raw[1:].lower() in aliases:
         program = True
+        runs = runs or aliases[raw[1:].lower()]
     if not ps and kind == "plain" and re.fullmatch(r"%(\w+)%|!(\w+)!", raw):
         var = re.fullmatch(r"%(\w+)%|!(\w+)!", raw)
-        program = program or (var.group(1) or var.group(2)).lower() in aliases
+        if (var.group(1) or var.group(2)).lower() in aliases:
+            program = True
+            runs = runs or aliases[(var.group(1) or var.group(2)).lower()]
     rest = words[i + 1:]
     if not program:
         # A command the checker cannot name is "cannot tell" in a script that names the tool, where its own word
@@ -2412,6 +2424,7 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: set, men
                         af.Word(text=raw2, shown=raw2))
             continue
         args.extend(_shell_words(raw2, kind2, family))
+    _ran(ctx, runs, args)
     _read_shell_args(args, ctx, family, words)
 
 
@@ -2477,7 +2490,46 @@ def _start_process(rest: list, ctx: af._Context, mentioned: bool) -> None:
             words.append(af.Word(text="\x00", shown=raw, splits=True))
         else:
             words.extend(af.Word(text=w, shown=w) for part in raw.split(",") for w in part.split())
+    program = file_path[0]
+    _ran(ctx, program.casefold() if af._is_package(program, ctx.packages) else af._base(program), words)
     _read_shell_args(words, ctx, "pwsh", [file_path] + list(arguments))
+
+
+def _ran(ctx: af._Context, program: str | None, args: list) -> None:
+    """Note, for `program_lines`, the command line a command runs where the reader has named its program: the
+    program's name, then each argument as the shell gives it (a word the checker cannot read as it was written)."""
+    if program is not None and ctx.runs is not None:
+        ctx.runs.append(" ".join([program] + [w.shown if "\x00" in w.text or "\x03" in w.text else w.text
+                                              for w in args if not w.redirect]))
+
+
+def cmd_carets_out(text: str) -> str:
+    """A cmd script as its programs see it: a caret at a line's end continues the line, and any other is taken out
+    (`claude ^--yolo`; slice 2d.5c2c and its review)."""
+    return re.sub(r"\^[ \t]*\r?\n", " ", text).replace("^", "")
+
+
+def program_lines(text: str, family: str, programs: list, packages: list) -> list:
+    """The command lines a PowerShell or cmd script runs one of `programs` or `packages` with, where OBAAF-GHA-026's
+    reader of those shells (`read_shell_lines`) names the program (flagship slice 2d.27a, #420): the program's name
+    (no folder, no `.exe`, in lower case; a package as written), then its arguments as the shell gives them. The
+    lanes match the catalogue's agent patterns against these, so that a job is an agent job wherever this reader
+    finds the program run: `& “claude” ...`, `claude.exe ...`, `C:\\tools\\claude.exe ...`, cmd's `^claude ...`,
+    `Start-Process -WorkingDirectory C:\\w claude ...`, `$a = 'claude'; & $a ...`, `set BIN=claude` and `%BIN% ...`.
+    What the reader cannot name (a group, a subexpression, a method's result, a splat, a loop's variable) gives
+    nothing here; OBAAF-GHA-026 makes it "cannot tell". Nothing where the script does not hold the letters of one of
+    them (`af.appears`), the common case, kept cheap."""
+    if not text or family not in ("pwsh", "cmd"):
+        return []
+    programs = [p.casefold() for p in programs]
+    packages = [p.casefold() for p in packages]
+    if family == "cmd":
+        text = cmd_carets_out(text)
+    if not af.appears(text, programs, packages):
+        return []
+    ctx = af._Context(programs, packages, [], {}, False, set(), af.Reading(), loose=True, runs=[])
+    read_shell_lines(text, ctx, family)
+    return ctx.runs
 
 
 def _read_shell_args(args: list, ctx: af._Context, family: str, words: list) -> None:

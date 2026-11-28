@@ -2486,6 +2486,24 @@ class Step:
                                     for candidate in _first_word_forms(form)
                                     if matches_any(commands, candidate, anchored=True)][:1]
             found.extend(cache[signature])
+        # Every command that OBAAF-GHA-026's reader of PowerShell and cmd names the program of (`agent_code.program_lines`:
+        # `& “claude” ...`, `claude.exe ...`, `C:\\tools\\claude.exe ...`, cmd's `^claude ...`, `Start-Process
+        # -WorkingDirectory C:\\w claude ...`, `$a = 'claude'; & $a ...`, `set BIN=claude` with `%BIN% ...`), in the step's
+        # own lines, with its `${{ }}` worked out and with its `env` put in, as that program's command line: the lanes
+        # are never narrower than that reader about which program a command runs (flagship slice 2d.27a, #420). Before,
+        # the lanes read these shells with bash's word splitting, and each of those jobs was in no agent lane while
+        # OBAAF-GHA-026 reported the agent's options in it.
+        if family is not None:
+            from obaaf.checker import agent_code
+            programs, packages = _agent_program_names()
+            ran = self.__dict__.setdefault("_programs_run", {})
+            signature = tuple((p.pattern, p.flags) for p in commands)
+            for text_read in dict.fromkeys(t for t in (own, worked, put) if t):
+                key = (text_read, signature)
+                if key not in ran:
+                    ran[key] = [line for line in agent_code.program_lines(text_read, family, programs, packages)
+                                if matches_any(commands, line, anchored=True)][:1]
+                found.extend(ran[key])
         text = "\n".join(p for p in [own, worked if worked != own else None, probe, *found] if p)
         return "\n".join(dict.fromkeys(v for v in _readings(text) if v))
 
@@ -3526,6 +3544,29 @@ def _needle(rx) -> "str | None":
         _NEEDLES.clear()
     _NEEDLES[key] = needle
     return needle
+
+
+_AGENT_PROGRAM_NAMES: dict = {}
+
+
+def _agent_program_names() -> tuple:
+    """(programs, packages): every program and package the catalogue's agent tools name (`agent_tools`' `programs`
+    and `packages`), for the lanes' reading of PowerShell and cmd (flagship slice 2d.27a). A repository's own agents
+    (`agents.commands`) are patterns, not names, so they are not among them."""
+    detection = load_catalog().detection
+    key = id(detection)
+    if key not in _AGENT_PROGRAM_NAMES:
+        programs: list = []
+        packages: list = []
+        for tool in detection.get("agent_tools", []) or []:
+            if not isinstance(tool, dict):
+                continue
+            programs += [p for p in tool.get("programs") or [] if isinstance(p, str)]
+            given = tool.get("packages") if isinstance(tool.get("packages"), dict) else {}
+            packages += [n for names in given.values() if isinstance(names, list) for n in names if isinstance(n, str)]
+        _AGENT_PROGRAM_NAMES.clear()
+        _AGENT_PROGRAM_NAMES[key] = (list(dict.fromkeys(programs)), list(dict.fromkeys(packages)))
+    return _AGENT_PROGRAM_NAMES[key]
 
 
 def _prepared(commands) -> tuple:

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 from obaaf import agent_tools
 from obaaf.catalog import Catalog
+from obaaf.checker import agent_code
 from obaaf.checker import agent_flags
 from obaaf.checker import egress as egress_mod
 from obaaf.checker import env_expr
@@ -1335,9 +1336,10 @@ def give_call_effects(groups: list, detection: dict, agents: dict | None = None)
 
 
 def _cmd_carets_out(text: str) -> str:
-    """A cmd script as its programs see it: a caret at a line's end continues the line, and any other is taken out
-    (`claude ^--yolo`; slice 2d.5c2c and its review)."""
-    return re.sub(r"\^[ \t]*\r?\n", " ", text).replace("^", "")
+    """A cmd script as its programs see it (`agent_code.cmd_carets_out`, which the lanes use too since flagship slice
+    2d.27a): a caret at a line's end continues the line, and any other is taken out (`claude ^--yolo`; slice 2d.5c2c
+    and its review)."""
+    return agent_code.cmd_carets_out(text)
 
 
 class _AltTooLong(Exception):
