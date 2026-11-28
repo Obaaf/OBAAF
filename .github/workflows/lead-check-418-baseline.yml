@@ -1,64 +1,82 @@
-name: Measure the existing local-action performance test for issue 227
+name: Rehearse shell lanes and native patch tests with the launch draft
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
 permissions:
   contents: read
 jobs:
-  compare:
+  integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: d297c7bbdf43e8e9e7459c835586d761b66381ba
+          ref: 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
-          python-version: '3.10'
-      - name: Compare the same test and its local-action pass on one runner
+          python-version: '3.13'
+      - name: Merge the three pinned heads in the checkout
+        id: integrate
         run: |
-          export TMPDIR="$RUNNER_TEMP" PYTHONDONTWRITEBYTECODE=1
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          export TMPDIR="$RUNNER_TEMP"
           if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          git config user.name "OBAAF integration check"
+          git config user.email "integration@localhost"
+          git merge --no-ff --no-edit c25eb820af609b25dc0aca42f09d7ec992954a20
+          git worktree add -q --detach "$RUNNER_TEMP/before-tests" HEAD
+          git merge --no-ff --no-edit 5554d5cb1d16ad98c8d66c02ed373fa04e559e37
+          git diff --check 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e HEAD
+          test "$(git diff --name-only HEAD^1 HEAD)" = tests/test_fix_patch.py
+          echo "Combined tree $(git rev-parse HEAD^{tree})"
+          git worktree add -q --detach "$RUNNER_TEMP/flagship" 67f84e5231146b2ff312b64f0c8021d7e2f544ec
+          git worktree add -q --detach "$RUNNER_TEMP/adoption" 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e
           python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
-          git worktree add -q --detach "$TMPDIR/prior" 55661337e24248ac7d2346e6ab9cb0069261dffa
-          git worktree add -q --detach "$TMPDIR/draft" 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e
-          git diff --exit-code 55661337e24248ac7d2346e6ab9cb0069261dffa d297c7bbdf43e8e9e7459c835586d761b66381ba -- src tests
-          cat > "$TMPDIR/measure.py" <<'PY'
+      - name: Check both lanes and native patch replay together
+        run: |
+          export PYTHONPATH="$PWD/src:$PWD/tests"
+          python -m unittest -v test_shell_lanes test_artifact_consumer_index test_egress_artifact_producers test_fix_patch
+          python -m obaaf docs build --check
+      - name: Check the review contribution and the shell change on both adopters
+        if: ${{ !cancelled() && steps.integrate.outcome == 'success' }}
+        run: |
+          git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          python - <<'PY'
+          import os
+          import subprocess
           import sys
-          import time
-          import unittest
           from pathlib import Path
-          from unittest.mock import patch
-
-          root = Path.cwd()
-          sys.path[:0] = [str(root / "src"), str(root / "tests")]
-          from obaaf.checker.rules import WorkflowRules
-          from test_local_composite_actions import TheReviewersSixthPassTest
-
-          second_pass = 0.0
-          original_pass = WorkflowRules.through_local_actions
-          def timed_pass(self):
-              global second_pass
-              start = time.monotonic()
-              try:
-                  return original_pass(self)
-              finally:
-                  second_pass += time.monotonic() - start
-
-          class MeasuredCase(TheReviewersSixthPassTest):
-              def assertLess(self, first, second, msg=None):
-                  print(f"MEASURE {sys.argv[1]} total={first:.3f} local_action_pass={second_pass:.3f} limit={second}", flush=True)
-                  super().assertLess(first, second, msg)
-
-          with patch.object(WorkflowRules, "through_local_actions", timed_pass):
-              case = MeasuredCase("test_a_large_repository_with_realistic_actions_passes")
-              result = unittest.TextTestRunner(verbosity=2).run(case)
-          sys.exit(int(not result.wasSuccessful()))
+          scratch = Path(os.environ["RUNNER_TEMP"])
+          settings = scratch / "flagship"
+          adopters = [
+              ("OBAAF", settings, settings / ".github/obaaf-settings.json", "medium"),
+              ("Expectrail", scratch / "expectrail", settings / "tests/fixtures/settings/live-expectrail-2026-11-13/snapshot.json", "low"),
+          ]
+          for name, site, snapshot, threshold in adopters:
+              for mode in ("text", "json", "sarif", "summary"):
+                  command = [sys.executable, "-m", "obaaf", "check", ".", "--settings", str(snapshot),
+                             "--baseline", ".github/obaaf-baseline.json", "--fail-on", threshold]
+                  command.extend(["--summary"] if mode == "summary" else ["--format", mode])
+                  if name == "Expectrail":
+                      command.append("--no-fixes")
+                  outputs = []
+                  for src in (scratch / "adoption", scratch / "before-tests", Path.cwd()):
+                      env = dict(os.environ, PYTHONPATH=str(src / "src"))
+                      result = subprocess.run(command, cwd=site, env=env, capture_output=True)
+                      assert result.returncode in (0, 1), (name, mode, result.stderr[-500:])
+                      assert b"git did not list the tracked files" not in result.stdout
+                      outputs.append((result.returncode, result.stdout, result.stderr))
+                  assert outputs[1] == outputs[2], (name, mode, "fixture-only change affected public output")
+                  print("ADOPTER", name, mode, "fixture identical", "shell delta" if outputs[0] != outputs[1] else "shell identical",
+                        "exit", outputs[0][0], outputs[2][0], flush=True)
           PY
-          failed=0
-          for source in "$TMPDIR/prior" "$GITHUB_WORKSPACE" "$TMPDIR/draft" "$TMPDIR/draft" "$GITHUB_WORKSPACE" "$TMPDIR/prior"; do
-            (cd "$source" && python "$TMPDIR/measure.py" "$(git rev-parse --short HEAD)") || failed=1
-          done
-          exit "$failed"
+      - name: Run the full combined suite
+        if: ${{ !cancelled() && steps.integrate.outcome == 'success' }}
+        run: |
+          export PYTHONPATH="$PWD/src:$PWD/tests"
+          python -m unittest discover -s tests -v
