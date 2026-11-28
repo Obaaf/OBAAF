@@ -394,7 +394,13 @@ class FourthReviewTest(unittest.TestCase):
                        'if true; then\n  echo "X=$BODY"\n  A=(fi)\n  B=(if)\nfi >> "$GITHUB_ENV"'):
             with self.subTest(script):
                 self.assertEqual(self.outcome(script), [("high", "")])
-        self.assertEqual(self.outcome('{ ARGS=("--body" "x"); echo "A=1"; } >> "$GITHUB_ENV"'), [])
+        # An array's words are also read as a subshell's command, which `(env)` after `X=()` would be: fail closed.
+        self.assertEqual(self.outcome('{ ARGS=("--body" "x"); echo "A=1"; } >> "$GITHUB_ENV"'),
+                         [("medium", "unresolved")])
+        for script, expected in (('{\n  X=()\n  (env)\n} >> "$GITHUB_ENV"', [("high", "")]),
+                                 ('{\n  X=()\n  (./gen.sh)\n} >> "$GITHUB_ENV"', [("medium", "unresolved")])):
+            with self.subTest(script):
+                self.assertEqual(self.outcome(script), expected)
 
     def test_an_expression_in_a_here_document(self):
         script = 'cat >> "$GITHUB_ENV" <<EOF\nX=${{ env.LIT }}\nEOF'

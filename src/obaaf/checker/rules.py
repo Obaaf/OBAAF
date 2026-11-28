@@ -966,7 +966,7 @@ def _runner_file_writes(script: str, held: frozenset, every: bool = False, clean
         words = command.words
         if id(command) in array_words:
             if stack:
-                stack[-1][1].add("unresolved" if _p.names & holding or _p.substitution else "clean")
+                stack[-1][1].add(inside(k))     # also a subshell's command, which would print what it prints
             continue
         first = words[0].text if words and plain(words[0]) else ""
         if first in _OPENERS:
@@ -1043,6 +1043,37 @@ def _runner_file_writes(script: str, held: frozenset, every: bool = False, clean
         return RunnerFileWrite("unresolved", frozenset(held) or frozenset({"*"}), frozenset(unread_files),
                                "; ".join(sorted(set(unread))))
     return None
+
+
+def _distinct_texts(value, limit: int = 20_000) -> list:
+    """Every distinct text in a YAML value of lists and mappings (keys and scalars), each node and each text once,
+    in the order first met: a value YAML aliases many times is read once. Past `limit` nodes the list ends with
+    `GITHUB_ENV`, so a reading of it fails closed."""
+    out: list = []
+    texts: set = set()
+    stack, seen, count = [value], set(), 0
+    while stack:
+        count += 1
+        if count > limit:
+            out.append("GITHUB_ENV (more values than the checker reads)")
+            break
+        node = stack.pop()
+        if isinstance(node, (list, dict)):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            if isinstance(node, dict):
+                for key, item in node.items():
+                    stack.append(item)
+                    stack.append(key)
+            else:
+                stack.extend(reversed(node))
+        elif node is not None:
+            text = str(node)
+            if text not in texts:
+                texts.add(text)
+                out.append(text)
+    return out
 
 
 def _referenced_names(infos) -> set:
@@ -1928,6 +1959,16 @@ class WorkflowRules:
     # The event's payload read from its file: `GITHUB_EVENT_PATH`, `${{ github.event_path }}`, or the file's own path.
     _EVENT_FILE_RE = re.compile(r"GITHUB_EVENT_PATH|github\s*\.\s*event_path|_github_workflow|event\.json", re.I)
 
+    def _scope_names_runner_files(self, scope: dict) -> bool:
+        """Whether an `env` mapping's keys or values name the runner's files, worked out once for each mapping and
+        each distinct text in it (a value YAML aliases into many steps is read once)."""
+        memo = self.__dict__.setdefault("_scopes_naming_files", {})
+        known = memo.get(id(scope))
+        if known is None or known[0] is not scope:
+            known = memo[id(scope)] = (scope, any(_names_runner_files(text)
+                                                  for text in _distinct_texts(list(scope.values()))))
+        return known[1]
+
     def _earlier_sets_variables(self, job: Job, step: Step) -> bool:
         """Whether a step of `job` before `step` names a way to set variables for later steps (worked out once for
         each job, in one pass over its steps)."""
@@ -1937,8 +1978,8 @@ class WorkflowRules:
             flags, seen = [], False
             for each in job.steps:
                 flags.append(seen)
-                seen = seen or bool(self._ENV_CONTEXT_WRITERS_RE.search(_squeeze(
-                    self._values_text([each.raw.get("run"), each.raw.get("with")]))))
+                seen = seen or any(self._ENV_CONTEXT_WRITERS_RE.search(_squeeze(text))
+                                   for text in _distinct_texts([each.raw.get("run"), each.raw.get("with")]))
             known = memo[id(job)] = (job, flags)
         flags = known[1]
         return flags[step.index] if step.index < len(flags) else True
@@ -1949,12 +1990,12 @@ class WorkflowRules:
         where they name a way to write those files and the step's environment holds the text (for github-script,
         also where the script names the event's payload)."""
         script = step.run if isinstance(step.raw.get("run"), str) and step.run and not step.uses else ""
-        shell_text = self._values_text(step.raw.get("shell"))
+        shell_text = "\n".join(_distinct_texts(step.raw.get("shell")))
         others = [text for text in self._script_texts(job, step) if text and text != script and text != shell_text]
         if not script and step.raw.get("run") is not None and not step.uses:
-            others.append(self._values_text(step.raw.get("run")))    # a value YAML aliases is read once a node
+            others.append("\n".join(_distinct_texts(step.raw.get("run"))))    # each text YAML aliases, once
         scopes = [scope or {} for scope in (self.wf.env, job.env, step.env)]
-        path_in_env = any(_names_runner_files(self._values_text(list(scope.values()))) for scope in scopes)
+        path_in_env = any(self._scope_names_runner_files(scope) for scope in scopes)
         if not path_in_env and not any(self._RUNNER_FILE_TEXT_RE.search(_squeeze(text)) or _names_runner_files(text)
                                        for text in (script, *others) if text):
             return
@@ -1976,7 +2017,7 @@ class WorkflowRules:
                 shells |= set(shell_env.runner_shells(job))
             if shells & {"bash", "sh"}:
                 # Tracing or functions set from outside the script: the shell's own options, or the `env`.
-                given = self._values_text(shell_env.explicit_shell(step.raw, (job.raw, self.wf.raw)))
+                given = "\n".join(_distinct_texts(shell_env.explicit_shell(step.raw, (job.raw, self.wf.raw))))
                 outside = bool(re.search(r"\s-[a-zA-Z]*x|xtrace", given)) or any(
                     re.match(r"\s*(SHELLOPTS|BASHOPTS|BASH_ENV|BASH_FUNC_|ENV\s*$)", str(k))
                     for scope in scopes for k in scope)
@@ -2012,8 +2053,8 @@ class WorkflowRules:
         references = sorted("$" + name for name in names if name != "*") or ["every variable"]
         files = sorted(found.files)
         trigger_fact = Fact(sorted(job.triggers()), "")
-        # Each node once, so a value YAML aliases many times costs little (`_values_text`).
-        written = self._values_text([step.raw.get("run"), step.raw.get("with")])
+        # Each distinct text once, so a value YAML aliases many times costs little.
+        written = "\n".join(_distinct_texts([step.raw.get("run"), step.raw.get("with")]))
         script_fact = Fact([f"script: {hashlib.sha256(written.encode('utf-8', 'surrogatepass')).hexdigest()[:16]}"], "")
         if found.state == "written":
             commit_text = any(self._commit_field(f) for f in fields)
