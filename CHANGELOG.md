@@ -4,6 +4,28 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### The lanes read the program a PowerShell or cmd command runs as OBAAF-GHA-026 reads it
+
+Slice 2d.27a, split from #420; decision D-155. OBAAF-GHA-026 reads PowerShell and cmd scripts with a reader of those shells. The lanes read the same scripts with bash's word splitting. So these each got OBAAF-GHA-026 high and no agent rule: `& “claude” ...`, `claude.exe ...`, `C:\tools\claude.exe ...`, cmd's `^claude ...`, `Start-Process -WorkingDirectory C:\w claude ...`, `$a = 'claude'; & $a ...`, and `set BIN=claude` followed by `%BIN% ...`.
+
+- **Can fail a check that passed.** Wherever OBAAF-GHA-026's reader names the program of a command, the lanes match the agent patterns against that command, so the job is now an agent job with every agent rule.
+- **OBAAF-GHA-026 reads more, and can fail a check that passed.** These forms are new:
+  - `cmd /d /s /c "..."` and `cmd /e:on /c ...`;
+  - `pwsh -NoProfile -Command "..."` and `powershell -c ...`;
+  - `iex 'claude ...'`, cmd's repeated `if`, and `start /d C:\w ...`;
+  - `Start-Process -Path`, `-PSPath` and `-A`, and lists with spaced commas or continued lines;
+  - a PowerShell line continued after a trailing `,` or `|`;
+  - an option after `2>&1`, and an option after an inline `<# ... #>`.
+- **It stops reading** cmd `rem` and label lines.
+- **Not given to the lanes:**
+  - a PowerShell string or a variable used as a value (`$a = 'claude'`, `$y = $x + ' -p x'`);
+  - what a bracket in a cmd command's text holds (`echo (...)`, a `for` set);
+  - an operator after a caret.
+- **Still not read**, so these give OBAAF-GHA-026 "cannot tell" and no agent lane (#420):
+  - a group, a subexpression, a method's result, a splat;
+  - a typed copy, a `foreach` variable, a pipeline's `$_`.
+- On this repository and on the first adopter the reports are byte-identical with `flagship` `67f84e5`.
+
 ### OBAAF-GHA-028: an outsider's text written to GITHUB_ENV or GITHUB_PATH
 
 Slice 2d.26, from #232; decision D-154. OBAAF-GHA-010's fix is to pass an outsider's text through an environment variable. A script that then wrote that variable to `GITHUB_ENV` or `GITHUB_PATH` got no finding: #232's workflow, `echo "PR_BODY=$BODY" >> "$GITHUB_ENV"` with `BODY` set from the pull request's body on `pull_request_target`, gave 0 findings and exit 0. The runner reads every line of `GITHUB_ENV` into every later step as a variable, and every line of `GITHUB_PATH` as a folder to search first, so a line break in that text can set `BASH_ENV` or `LD_PRELOAD`. zizmor's `github-env` and Octoscan's `dangerous-write` report this.

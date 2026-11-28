@@ -3451,3 +3451,34 @@ Slice 2d.25 (#411; D-153). Before it, `& $env:AGENT --dangerously-skip-permissio
 **What changed in response.** Where a value left out names the tool or holds a warned option, the script is read again with every reference put in, and whatever that reading finds is "cannot tell" (the reviewer's class fix: the reader, not a second list, says where a value may run). A step whose own text names the tool is never quieter than the base. The setters the third pass found are listed. The lanes' probe reads, for each command (`shell_env.RunContext`), a launcher as the command's program or the program's place, not an assignment, and an assignment's value is read as a command line, anchored. The `Environment` rule, which the fourth pass found took `$env:ENVIRONMENT` and prose for a setter, is the class and its methods again, `[type]` covering a name built from text. A name is set only by an assignment to it (PowerShell), or by `set` on an earlier line (cmd; any line with `goto` or `call :label`); the constructs that may set any name are listed in D-153. The lanes keep the launcher command that matched, read launchers in the step's own lines too, and search a line only where a one-word value was put in where something may run it. `runner_shells` reads the matrix. Every scan is linear. A test, `TheLiteralFormTest`, holds 51 pairs of commands written out and named through `env` to the same lane and the same OBAAF-GHA-026.
 
 **Stated, not fixed.** The lanes do not follow a value copied into a script's variable or the script's own assignments, nor PowerShell's syntax around a program (`& (x)`, `.Trim()`, `.exe`, a backslash path, curly double quotes, a splat), for a program written out as for one put in; OBAAF-GHA-026 reads them. A self-hosted runner or a group with no label that holds "windows", and a `runs-on` the checker cannot resolve, are read as Linux. `<# c #> & claude ...` on one line gives no OBAAF-GHA-026 (an older fault of the PowerShell reader). A matrix that excludes Windows is still read as pwsh too; a cmd block's `set` before a reference inside the same block counts though cmd reads the block at once. The lanes read an assignment's value as a command line, so a cmd `set TITLE=%BOT% review done` with `BOT: aider` (whose pattern needs only the name and a space) is an agent job where the same text written out is not (the fifth pass; in PowerShell the literal form is an agent job on the base too). False mediums found and kept, as bash's reader gives them: an argument that is a tool's name (`ollama pull $env:MODEL --insecure` with `MODEL: qwen`); and, as the same text written out gives on the base, a tool's name put into a PowerShell or cmd line the loose reader reads as a run (`echo Run %AGENT% ...> notes.txt`, `rem %AGENT% ...`, `$cfg = @{ model = $env:MODEL }`). Where a value is left out, the script is read again with values put in unquoted, so such lines are "cannot tell" there. The extra readings multiply the cost by up to four for each tool named.
+
+## 2d.27a: the lanes take the program a PowerShell or cmd command runs from OBAAF-GHA-026's reader
+
+Slice 2d.27a (split from #420; D-155). Before it, OBAAF-GHA-026 read `claude.exe ...`, `C:\tools\claude.exe ...`, curly quotes, cmd's `^claude`, `Start-Process -WorkingDirectory C:\w claude ...` and a name given the program's name, and the lanes did not: 17 of 21 probed forms got OBAAF-GHA-026 and no agent lane. One Opus 5.5 sub-agent that wrote none of it attacked each head, comparing `flagship` `67f84e5` (and, from the second pass, the first head) with it on the same workflows. PowerShell and cmd were not run: each case's meaning rests on Microsoft's documentation.
+
+| Pass | Head | Jobs | Blocking | Found |
+| --- | --- | --- | --- | --- |
+| 1 | `aee3816` | ~370 | 2 classes | the lanes inherited the reader's gaps. The reader did not enter wrappers and launchers (`cmd /d /s /c`, `cmd /e:on /c`, `pwsh -Command`, `powershell -c`, `iex '...'`, `start /d`, a repeated `if`). `Start-Process` dropped arguments (spaced commas, a continued list, `-Path`, `-PSPath`, `-A`). Not blocking: a word after `2>&1` was dropped, OBAAF-GHA-026's option too; `<# #>` cut the line; `;`, `&` and `\|` inside an argument stopped the pattern; the bash reader's `.exe` is not given to the lanes. New false lanes: here-strings, cmd brackets in text and `for` sets, an escaped `^&`, `rem ... &`, `:: ... &`, a variable in a command's place without `&` |
+| 2 | `c1f0ccf` | ~230 | 2 | the here-string masking hid real runs (`iex @"..."@`, `& ([scriptblock]::Create(@'...'@))`) and took `'@'`, `"@"` and `@"` in a comment for openers, losing every run after them. Joining after a trailing `,` or `\|` ran the next line into a comment, losing OBAAF-GHA-026's finding where the base had it. Not blocking: a cmd text bracket held a later `&`; `@(` was read as text; `^^&` |
+| 3 | `c25eb82` | ~45 | 1 | a comment after a trailing `\|` or `,` still took the joined line. Not blocking: the join was quadratic (17 s for 80,000 lines) |
+| 4 | `8812166` | ~25 | 0 | both fixed (0.93 s for 80,000 lines). Over about 730 steps with OBAAF-GHA-026 findings, two lose one, both right to: a run line inside a here-string, and `Write-Host a,` / `& ...`, which PowerShell refuses |
+
+**What changed in response.**
+- The lanes take the program from the reader, so every class of the first pass was fixed in the reader, for OBAAF-GHA-026 too.
+- What is a string or a value to the shell is kept out of the lanes only:
+  - a PowerShell quoted word with no `&` or `.`;
+  - a variable in a command's place without them;
+  - a cmd bracket in a command's text, up to the next `&`, `&&`, `||` or `|`;
+  - an operator after a caret.
+- The here-string masking was removed rather than mended: recognising a here-string needs the tokenizer, for both readers.
+- A carried line is joined where its code ends, with the pieces joined once.
+
+**Stated, not fixed.**
+- What the reader cannot name (groups, subexpressions, method results, splats, typed copies, loops, pipelines).
+- Forms the reader does not read: `for /f ('...')`, a call operator joined to its word, `-CommandWithArgs`, `iex ('...')`, `-EncodedCommand`, and cmd's `2> &1`.
+- Here-strings and multi-line strings, which are read as lines, and a quoted argument split at a line break.
+- A name given the program's name, which counts whatever is assigned later.
+- The bash reader's `.exe` and folder.
+
+All of these are in D-155 and #420.
+
