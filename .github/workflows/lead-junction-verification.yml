@@ -1,0 +1,70 @@
+name: Verify init aliases and patch export on Windows
+on:
+  push:
+    branches: [lead/verify-415-87be308]
+permissions:
+  contents: read
+jobs:
+  native-windows:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 87be308fc74c9531efdc6dada9196ef8867f0352
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Install the checker and run the Windows regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse 'HEAD^{tree}') -ne 'bf947bc9698380242c90c2cd4978cf9515bf980d') { throw 'Unexpected source tree' }
+          $scratch = Join-Path $env:RUNNER_TEMP 'obaaf-junction'
+          New-Item -Type Directory -Path $scratch | Out-Null
+          $env:TMPDIR = $scratch
+          $env:TEMP = $scratch
+          $env:TMP = $scratch
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+          if ($LASTEXITCODE -ne 0) { throw 'Installation failed' }
+          @'
+          import os, sys, tempfile, unittest
+          from pathlib import Path
+
+          root = Path(tempfile.gettempdir()).resolve()
+          assert root == Path(os.environ['TMPDIR']).resolve()
+          assert not any((p / '.git').exists() for p in (root, *root.parents))
+          assert os.name == 'nt'
+          # Compare relative targets using Git-style slashes and the platform spelling.
+          for spelling in ('nested/sample.yml', os.path.join('nested', 'sample.yml')):
+              with tempfile.TemporaryDirectory() as folder:
+                  base = Path(folder)
+                  link = base / 'alias.yml'
+                  os.symlink(spelling, link)
+                  target = base / 'nested' / 'sample.yml'
+                  target.parent.mkdir()
+                  target.write_text('example')
+                  print('target', repr(spelling), 'readlink', repr(os.readlink(link)), 'is_file', link.is_file(), 'resolved', link.resolve(strict=False), flush=True)
+          sys.path.insert(0, 'tests')
+          case = 'test_fix_patch.FixPatchTest.test_windows_refuses_reparse_before_creating_patch'
+          result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames([case, 'test_init.InitTests.test_a_link_that_only_inits_own_file_resolves_is_a_lookalike', 'test_init.InitTests.test_a_link_the_system_does_not_resolve_is_not_a_lookalike_once_set_up', 'test_init.InitTests.test_a_link_to_the_configuration_init_writes_is_not_a_lookalike', 'test_init.InitTests.test_alias_of_supported_config_is_accepted', 'test_init.InitTests.test_lookalikes_report_the_default_checker_error_without_writing']))
+          print('Unmodified PR head:', result.testsRun, 'tests;', len(result.failures), 'failed subtests;', len(result.errors), 'errors', flush=True)
+          assert result.testsRun == 6 and not result.errors and not result.skipped
+          # Exercise a candidate test-fixture spelling from a temporary copy, against the same installed product.
+          from importlib.util import module_from_spec, spec_from_file_location
+          with tempfile.TemporaryDirectory() as candidate_dir:
+              candidate = Path(candidate_dir) / 'candidate_init.py'
+              source = Path('tests/test_init.py').read_text(encoding='utf-8')
+              original = 'os.symlink(target, link)'
+              assert source.count(original) == 1
+              candidate.write_text(source.replace(original, 'os.symlink(os.path.normpath(target), link)'), encoding='utf-8')
+              spec = spec_from_file_location('candidate_init', candidate)
+              module = module_from_spec(spec)
+              spec.loader.exec_module(module)
+              suite = unittest.TestSuite([module.InitTests('test_a_link_that_only_inits_own_file_resolves_is_a_lookalike')])
+              changed = unittest.TextTestRunner(verbosity=2).run(suite)
+              assert changed.testsRun == 1 and changed.wasSuccessful() and not changed.skipped
+          sys.exit(0 if result.wasSuccessful() else 1)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Native junction verification failed or skipped' }
