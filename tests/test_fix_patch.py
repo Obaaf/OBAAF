@@ -4,6 +4,7 @@ import os
 from datetime import date, timedelta
 import subprocess
 import unittest
+from unittest import mock
 
 from helpers import TempDir, run_cli
 
@@ -13,6 +14,19 @@ class FixPatchTest(unittest.TestCase):
         tmp = TempDir()
         outside = tmp.__enter__()
         self.addCleanup(tmp.__exit__)
+        # Keep developer Git settings out of the fixture. Individual tests can still
+        # supply their own configuration or attributes and exercise the public CLI.
+        environment = mock.patch.dict(os.environ, {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": str(outside / "empty.gitconfig"),
+            "GIT_CONFIG_COUNT": "0",
+            "GIT_ATTR_NOSYSTEM": "1",
+            "XDG_CONFIG_HOME": str(outside / "xdg"),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+        os.environ.pop("GIT_CONFIG", None)
         self.root = outside / "source"
         self.patch = outside / "review.patch"
         flows = self.root / ".github/workflows"
@@ -53,7 +67,7 @@ class FixPatchTest(unittest.TestCase):
                     self.git("apply", str(self.patch))
                     expected = before.replace(b"- rule:", b'- owner: "@team"' + ending + b"    rule:")
                     self.assertEqual(self.config.read_bytes(), expected)
-                    self.patch.unlink()
+                self.patch.unlink(missing_ok=True)
 
     def test_generated_gate_patch_uses_the_proven_workflow(self):
         from importlib.resources import files
@@ -164,7 +178,6 @@ class FixPatchReviewTest(unittest.TestCase):
 
     def test_a_failed_write_leaves_no_patch_and_a_retry_succeeds(self):
         import errno
-        from unittest import mock
 
         self.config.write_bytes(self.policy(b"\n", True))
         self.git("add", ".")
@@ -190,7 +203,6 @@ class FixPatchReviewTest(unittest.TestCase):
     def test_below_the_top_git_must_answer(self):
         # Second review: with no git program, or a repository Git refuses (another user's), the
         # check took the folder to be outside a work tree and saved the patch.
-        from unittest import mock
         from obaaf.fix_proof import ProofError
 
         inner, config = self.inner_root()
@@ -203,7 +215,6 @@ class FixPatchReviewTest(unittest.TestCase):
                 self.assertFalse(self.patch.exists())
 
     def test_git_location_variables_are_refused(self):
-        from unittest import mock
 
         self.config.write_bytes(self.policy(b"\n", True))
         self.git("add", ".")
@@ -225,7 +236,6 @@ class FixPatchReviewTest(unittest.TestCase):
         # Third review: a config file named in the environment, or included from one, set attributes
         # that the check, which ran Git without them, never saw. (Git reads core.worktree only from the
         # repository's own configuration, so in the environment it moves nothing.)
-        from unittest import mock
 
         self.config.write_bytes(self.policy(b"\n", True))
         self.git("add", ".")
