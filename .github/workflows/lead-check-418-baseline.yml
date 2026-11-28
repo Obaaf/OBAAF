@@ -1,33 +1,42 @@
-name: Exercise the walkthrough's Windows junction test
+name: Verify the portable patch on current flagship
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
 permissions:
   contents: read
 jobs:
-  junction:
+  windows-patch:
     runs-on: windows-latest
     timeout-minutes: 10
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-          ref: e49616ec3b1abe58e73273c852f2073e3dcb9f30
+          ref: 155a0020bfd8ce1c0580692887c0fb393f7c2cbd
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.13'
-      - name: Reproduce the integrated tree and exercise its native junction boundary
+      - name: Check the merge and inherited line-ending settings
+        shell: bash
         run: |
+          export TMPDIR="$RUNNER_TEMP" TMP="$RUNNER_TEMP" TEMP="$RUNNER_TEMP" PYTHONPATH=tests PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.autocrlf GIT_CONFIG_VALUE_0=true
+          case_name=test_fix_patch.FixPatchReviewTest.test_outside_a_work_tree_the_patch_is_written
+          if python -m unittest "$case_name" > "$TMPDIR/before.log" 2>&1; then exit 1; fi
+          grep -F "AssertionError: b'b\r\n' != b'b\n'" "$TMPDIR/before.log"
+          unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
           git config user.name 'Sean Keluo-Udeke'
           git config user.email '55066947+seanudeke@users.noreply.github.com'
-          git merge --no-ff --no-commit 155a0020bfd8ce1c0580692887c0fb393f7c2cbd
-          test "$(git write-tree)" = 463a7c65a5af741e4ce20f5673113cca803a8640
-          export TMPDIR="$RUNNER_TEMP" TMP="$RUNNER_TEMP" TEMP="$RUNNER_TEMP" PYTHONDONTWRITEBYTECODE=1
-          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
-          cd tests
-          python -m unittest -v test_fix_patch.FixPatchTest.test_windows_refuses_reparse_before_creating_patch
+          pr_head=c79b863d219d53e2c65f216d80c2e3b043781c86
+          git merge --no-ff --no-commit "$pr_head"
+          test "$(git diff --cached --name-only HEAD)" = tests/test_fix_patch.py
+          test "$(git rev-parse :tests/test_fix_patch.py)" = "$(git rev-parse "$pr_head:tests/test_fix_patch.py")"
+          git write-tree
+          for setting in true false input; do
+            echo "Checking inherited core.autocrlf=$setting"
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.autocrlf GIT_CONFIG_VALUE_0="$setting" python -m unittest -v "$case_name"
+          done
+          python -m unittest -v test_fix_patch
