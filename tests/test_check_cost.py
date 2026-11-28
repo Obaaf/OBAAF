@@ -195,7 +195,8 @@ def _workflow(steps):
 # PowerShell and cmd, a value put in from `env`, github-script, a `${{ env }}` expression, an input that is a
 # command, and a matrix over Windows and Linux. Several steps name more than one tool, so that a tool read after
 # another reads what the first was given (the review's mutants of the shared tuple fail on them); job `b` names
-# codex only through `$A$B`, with no `codex` in any `env`.
+# codex only through `$A$B`, with no `codex` in any `env`; job `c` names no tool after claude but runs a value the
+# checker cannot read, so a name an earlier tool's reading added to the shared texts would show there.
 NAMING = """on: pull_request
 permissions: {}
 env:
@@ -253,6 +254,12 @@ jobs:
         env:
           A: cod
           B: ex
+  c:
+    runs-on: ubuntu-latest
+    steps:
+      - run: claude -p x; $UNKNOWN --yolo
+        env:
+          UNKNOWN: ${{ github.event.pull_request.title }}
 """
 
 
