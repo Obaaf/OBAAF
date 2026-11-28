@@ -407,7 +407,9 @@ def run(args) -> int:
         for note in notes:
             print(one_line(note))
         missing = {}
-        lookalike = checker.config_lookalike_error(root)
+        # The files init would write count, so a link they would resolve is found now, as the first
+        # check would find it (review of #415).
+        lookalike = checker.config_lookalike_error(root, tuple(proposal))
         conflict = lookalike is not None
         if lookalike:
             print(f"Conflict: {one_line(lookalike)}")
