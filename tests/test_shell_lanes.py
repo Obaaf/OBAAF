@@ -51,6 +51,24 @@ AGENT_FORMS = [
     ("cmd-set-then-run", "cmd", "set BIN=claude\n%BIN% " + F + " -p x", {}),
     ("cmd-quoted-set-then-call", "cmd", "set \"BIN=claude.exe\"\ncall %BIN% " + F + " -p x", {}),
     ("cmd-exe-from-env", "cmd", "%AGENT%.exe " + F + " -p x", {"AGENT": "claude"}),
+    # From the review: wrappers and launchers the reader did not enter, the arguments `Start-Process` was not given,
+    # a redirection that holds its target, an inline comment, and a separator inside one argument.
+    ("cmd-options-before-c", "cmd", "cmd /d /s /c \"claude.exe " + F + " -p x\"", {}),
+    ("pwsh-cmd-e-on", "pwsh", "cmd /e:on /c claude.exe " + F + " -p x", {}),
+    ("pwsh-pwsh-command", "pwsh", "pwsh -NoProfile -ExecutionPolicy Bypass -Command \"claude.exe " + F + " -p x\"", {}),
+    ("cmd-powershell-c", "cmd", "powershell -c \"& C:\\t\\claude.exe " + F + " -p x\"", {}),
+    ("pwsh-iex-literal", "pwsh", "iex 'claude.exe " + F + " -p x'", {}),
+    ("cmd-start-d", "cmd", "start /d C:\\w claude.exe " + F + " -p x", {}),
+    ("cmd-if-if", "cmd", "if a==a if b==b claude.exe " + F + " -p x", {}),
+    ("pwsh-start-process-spaced-commas", "pwsh", "Start-Process claude.exe -ArgumentList '" + F + "' , '-p' , 'x'", {}),
+    ("pwsh-start-process-trailing-comma", "pwsh", "Start-Process claude.exe -ArgumentList '" + F + "',\n  '-p','x'", {}),
+    ("pwsh-start-process-path-alias", "pwsh", "Start-Process -Path claude.exe -ArgumentList '" + F + " -p x'", {}),
+    ("pwsh-start-process-short-names", "pwsh", "Start-Process -F claude.exe -A '" + F + " -p x'", {}),
+    ("pwsh-redirection-with-its-target", "pwsh", "claude.exe " + F + " 2>&1 -p x", {}),
+    ("cmd-redirection-with-its-target", "cmd", "claude.exe " + F + " >nul 2>&1 -p x", {}),
+    ("pwsh-inline-comment", "pwsh", "claude.exe " + F + " <# note #> -p x", {}),
+    ("pwsh-separator-in-an-argument", "pwsh",
+     "claude.exe " + F + " --allowedTools \"Bash(npm test)|Read\" --append-system-prompt \"a; b\" -p x", {}),
 ]
 
 # (name, family, script, env): in no agent lane, with no agent finding.
@@ -67,6 +85,15 @@ ORDINARY_FORMS = [
     ("cmd-other-variable", "cmd", "set BIN=claude\n%OTHER% -p x", {}),
     ("cmd-other-exe", "cmd", "notepad.exe -p x", {}),
     ("cmd-remark", "cmd", "rem claude.exe -p x", {}),
+    # From the review: text the base kept out of the lanes that the first head put in.
+    ("pwsh-here-string", "pwsh", "$body = @\"\n  claude.exe -p \"review this PR\"\n\"@\ngh pr comment 1 --body $body", {}),
+    ("pwsh-single-here-string", "pwsh", "Write-Host @'\nC:\\tools\\claude.exe --print x\n'@", {}),
+    ("cmd-echo-bracket", "cmd", "echo Run (claude.exe -p \"review\") locally", {}),
+    ("cmd-for-set", "cmd", "for %%a in (claude.exe -p x) do echo %%a", {}),
+    ("cmd-escaped-ampersand", "cmd", "echo a ^& claude.exe -p x", {}),
+    ("cmd-remark-and-ampersand", "cmd", "rem see docs & claude.exe -p x", {}),
+    ("cmd-label-and-ampersand", "cmd", ":: usage & claude.exe -p x", {}),
+    ("pwsh-alias-as-a-value", "pwsh", "$x = $env:TOOL; $y = $x + ' -p x'", {"TOOL": "claude"}),
 ]
 
 AGENT_RULES = ("OBAAF-GHA-003", "OBAAF-GHA-005", "OBAAF-GHA-020", "OBAAF-GHA-025", "OBAAF-GHA-026")
@@ -141,8 +168,17 @@ def generated(rng, count: int) -> list:
             if " " in program and not quote:
                 quote = "'"
             written = (quote[0] + program + quote[-1]) if quote else program
-            form = rng.randrange(4)
-            if form == 0:
+            form = rng.randrange(6)
+            if form == 4:
+                inner = (("& " + written) if quote else program) + " " + args.replace("'", "")
+                run = rng.choice([f'pwsh -NoProfile -Command "{inner}"', f'cmd /d /s /c "{inner}"',
+                                  f"iex '{inner}'" if "'" not in inner else f'iex "{inner}"'])
+                if run.startswith("cmd") and quote:
+                    run = f'cmd /d /s /c "{program} {args.replace(chr(39), "")}"'
+            elif form == 5:
+                run = (f"Start-Process -WorkingDirectory C:\\w {written} -ArgumentList "
+                       + " , ".join(f"'{a}'" for a in args.replace("'", "").split()) + " 2>&1")
+            elif form == 0:
                 run = rng.choice(["& ", ". ", "$out = & ", ""]) + (written if quote else program) + " " + args
                 if quote and run.startswith(written):
                     run = "& " + run
@@ -157,8 +193,13 @@ def generated(rng, count: int) -> list:
         else:
             if " " in program:
                 program = '"' + program + '"'
-            form = rng.randrange(4)
-            if form == 0:
+            form = rng.randrange(6)
+            if form == 4:
+                run = rng.choice(["cmd /d /s /c ", "cmd /e:on /c ", "if a==a if 1==1 ", "start /d C:\\w "]) + (
+                    program + " " + args.replace("'", ""))
+            elif form == 5:
+                run = program + " " + args.replace("'", "").replace(" -p", " 2>&1 -p").replace(" --print", " >nul --print")
+            elif form == 0:
                 run = rng.choice(["", "@", "call "]) + program + " " + args.replace("'", "")
             elif form == 1:
                 run = "^" + program + " " + args.replace("'", "")
@@ -176,7 +217,7 @@ class TheReadersAgreeTest(unittest.TestCase):
     flag), the job is an agent job."""
 
     def test_generated_commands(self):
-        cases = generated(random.Random(20261128), 160)
+        cases = generated(random.Random(20261128), 240)
         lanes, gha026, _rules, errors = results(cases)
         self.assertEqual(errors, [])
         named = 0
@@ -186,7 +227,7 @@ class TheReadersAgreeTest(unittest.TestCase):
                 with self.subTest(job=name, run=run):
                     self.assertEqual(lanes.get(name), "agent")
         # The generator is not idle: most of its commands are ones the reader names.
-        self.assertGreater(named, 120)
+        self.assertGreater(named, 180)
 
 
 class TheProgramLinesTest(unittest.TestCase):
@@ -203,14 +244,25 @@ class TheProgramLinesTest(unittest.TestCase):
         self.assertEqual(agent_code.program_lines("claude -p x", "bash", programs, packages), [])
 
     def test_linear(self):
+        # Four times the script costs at most about four times as much (a ratio, not a fixed bound, so that a small
+        # quadratic term is seen), for each shape the review timed.
         programs, packages = _agent_program_names()
-        for n in (2000, 8000):
-            script = "\n".join(["$a = 'claude'", *(f"& $a -p x{i}" for i in range(n))])
-            started = time.monotonic()
-            lines = agent_code.program_lines(script, "pwsh", programs, packages)
-            took = time.monotonic() - started
-            self.assertEqual(len(lines), n)
-            self.assertLess(took, 3.0, n)
+        shapes = {
+            "pwsh-aliases": ("pwsh", lambda n: "\n".join(["$a = 'claude'", *(f"& $a -p x{i}" for i in range(n))])),
+            "pwsh-here-strings": ("pwsh", lambda n: "\n".join(f"$b{i} = @\"\nclaude -p {i}\n\"@" for i in range(n))),
+            "pwsh-unclosed-here-strings": ("pwsh", lambda n: "\n".join("@'" for _ in range(n)) + "\nclaude -p x"),
+            "cmd-sets": ("cmd", lambda n: "\n".join([*(f"set B{i}=claude" for i in range(n)), "%B1% -p x"])),
+            "cmd-brackets": ("cmd", lambda n: "echo " + "(" * n + " claude -p x"),
+        }
+        for name, (family, make) in shapes.items():
+            with self.subTest(shape=name):
+                took = []
+                for n in (1500, 6000):
+                    script = make(n)
+                    started = time.monotonic()
+                    agent_code.program_lines(script, family, programs, packages)
+                    took.append(time.monotonic() - started)
+                self.assertLess(took[1], 8 * max(took[0], 0.01), took)
 
 
 if __name__ == "__main__":

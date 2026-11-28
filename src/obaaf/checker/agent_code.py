@@ -2155,6 +2155,14 @@ def _ps_words(line: str, family: str) -> list:
             out.append((op, "op"))
             i += len(op)
             continue
+        if ps and line.startswith("<#", i):
+            # A comment block, `<# ... #>`, ends at its `#>`; one that does not end on the line ends it (2d.27a, from
+            # its review: `claude <# note #> -p x` was cut at the `#`).
+            close = line.find("#>", i + 2)
+            if close < 0:
+                break
+            i = close + 2
+            continue
         if ps and c == "#" and (i == 0 or line[i - 1].isspace()):
             break
         if ps and (c == "(" or line.startswith(("@(", "$(", "@{"), i)):
@@ -2227,9 +2235,13 @@ def _ps_words(line: str, family: str) -> list:
 
 
 def _logical_lines(text: str, family: str) -> list:
-    """Lines with their continuations joined: a backtick at the end in PowerShell, a caret in cmd."""
+    """Lines with their continuations joined: a backtick at the end in PowerShell, a caret in cmd; and in PowerShell a
+    line that ends with a `,` or a `|`, which PowerShell continues on the next (2d.27a, from its review)."""
     mark = "`" if family == "pwsh" else "^"
-    return re.sub(re.escape(mark) + r"[ \t]*\r?\n", " ", text).split("\n")
+    text = re.sub(re.escape(mark) + r"[ \t]*\r?\n", " ", text)
+    if family == "pwsh":
+        text = re.sub(r"([,|])[ \t]*\r?\n", r"\1 ", text)
+    return text.split("\n")
 
 
 def _shell_words(raw: str, kind: str, family: str) -> af.Word:
@@ -2289,12 +2301,27 @@ def read_shell_lines(text: str, ctx: af._Context, family: str) -> None:
     # slice 2d.23, #388): the caller's `ctx.mentioned` was `True` wherever the name's letters stood in any word,
     # so `'acne'` and a bracket left open at a line's end (`$x = (`) were "cannot tell" for Continue's `cn`.
     mentioned = ctx.mentioned or af.names(text, ctx.programs, ctx.packages)
+    runs = ctx.runs
     for line in lines:
+        if family == "cmd" and re.match(r"\s*@?\s*(?::|rem(?:$|[\s.:/\\]))", line, re.I):
+            # A label (`:name`, `::`) or a `rem` line runs nothing, `&` and what follows included (2d.27a, from its
+            # review).
+            continue
         words = _ps_words(line, family)
         segment: list = []
+        # In cmd, a bracket inside a command (`echo (claude ...)`, `for %%a in (...)`) is text, not a block; only one
+        # where a command starts or after `if`'s condition opens a block. What such a bracket holds is still read, as
+        # before, but not given to the lanes (`ctx.runs`; 2d.27a, from its review).
+        literal = 0
         for w in words + [(";", "op")]:
             if w[1] == "op":
                 _shell_command(segment, ctx, family, aliases, mentioned, maybe)
+                if family == "cmd" and w[0] == "(" and (literal or segment and segment[0][0].lstrip("@").lower() != "if"):
+                    literal += 1
+                    ctx.runs = None
+                elif family == "cmd" and w[0] == ")" and literal:
+                    literal -= 1
+                    ctx.runs = runs if not literal else None
                 segment = []
             elif family == "cmd" and w[1] == "plain" and w[0].lower() in ("do", "else"):
                 if segment:
@@ -2302,6 +2329,49 @@ def read_shell_lines(text: str, ctx: af._Context, family: str) -> None:
                 segment = []
             else:
                 segment.append(w)
+        ctx.runs = runs
+
+
+# PowerShell's own programs, and the options they take a value with, before `-Command` (2d.27a).
+_PS_PROGRAMS = frozenset({"pwsh", "pwsh.exe", "powershell", "powershell.exe"})
+_PS_VALUE_OPTIONS = ("-executionpolicy", "-ep", "-ex", "-windowstyle", "-w", "-workingdirectory", "-wd",
+                     "-configurationname", "-custompipename", "-settingsfile", "-inputformat", "-outputformat",
+                     "-version", "-psconsolefile")
+_PS_EXPRESSIONS = frozenset({"iex", "invoke-expression"})
+
+
+def _cmd_command_at(words: list, j: int) -> int | None:
+    """Where the command line of `cmd [options] /c ...` or `/k` begins, after any number of options (`/d /s /c`,
+    `/e:on /c`, `/s/c`; GitHub's own `shell: cmd` runs `cmd /D /E:ON /V:OFF /S /C`); None when no `/c` or `/k` comes
+    before a word that is not an option (2d.27a, from its review)."""
+    while j < len(words) and words[j][1] == "plain" and words[j][0].startswith("/"):
+        if re.search(r"/[ck]$", words[j][0], re.I):
+            return j + 1 if j + 1 < len(words) else None
+        j += 1
+    return None
+
+
+def _ps_command_at(words: list, i: int) -> int | None:
+    """Where the command PowerShell is given begins: after `pwsh` or `powershell` and their options up to `-Command`
+    (any start of it, `-c`), or after `iex` or `Invoke-Expression` given one string; None for anything else, a
+    `-File` among the options included (a script file, which is not read)."""
+    low = words[i][0].lower()
+    if low in _PS_EXPRESSIONS:
+        rest = words[i + 1:]
+        if len(rest) == 1 and rest[0][1] in ("single", "double") and not re.search(r"\$[\w{(]", rest[0][0]):
+            return i + 1
+        return None
+    if af._base(words[i][0]) not in ("pwsh", "powershell") and low not in _PS_PROGRAMS:
+        return None
+    j = i + 1
+    while j < len(words) and words[j][1] == "plain" and words[j][0].startswith("-"):
+        option = words[j][0].lower()
+        if "-command".startswith(option) and len(option) > 1:
+            return j + 1 if j + 1 < len(words) else None
+        if "-file".startswith(option) and len(option) > 2 or option == "-f":
+            return None
+        j += 2 if any(o.startswith(option) and len(option) > 2 or o == option for o in _PS_VALUE_OPTIONS) else 1
+    return None
 
 
 def _used_names(raw: str, ps: bool) -> set:
@@ -2319,8 +2389,9 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: dict, me
         i = 2                               # `$out = claude -p x`
     while i < len(words) and words[i][1] == "plain" and words[i][0].lower() in (("&", ".") if ps else ("@", "call")):
         i += 1
-    if not ps and i < len(words) and words[i][0].lower() == "if":
-        # `if [not] [/i] (exist X | defined X | errorlevel N | A==B | A op B) command`
+    while not ps and i < len(words) and words[i][0].lower() == "if":
+        # `if [not] [/i] (exist X | defined X | errorlevel N | A==B | A op B) command`, any number of times
+        # (`if a==a if b==b claude ...`; flagship slice 2d.27a, from its review)
         i += 1
         while i < len(words) and words[i][0].lower() in ("not", "/i"):
             i += 1
@@ -2335,15 +2406,16 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: dict, me
     if i < len(words) and words[i][1] == "plain":
         low = words[i][0].lower()
         if not ps and low == "start":
-            # `start [/wait] ["title"] program ...`
+            # `start [/wait] ["title"] program ...`; `/d`, `/node` and `/affinity` take the next word as their value
+            # when it is not joined to them (`start /d C:\w claude ...`; 2d.27a, from its review).
             i += 1
             while i < len(words) and (words[i][0].startswith("/") or words[i][1] in ("double", "single") and (
                     i + 1 < len(words))):
                 if words[i][1] in ("double", "single") and af._base(words[i][0]) in ctx.programs:
                     break
-                i += 1
-        elif low in ("cmd", "cmd.exe") and i + 1 < len(words) and words[i + 1][0].lower() in ("/c", "/k", "/s/c"):
-            rest = words[i + 2:]
+                i += 2 if words[i][0].lower() in ("/d", "/node", "/affinity") else 1
+        elif low in ("cmd", "cmd.exe") and _cmd_command_at(words, i + 1) is not None:
+            rest = words[_cmd_command_at(words, i + 1):]
             if ctx.depth > af._MAX_DEPTH:
                 ctx.cannot_tell("nesting deeper than the checker reads: " + af._fact_text(" ".join(w[0] for w in rest)))
                 return
@@ -2356,6 +2428,24 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: dict, me
             finally:
                 ctx.depth -= 1
             return
+        elif _ps_command_at(words, i) is not None:
+            # `pwsh -NoProfile -Command "claude ..."`, `powershell -c ...`, and PowerShell's `iex 'claude ...'` or
+            # `Invoke-Expression "claude ..."` given the command line as one string: read as PowerShell, in the same
+            # reading (2d.27a, from its review: the lanes and this reader did not enter them).
+            rest = words[_ps_command_at(words, i):]
+            if ctx.depth > af._MAX_DEPTH:
+                ctx.cannot_tell("nesting deeper than the checker reads: " + af._fact_text(" ".join(w[0] for w in rest)))
+                return
+            ctx.depth += 1
+            try:
+                if len(rest) == 1 and rest[0][1] in ("double", "single"):
+                    read_shell_lines(rest[0][0], ctx, "pwsh")
+                elif rest and all(k != "group" for _w, k in rest):
+                    _shell_command(rest, ctx, "pwsh", aliases, mentioned, maybe)
+            finally:
+                ctx.depth -= 1
+            if not ps or low not in _PS_EXPRESSIONS:
+                return
         elif low in ("bash", "sh") and i + 2 < len(words) and words[i + 1][0] == "-c":
             # The script's own `mentioned`, not `True` (2d.23): `bash -c '$X --y'` is "cannot tell" only in a
             # script that names the tool; bash's own readers still test a command word and `IFS=` for the letters.
@@ -2383,7 +2473,10 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: dict, me
         runs = None
     if ps and kind == "plain" and raw.startswith("$") and raw[1:].lower() in aliases:
         program = True
-        runs = runs or aliases[raw[1:].lower()]
+        # A variable PowerShell calls only after `&` or `.` (`& $exe ...`); in a command's place without them it is a
+        # value (`$y = $x + ' -p x'`), which the lanes are not given (2d.27a, from its review).
+        if i > 0 and words[i - 1][0] in ("&", "."):
+            runs = runs or aliases[raw[1:].lower()]
     if not ps and kind == "plain" and re.fullmatch(r"%(\w+)%|!(\w+)!", raw):
         var = re.fullmatch(r"%(\w+)%|!(\w+)!", raw)
         if (var.group(1) or var.group(2)).lower() in aliases:
@@ -2414,7 +2507,9 @@ def _shell_command(words: list, ctx: af._Context, family: str, aliases: dict, me
             skip = False
             continue
         if kind2 == "redirect":
-            skip = True
+            # The next word is the target, unless the redirection holds it (`2>&1`, `*>&1`, `3>&1`; 2d.27a, from its
+            # review: the word after `2>&1` was dropped, an option with it).
+            skip = not re.search(r"&[0-9]$", raw2)
             continue
         if ps and raw2 == "--%" and kind2 == "plain":
             stop_parsing = True             # the rest as written, with `%VAR%` put in as cmd does
@@ -2453,18 +2548,25 @@ def _start_process(rest: list, ctx: af._Context, mentioned: bool) -> None:
             j += 1
             continue
         if kind == "plain" and low.startswith("-") and j + 1 < len(rest):
-            if "-filepath".startswith(low) and len(low) > 1:
+            # `-Path` and `-PSPath` are `-FilePath`'s aliases, and `-A` is the only start of a parameter's name that is
+            # `-ArgumentList`'s alone (2d.27a, from its review).
+            if "-filepath".startswith(low) and len(low) > 1 or low in ("-path", "-pspath"):
                 file_path = rest[j + 1]
                 j += 2
                 continue
-            if low in ("-argumentlist", "-args", "-arguments") or "-argumentlist".startswith(low) and len(low) > 2:
-                # A list written with commas (`-ArgumentList '-p', $p`) runs over several words.
+            if low in ("-argumentlist", "-args", "-arguments") or "-argumentlist".startswith(low) and len(low) > 1:
+                # A list written with commas (`-ArgumentList '-p', $p`, `'-p' , 'x'`) runs over several words, a comma
+                # standing alone or at either end of one.
                 items = [rest[j + 1]]
                 j += 2
-                while items[-1][0].endswith(",") and j < len(rest):
-                    items.append(rest[j])
+                while j < len(rest) and (items[-1][0].endswith(",") or rest[j][0].startswith(",")):
+                    if rest[j][0] != ",":
+                        items.append((rest[j][0].lstrip(","), rest[j][1]) if rest[j][1] == "plain" else rest[j])
+                    elif j + 1 < len(rest):
+                        items.append(rest[j + 1])
+                        j += 1
                     j += 1
-                arguments = items
+                arguments = [item for item in items if item[0] not in ("", ",")]
                 continue
             j += 2
             continue
@@ -2499,8 +2601,10 @@ def _ran(ctx: af._Context, program: str | None, args: list) -> None:
     """Note, for `program_lines`, the command line a command runs where the reader has named its program: the
     program's name, then each argument as the shell gives it (a word the checker cannot read as it was written)."""
     if program is not None and ctx.runs is not None:
-        ctx.runs.append(" ".join([program] + [w.shown if "\x00" in w.text or "\x03" in w.text else w.text
-                                              for w in args if not w.redirect]))
+        # A `;`, `&`, `|` or line break inside one argument (`--allowedTools "Bash(npm test)|Read"`) is that argument's
+        # text, not a separator: it is written `_` here, so that the agent patterns read past it (2d.27a, its review).
+        words = [w.shown if "\x00" in w.text or "\x03" in w.text else w.text for w in args if not w.redirect]
+        ctx.runs.append(" ".join([program] + [re.sub(r"[;&|\r\n]", "_", w) for w in words]))
 
 
 def cmd_carets_out(text: str) -> str:
@@ -2524,12 +2628,38 @@ def program_lines(text: str, family: str, programs: list, packages: list) -> lis
     programs = [p.casefold() for p in programs]
     packages = [p.casefold() for p in packages]
     if family == "cmd":
-        text = cmd_carets_out(text)
+        # A caret before an operator makes it text (`echo a ^& claude ...` echoes), so the operator is kept out of
+        # the reading; every other caret is taken out (2d.27a, from its review).
+        text = re.sub(r"\^[ \t]*\r?\n", " ", text)
+        text = re.sub(r"\^[&|<>()]", "\ue000", text).replace("^", "")
+    else:
+        text = _here_strings_out(text)
     if not af.appears(text, programs, packages):
         return []
     ctx = af._Context(programs, packages, [], {}, False, set(), af.Reading(), loose=True, runs=[])
     read_shell_lines(text, ctx, family)
     return ctx.runs
+
+
+_HERE_DOUBLE_END = re.compile("\n[\"\u201c\u201d]@")
+_HERE_SINGLE_END = re.compile("\n['\u2018\u2019]@")
+
+
+def _here_strings_out(text: str) -> str:
+    """A PowerShell script with each here-string's lines (`@"` or `@'` at a line's end, to `"@` or `'@` at a line's
+    start) left out, an empty string in their place: they are a value, not commands (2d.27a, from its review). One
+    that does not end runs to the end of the text. Linear: each search starts where the last ended."""
+    out: list = []
+    at = 0
+    for m in re.finditer(r"@([\"'\u201c\u201d\u2018\u2019])[ \t]*\r?\n", text):
+        if m.start() < at:
+            continue
+        closer = (_HERE_DOUBLE_END if m.group(1) in '"\u201c\u201d' else _HERE_SINGLE_END).search(text, m.end() - 1)
+        end = closer.end() if closer else len(text)
+        out.append(text[at:m.start()] + "''")
+        at = end
+    out.append(text[at:])
+    return "".join(out)
 
 
 def _read_shell_args(args: list, ctx: af._Context, family: str, words: list) -> None:
