@@ -16,7 +16,7 @@ jobs:
           persist-credentials: false
       - name: Check the three-file guide and locate conflicts with the adoption build
         env:
-          CORE_HEAD: b27fee9a07c7d5f6525c026fb510980972d55e20
+          CORE_HEAD: 87c943b89b7bac3470dd19cb58fce8c83fad0c4a
           GUIDE_HEAD: 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
           ADOPTION_HEAD: e49616ec3b1abe58e73273c852f2073e3dcb9f30
         run: |
@@ -62,7 +62,7 @@ jobs:
       - name: Rehearse the catalogue resolution in the runner checkout
         run: |
           export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
-          git checkout -q --detach b27fee9a07c7d5f6525c026fb510980972d55e20
+          git checkout -q --detach 87c943b89b7bac3470dd19cb58fce8c83fad0c4a
           git merge --no-ff -m 'Temporary guide integration' 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
           if git merge --no-ff --no-commit e49616ec3b1abe58e73273c852f2073e3dcb9f30; then exit 1; fi
           python - <<'PY'
