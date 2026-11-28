@@ -139,12 +139,23 @@ def _copied_script_targets(run_text: str, root: Path) -> list[str]:
     Only a word that ends in `.sh` or `.bash` is ever a target, and the lexer makes each word of a line's
     characters, with quotes and backslashes taken out and a comment dropped. So where the text with every
     quote and backslash taken out holds neither `.sh` nor `.bash`, there is no target, and the lexer, most
-    of what a check of many local actions spent here, is not run (flagship slice 2d.28, #227).
+    of what a check of many local actions spent here, is not run (flagship slice 2d.28, #227). Not where the
+    text holds a NUL byte or a character a path cannot be encoded with: resolving a `cp` argument made of it
+    raises, as it did before the slice (#429).
     """
     bare = _QUOTES_AND_BACKSLASHES_RE.sub("", run_text)
-    if ".sh" not in bare and ".bash" not in bare:
+    if ".sh" not in bare and ".bash" not in bare and "\0" not in run_text and _path_encodable(run_text):
         return []
     return _lexed_script_targets(run_text, root)
+
+
+def _path_encodable(text: str) -> bool:
+    """Whether every character of `text` can be in a path the file system is asked about (`os.fsencode`)."""
+    try:
+        os.fsencode(text)
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _lexed_script_targets(run_text: str, root: Path) -> list[str]:
@@ -172,9 +183,7 @@ def _lexed_script_targets(run_text: str, root: Path) -> list[str]:
                 path = path.resolve()
                 if root in path.parents and path.exists():
                     return path
-            except (OSError, RuntimeError, ValueError):
-                # ValueError: a NUL byte or a lone surrogate in the name, which no file has (flagship slice
-                # 2d.28, from its review: it ended the check in a traceback).
+            except (OSError, RuntimeError):
                 continue
         return None
 
@@ -252,7 +261,7 @@ def _script_with_agent(root: Path, run: str, commands: list, memo: dict | None =
                 continue
             with path.open(encoding="utf-8", errors="replace") as script:
                 text = script.read(200_000)
-        except (OSError, RuntimeError, ValueError):      # ValueError: see `_lexed_script_targets`
+        except (OSError, RuntimeError):
             continue
         found = wf_mod.matches_any(commands, text)
         if memo is not None:
@@ -1911,7 +1920,7 @@ def _action_folder_script(root: Path, folder: str, run: str, workdir, commands: 
             continue
         try:
             path = (root / where).resolve()
-        except (OSError, RuntimeError, ValueError):      # ValueError: see `_lexed_script_targets`
+        except (OSError, RuntimeError):
             continue
         if root_r not in path.parents:
             continue

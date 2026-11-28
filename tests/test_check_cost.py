@@ -13,9 +13,9 @@ lexer's targets with and without the test that skips it, on seeded random lines;
 command lines shared by the tools and worked out again for each, on steps that name tools; and a count that it
 works them out once per step. The seeds are fixed, so CI runs the same cases every time.
 
-One result changes, found by the slice's review: a script that names a path with a NUL byte or a lone surrogate
-(`cp a\0b dest`, `bash ./a\0b.sh`) ended the check in a traceback. Such a path names no file, and is now read
-as one that does not exist.
+A script that names a path with a NUL byte or a lone surrogate (`cp a\0b dest`, `bash ./a\0b.sh`) still ends
+the check in a traceback, as before the slice: its review found that reading such a path as no file is narrower
+than bash, which drops a NUL after a script's first line (#429).
 """
 
 import random
@@ -61,28 +61,24 @@ class TheLexerShortCutTest(unittest.TestCase):
                 text = "".join(rng.choice(PIECES) + rng.choice(["", " ", " ", "\n"])
                                for _ in range(rng.randint(1, 14)))
                 with self.subTest(text=text):
-                    self.assertEqual(_copied_script_targets(text, root), _lexed_script_targets(text, root))
+                    self.assertEqual(outcome(_copied_script_targets, text, root),
+                                     outcome(_lexed_script_targets, text, root))
                     bare = re.sub(r"[\"'\\]", "", text)
                     skipped += ".sh" not in bare and ".bash" not in bare
             # The test is worth something only if both sides of the short cut are taken often.
             self.assertGreater(skipped, 400)
             self.assertLess(skipped, 3600)
 
-    def test_a_path_with_a_nul_or_a_lone_surrogate_is_no_file(self):
-        # Before the slice, `cp a\0b dest` and `bash ./a\0b.sh` ended the check in a ValueError (a
-        # UnicodeEncodeError for the surrogate) from resolving the path.
-        for run in ("cp a\\0b dest", "bash ./a\\0b.sh", "cp a\\0b.sh out; bash out/a\\0b.sh",
-                    "bash ./a\\ud800b.sh", "cd ./x\\0y && bash run.sh"):
-            with self.subTest(run=run), TempDir() as tmp:
-                root = tmp / "repo"
-                (root / ".github" / "workflows").mkdir(parents=True)
-                (root / ".github" / "workflows" / "w.yml").write_text(
-                    "on: push\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
-                    f"      - run: \"{run}\"\n", encoding="utf-8")
-                result = checker.check(root)
-                self.assertEqual(result.errors, [])
-                self.assertNotIn("a", {job for _w, job, lane, _r in checker.lanes(root, notes=[], errors=[], seen=[])
-                                       if lane == "agent"})
+    def test_a_path_with_a_nul_or_a_lone_surrogate_fails_as_before(self):
+        # Resolving such a `cp` argument raises, as before the slice; the short cut does not hide it (#429).
+        with TempDir() as tmp:
+            root = (tmp / "repo").resolve()
+            root.mkdir()
+            for text in ("cp a\0b dest", "cp \ud800 dest", "cp a\0b.sh out"):
+                with self.subTest(text=text):
+                    self.assertIsInstance(outcome(_copied_script_targets, text, root), type)
+                    self.assertEqual(outcome(_copied_script_targets, text, root),
+                                     outcome(_lexed_script_targets, text, root))
 
     def test_a_target_behind_quotes_is_still_found(self):
         with TempDir() as tmp:
@@ -93,6 +89,14 @@ class TheLexerShortCutTest(unittest.TestCase):
                          "cp scripts/run.sh out; bash out/run.s''h"):
                 with self.subTest(text=text):
                     self.assertEqual(_copied_script_targets(text, root), ["scripts/run.sh"])
+
+
+def outcome(function, *args):
+    """What `function(*args)` gives, or the type of what it raised."""
+    try:
+        return function(*args)
+    except Exception as exc:        # noqa: BLE001 - the type is what is compared
+        return type(exc)
 
 
 def _appears_before(text, programs, packages):
@@ -189,7 +193,9 @@ def _workflow(steps):
 
 # Steps that name agent tools, each read by OBAAF-GHA-026 through the command lines the tools now share: bash,
 # PowerShell and cmd, a value put in from `env`, github-script, a `${{ env }}` expression, an input that is a
-# command, and a matrix over Windows and Linux.
+# command, and a matrix over Windows and Linux. Several steps name more than one tool, so that a tool read after
+# another reads what the first was given (the review's mutants of the shared tuple fail on them); job `b` names
+# codex only through `$A$B`, with no `codex` in any `env`.
 NAMING = """on: pull_request
 permissions: {}
 env:
@@ -216,7 +222,37 @@ jobs:
       - uses: some/retry@0000000000000000000000000000000000000000
         with:
           command: claude --permission-mode bypassPermissions -p x
+      - run: |
+          claude --dangerously-skip-permissions -p x
+          $AGENT --yolo exec x
+          gemini --yolo -p x
+      - run: |
+          & claude --dangerously-skip-permissions -p x
+          & $env:AGENT --yolo exec x
+          gemini --yolo -p x
+        shell: pwsh
+      - run: |
+          claude --dangerously-skip-permissions -p x
+          %AGENT% --yolo exec x
+          gemini --yolo -p x
+        shell: cmd
+      - run: echo $TOOLS
+        env:
+          TOOLS: claude --dangerously-skip-permissions -p x && codex --yolo exec x && gemini --yolo -p x
+      - uses: actions/github-script@0000000000000000000000000000000000000000
+        with:
+          script: |
+            await exec.exec('claude', flags)
+            await exec.exec('gemini', more)
+            await exec.exec('codex', other)
       - run: echo nothing to see
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - run: claude --dangerously-skip-permissions -p x; $A$B --yolo exec x
+        env:
+          A: cod
+          B: ex
 """
 
 
