@@ -65,9 +65,11 @@ def config_lookalike_error(root: Path, written: tuple[str, ...] = ()) -> str | N
 
     `written` names files, relative to `root`, that are about to be created (`obaaf init`), so that a
     link which only those files would resolve counts as the file the first check will find (review of
-    #415). A link that would resolve to a supported location is the file the checker reads, and does not."""
-    targets = {os.path.realpath(root / rel) for rel in written} - {
-        os.path.realpath(root / location) for location in CONFIG_LOCATIONS}
+    #415). A link that would resolve to a supported location is the file the checker reads, and does not.
+    A file that exists already is left to `is_file`, which gives the system's own answer."""
+    targets = {os.path.realpath(root / rel) for rel in written if not os.path.lexists(root / rel)}
+    if targets:
+        targets -= {os.path.realpath(root / location) for location in CONFIG_LOCATIONS}
     for folder in ("", ".github"):
         try:
             names = os.listdir(root / folder) if (root / folder).is_dir() else []

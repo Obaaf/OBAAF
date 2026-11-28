@@ -287,6 +287,18 @@ jobs:
                 self.workflow.unlink()
                 link.unlink()
 
+    def test_a_link_the_system_does_not_resolve_is_not_a_lookalike_once_set_up(self):
+        # Second review of #415: realpath lets `..` cancel a folder that does not exist, where the system
+        # does not. Once init's files exist, the system's answer is the one taken, so a set-up repository
+        # is not refused for a link the check accepts.
+        self.assertEqual(self.invoke("--apply")[0], 0)
+        os.symlink("missing/../" + WORKFLOW, self.root / "obaaf.yaml")
+        self.assertFalse((self.root / "obaaf.yaml").is_file())
+        Config.load(self.root.resolve())
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertNotIn("Conflict", text)
+
     def test_a_link_to_the_configuration_init_writes_is_not_a_lookalike(self):
         # The same file as the configuration the checker reads, once init has written it.
         os.symlink(".github/obaaf.yml", self.root / ".obaaf.yml")
