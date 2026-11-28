@@ -1143,6 +1143,47 @@ rules:
       says the option is meant for, a sandbox outside the agent's reach. Where the checker cannot tell, write
       the options out in the step.
 
+  - id: OBAAF-GHA-028
+    title: Untrusted event text written to GITHUB_ENV or GITHUB_PATH
+    severity: high
+    category: authority
+    requirements: [G8.1, G3.1]
+    agent_controls: [R1]
+    supports: [FR3]
+    why: >-
+      A line break in that text can set any variable, such as `BASH_ENV` or `LD_PRELOAD`, or put a folder first
+      on PATH, for every later step of the job.
+    description: >-
+      A step writes to GITHUB_ENV or GITHUB_PATH an environment variable that holds text an outsider controls,
+      as OBAAF-GHA-010 reads those fields and the step's, job's and workflow's `env` (directly, through other
+      `env` values or the matrix, or an `env:` written as one expression). Through `${{ }}` the same write is
+      OBAAF-GHA-010's. A bash or sh `run` is read command by command: a variable the script sets from one
+      that holds the text holds it too (an assignment, `export`, `declare`, `local`, `for`, `printf -v`; what
+      `read` and `mapfile` set and the positional parameters wherever the script reads the text; every
+      variable after `eval`, `source` or a nested shell given it), and a write is a command whose output a
+      redirection or `tee` sends to `$GITHUB_ENV`, `${GITHUB_ENV}`, `${GITHUB_ENV:-/dev/stdout}` or
+      `${{ github.env }}` (or the same for GITHUB_PATH). The finding is at OBAAF-GHA-010's severity for the
+      job's triggers where the command, or one piped into it, reads such a variable, names it as a word (as
+      code in another language does) or prints every variable (`env`, `printenv`, `export -p`). It is "cannot
+      tell", at medium, where the text written could still come from the environment or a file: a program
+      whose output the checker does not know to be made only from its arguments, input and files (it may print
+      its environment; `envsubst`, `jq`'s `env`, a repository script), a file the script wrote the text to,
+      a group or loop redirected as a whole, `exec`, a computed command name, the runner's files named in any
+      other place, or a script the checker cannot read as bash; and wherever a `run` in another shell, an
+      actions/github-script script or another script input names a way to write those files
+      (`exportVariable`, `addPath`, the files' variables or folder) and the step's environment holds the
+      text, or, for github-script, the script names the event's payload. The variables, the fields, the
+      files and the job's triggers are the finding's facts, and, for "cannot tell", the step's script.
+      Not followed: what a program or an action does with the environment it is given, other than as above;
+      text a step reads from the repository's files, an artifact or the network; values set while the job
+      runs (step outputs, an earlier step's GITHUB_ENV); the deprecated `set-env` and `add-path` commands in
+      a step's output.
+    fix: >-
+      Do not write the text to GITHUB_ENV or GITHUB_PATH. Give each later step that needs it the same
+      expression in its own `env:` (`env: TITLE: ${{ github.event.pull_request.title }}`) and read it there
+      quoted (`"$TITLE"`). Never put a folder whose name such text gives on PATH. If what is written is not
+      that text (the checker said it cannot tell), accept the finding and say why.
+
   # The checker's own configuration. A declaration that tells the checker which rules a job gets
   # is a control like any other: one that does nothing is reported, never dropped without a word.
   - id: OBAAF-CFG-001

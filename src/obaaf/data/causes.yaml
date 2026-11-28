@@ -66,6 +66,19 @@ causes:
       OBAAF-GHA-010: [through-env]
     fix_kind: by-hand
     next: "Pass the text as data through an environment variable and use it quoted in the script."
+  - id: untrusted-runner-file-write
+    sentence: "Text influenced by an outsider is written to GITHUB_ENV or GITHUB_PATH, which set later steps' variables and PATH."
+    rules: [OBAAF-GHA-028]
+    except_kinds:
+      OBAAF-GHA-028: [unresolved]
+    fix_kind: by-hand
+    next: "Give each later step that needs the text the same expression in its own env: and read it there quoted, instead of writing it to GITHUB_ENV or GITHUB_PATH."
+  - id: untrusted-runner-file-unresolved
+    sentence: "A step whose environment holds text an outsider can influence writes to GITHUB_ENV or GITHUB_PATH in a way the checker cannot read."
+    kinds:
+      OBAAF-GHA-028: [unresolved]
+    fix_kind: by-hand
+    next: "Write to GITHUB_ENV or GITHUB_PATH only with echo or printf of plain values in a bash step, or, if what the step writes is not that text, accept the finding and say why."
   - id: checkout-credentials
     sentence: "Checkout leaves a credential available to later steps."
     rules: [OBAAF-GHA-011]

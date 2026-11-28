@@ -143,6 +143,7 @@ REMAINDER_READ = {
                       "no-environment", "other-environment"},
     "OBAAF-GHA-025": {"agent-cli", "piped-download"},
     "OBAAF-GHA-026": {"option", "setting"},
+    "OBAAF-GHA-028": {""},
     **{f"OBAAF-JEN-{n:03d}": {""} for n in range(1, 16)},
     "OBAAF-REPO-001": {"gate-no-owner", "no-owner"},
     "OBAAF-REPO-002": {"no-owner"},
