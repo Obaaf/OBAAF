@@ -9,7 +9,7 @@ from unittest.mock import patch
 import yaml
 
 from obaaf import cli
-from obaaf.checker import Config
+from obaaf.checker import Config, ConfigError
 from obaaf.init import WORKFLOW
 
 
@@ -239,6 +239,86 @@ jobs:
                 self.assertEqual(target.read_text(), "custom\n")
                 self.assertFalse(other.exists())
                 target.unlink()
+
+    def test_lookalikes_report_the_default_checker_error_without_writing(self):
+        self.config.parent.mkdir()
+        # Init names the resolved folder, so the expected message is the check's on that folder: a
+        # temporary folder reached through a link (macOS's /var) would otherwise differ (review of #415).
+        root = self.root.resolve()
+        for rel in ("obaaf.yaml", ".Obaaf.YML", ".github/.OBAAF.yaml"):
+            with self.subTest(rel=rel):
+                path = self.root / rel
+                path.write_text("lanes: {}\n")
+                self.addCleanup(path.unlink, missing_ok=True)
+                with self.assertRaises(ConfigError) as error:
+                    Config.load(root)
+                for options in ((), ("--apply",)):
+                    status, text = self.invoke(*options)
+                    self.assertEqual(status, 1, text)
+                    self.assertIn(str(error.exception), text)
+                    self.assertEqual(path.read_text(), "lanes: {}\n")
+                    self.assertFalse(self.config.exists())
+                    self.assertFalse(self.workflow.exists())
+                path.unlink()
+
+    def test_a_link_that_only_inits_own_file_resolves_is_a_lookalike(self):
+        # Review of #415: a dangling link named like a configuration, pointing at the workflow init
+        # writes, was no file before init and the first check refused it after.
+        root = self.root.resolve()
+        cases = (("obaaf.yaml", WORKFLOW), (".github/.obaaf.yml", "workflows/obaaf-pipeline-check.yml"))
+        for rel, target in cases:
+            with self.subTest(rel=rel):
+                link = self.root / rel
+                link.parent.mkdir(exist_ok=True)
+                os.symlink(target, link)
+                self.addCleanup(lambda link=link: os.path.lexists(link) and link.unlink())
+                for options in ((), ("--apply",)):
+                    status, text = self.invoke(*options)
+                    self.assertEqual(status, 1, text)
+                    self.assertIn(f"{root}: {rel} looks like a checker configuration", text)
+                    self.assertFalse(self.config.exists())
+                    self.assertFalse(os.path.lexists(self.workflow))
+                # The checker sees the same file once the workflow exists.
+                self.workflow.parent.mkdir(parents=True, exist_ok=True)
+                self.workflow.write_text("on: push\n")
+                with self.assertRaises(ConfigError) as error:
+                    Config.load(root)
+                self.assertIn(f"{root}: {rel} looks like", str(error.exception))
+                self.workflow.unlink()
+                link.unlink()
+
+    def test_a_link_the_system_does_not_resolve_is_not_a_lookalike_once_set_up(self):
+        # Second review of #415: realpath lets `..` cancel a folder that does not exist, where the system
+        # does not. Once init's files exist, the system's answer is the one taken, so a set-up repository
+        # is not refused for a link the check accepts.
+        self.assertEqual(self.invoke("--apply")[0], 0)
+        os.symlink("missing/../" + WORKFLOW, self.root / "obaaf.yaml")
+        self.assertFalse((self.root / "obaaf.yaml").is_file())
+        Config.load(self.root.resolve())
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertNotIn("Conflict", text)
+
+    def test_a_link_to_the_configuration_init_writes_is_not_a_lookalike(self):
+        # The same file as the configuration the checker reads, once init has written it.
+        os.symlink(".github/obaaf.yml", self.root / ".obaaf.yml")
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertTrue(self.config.is_file())
+        Config.load(self.root.resolve())
+
+    def test_alias_of_supported_config_is_accepted(self):
+        self.assertEqual(self.invoke("--apply")[0], 0)
+        alias = self.config.with_name("OBAAF.YML")
+        self.config.rename(alias)
+        if not self.config.exists():
+            os.link(alias, self.config)
+        self.workflow.unlink()
+        status, text = self.invoke("--apply")
+        self.assertEqual(status, 0, text)
+        self.assertTrue(self.workflow.is_file())
+        # And the first check after it reads the configuration (review of #415).
+        Config.load(self.root.resolve())
 
     def test_alternate_config_and_linked_parent(self):
         alt = self.root / "obaaf.yml"
