@@ -129,7 +129,25 @@ def _script_targets(run_text: str) -> list[str]:
     return out
 
 
+_QUOTES_AND_BACKSLASHES_RE = re.compile(r"[\"'\\]")
+
+
 def _copied_script_targets(run_text: str, root: Path) -> list[str]:
+    """Map simple cp snapshots back to repository sources, without reading the destination
+    (`_lexed_script_targets`).
+
+    Only a word that ends in `.sh` or `.bash` is ever a target, and the lexer makes each word of a line's
+    characters, with quotes and backslashes taken out and a comment dropped. So where the text with every
+    quote and backslash taken out holds neither `.sh` nor `.bash`, there is no target, and the lexer, most
+    of what a check of many local actions spent here, is not run (flagship slice 2d.28, #227).
+    """
+    bare = _QUOTES_AND_BACKSLASHES_RE.sub("", run_text)
+    if ".sh" not in bare and ".bash" not in bare:
+        return []
+    return _lexed_script_targets(run_text, root)
+
+
+def _lexed_script_targets(run_text: str, root: Path) -> list[str]:
     """Map simple cp snapshots back to repository sources, without reading the destination.
 
     Variable names are symbolic: ${SNAPSHOT}/a and $SNAPSHOT/a name the same

@@ -2418,6 +2418,8 @@ class Step:
         agent given to another action was in no lane and got no agent rule."""
         if commands is None:
             commands = [re.compile(p, re.M) for p in load_catalog().detection.get("agent_commands", [])]
+        elif not isinstance(commands, (list, tuple)):
+            commands = tuple(commands)      # read more than once below
         own = self._command_text()
         found: list[str] = []
         lines: list = []
@@ -2432,13 +2434,12 @@ class Step:
         if isinstance(shell, str):
             lines.append(shell)
         lines.extend(v for v in self.env.values() if isinstance(v, str))
+        signature = tuple((p.pattern, p.flags) for p in commands)
         for value in lines:
-            for variant in _readings(value):
-                if any(matches_any(commands, candidate, anchored=True) for segment in command_segments(variant)
-                       for candidate in _first_word_forms(segment)):
-                    # The whole value, wrappers included: `npx` before a package is what runs it (2c.8).
-                    found.append(variant)
-                    break
+            # The whole value, wrappers included: `npx` before a package is what runs it (2c.8).
+            variant = _command_reading(value, None, signature, commands)
+            if variant is not None:
+                found.append(variant[0])
         # `run: $AGENT -p x` with `env: {AGENT: claude}`: the script with the step's env values put in, read
         # as commands like an input, so prose in an env value (`--notes "$NOTES"`) is not an agent. A text
         # longer than the checker reads is not made (flagship slices 2d.16 and 2d.17): `env_put_in_unread`
@@ -2450,7 +2451,6 @@ class Step:
         worked = self.env_expressions_text(own)
         made, put, _why = self._env_put_in_reading(own)
         if put is not None and put != own:
-            signature = tuple((p.pattern, p.flags) for p in commands)
             if signature in made.found:
                 found.extend(made.found[signature])
             else:
@@ -2460,16 +2460,11 @@ class Step:
                 # command that matched is kept beside the reading, so that it is found where the reading is searched.
                 family = self.shell_family() if self.run else None
                 for text_read in (put, made.assigned):
-                    for variant in _readings(text_read or ""):
-                        hit = next((candidate for segment in command_segments(variant)
-                                    for form in [segment, *shell_env.command_forms(segment, family)]
-                                    for candidate in _first_word_forms(form)
-                                    if matches_any(commands, candidate, anchored=True)), None)
-                        if hit is not None:
-                            here.append(variant)
-                            if family is not None:
-                                here.append(hit)
-                            break
+                    reading = _command_reading(text_read or "", family, signature, commands)
+                    if reading is not None:
+                        here.append(reading[0])
+                        if family is not None:
+                            here.append(reading[1])
                 made.found[signature] = tuple(here)
                 found.extend(here)
         probe = made.probe if made is not None and put is not None else None
@@ -2505,7 +2500,7 @@ class Step:
                                 if matches_any(commands, line, anchored=True)][:1]
                 found.extend(ran[key])
         text = "\n".join(p for p in [own, worked if worked != own else None, probe, *found] if p)
-        return "\n".join(dict.fromkeys(v for v in _readings(text) if v))
+        return _joined_readings(text)
 
     def env_expressions_text(self, own: str | None = None) -> str | None:
         """The command lines `agent_text` reads (`own`, by default `_command_text()`) with their `${{ }}`
@@ -3467,7 +3462,7 @@ class Job:
 
     def upload_steps(self, detection: dict) -> list[Step]:
         actions = detection.get("upload_actions", [])
-        commands = [re.compile(p, re.M) for p in detection.get("upload_commands", [])]
+        patterns = tuple(detection.get("upload_commands", []))
         out = []
         for step in self.steps:
             if str(step.env.get("OBAAF_STEP", "")).lower() == "publish":
@@ -3485,7 +3480,7 @@ class Job:
             # line joined to it and with quotes taken out (`"npm" publish`), so that neither hides a
             # command a list names (flagship slice 2d.2d). Both readings are matched.
             text = step.scripts()
-            if text and any(rx.search(variant) for variant in upload_readings(text) for rx in commands):
+            if text and _uploads_in(text, patterns):
                 out.append(step)
         return out
 
@@ -3605,6 +3600,44 @@ def matches_any(commands, text: str, anchored: bool = False) -> bool:
         if (rx.match(text) if anchored else rx.search(text)) is not None:
             return True
     return False
+
+# What `Step.agent_text` finds in a text, kept by the text, the shell family and the patterns' signature (flagship
+# slice 2d.28, #227): the same script and the same `env` values are read for every step and every job that holds
+# them, and the second pass over local actions reads each action's steps again for every job that uses it.
+_COMMAND_READINGS: dict = {}
+_COMMAND_READINGS_KEPT = 8192
+
+
+def _command_reading(text: str, family: str | None, signature: tuple, commands) -> tuple | None:
+    """The first reading of `text` (`_readings`) in which a command, as `command_segments` splits it, starts with
+    a word one of `commands` (compiled patterns whose `signature` is their (pattern, flags) pairs) matches, with
+    the form that matched: (reading, form), or None. With a `family` (`pwsh` or `cmd`), the program a launcher of
+    that shell runs is a form too (`shell_env.command_forms`). Kept by (text, family, signature)."""
+    key = (text, family, signature)
+    if key in _COMMAND_READINGS:
+        return _COMMAND_READINGS[key]
+    out = None
+    for variant in _readings(text):
+        hit = next((candidate for segment in command_segments(variant)
+                    for form in ([segment, *shell_env.command_forms(segment, family)] if family is not None
+                                 else [segment])
+                    for candidate in _first_word_forms(form)
+                    if matches_any(commands, candidate, anchored=True)), None)
+        if hit is not None:
+            out = (variant, hit)
+            break
+    if len(_COMMAND_READINGS) >= _COMMAND_READINGS_KEPT:
+        _COMMAND_READINGS.clear()
+    _COMMAND_READINGS[key] = out
+    return out
+
+
+@lru_cache(maxsize=4096)
+def _joined_readings(text: str) -> str:
+    """`Step.agent_text`'s answer for the text it joined: each reading of it (`_readings`) that is not empty, once,
+    in order, one to a line. Kept by text (flagship slice 2d.28, #227)."""
+    return "\n".join(dict.fromkeys(v for v in _readings(text) if v))
+
 
 def _readings(text: str) -> list[str]:
     """`upload_readings`, and the last of them with each backslash before a character taken out, as the
@@ -3773,6 +3806,15 @@ def image_step_pushes(step: "Step", job: "Job | None" = None) -> bool:
         return "${{" in text or text.strip().lower() in ("true", "1", "yes")
 
     return outputs or through_matrix(step.with_.get("push", ""), job, pushes)
+
+
+@lru_cache(maxsize=4096)
+def _uploads_in(text: str, patterns: tuple) -> bool:
+    """Whether one of the release command `patterns` (the catalogue's `upload_commands`, compiled with
+    `re.M`) is found in a reading of `text` (`upload_readings`). Kept by text (flagship slice 2d.28, #227):
+    the second pass over local actions asks it again for the same scripts in every job that uses them."""
+    commands = [re.compile(p, re.M) for p in patterns]
+    return any(rx.search(variant) for variant in upload_readings(text) for rx in commands)
 
 
 def upload_readings(text: str) -> list[str]:

@@ -6,6 +6,7 @@ import bisect
 import collections
 import copy
 import fnmatch
+import functools
 import hashlib
 import json
 import re
@@ -1080,6 +1081,18 @@ def _distinct_texts(value, limit: int = 20_000) -> list:
 def _referenced_names(infos) -> set:
     return {name for _c, _n, parts, sets, _o in infos for name in parts.names} | {
         name for _c, _n, _p, sets, _o in infos for value in sets.values() for name in value.names}
+
+
+@functools.lru_cache(maxsize=4096)
+def _signing_command_in(raw: str, patterns: tuple) -> bool:
+    """Whether one of the signing command `patterns` (the catalogue's `signing_commands`, compiled with `re.M`)
+    is found in a step's script, as written or with each command continued on the next line joined to it: a
+    backslash in sh and bash, a backtick in PowerShell, a caret in cmd. Both readings are matched, so joining
+    never hides what a line alone shows (a later command on the joined line can stop a pattern that looks
+    ahead, such as cosign's). Kept by text (flagship slice 2d.28, #227): the second pass over local actions
+    asks it again for the same scripts in every job that uses them."""
+    joined = re.sub(r"[\\`^][ \t]*\r?\n", " ", raw)
+    return any(rx.search(raw) or rx.search(joined) for rx in (re.compile(p, re.M) for p in patterns))
 
 
 _ALWAYS_CACHES = ("Swatinem/rust-cache", "hendrikmuhs/ccache-action", "mozilla-actions/sccache-action",
@@ -2980,6 +2993,7 @@ class WorkflowRules:
         for step in job.steps:
             given = step.with_ if step.uses and not step.is_local else {}
             written = step.raw.get("with")
+            command = None
             for tool, name, flags, programs, packages, args in readers:
                 # The inputs an action of the tool hands its program as options. A `with:` that is one
                 # expression is "cannot tell" for them in `agent_tool_settings`.
@@ -2990,7 +3004,9 @@ class WorkflowRules:
                         for key in dict.fromkeys(input_name(i) for i in inputs):
                             if key in given:
                                 self._agent_args(job, step, tool, name, flags, action, key, given[key])
-                self._agent_command(job, step, tool, name, flags, programs, packages)
+                if command is None:
+                    command = self._command_parts(job, step)
+                self._agent_command(job, step, tool, name, flags, programs, packages, command)
 
     def _agent_args(self, job: Job, step: Step, tool: str, name: str, flags: list, action: str, key: str,
                     raw) -> None:
@@ -3262,8 +3278,13 @@ class WorkflowRules:
             cache[key] = hit
         return hit[0], hit[1], hit[2], hit[3]
 
-    def _agent_command(self, job: Job, step: Step, tool: str, name: str, flags: list, programs: list,
-                       packages: list) -> None:
+    def _command_parts(self, job: Job, step: Step) -> tuple:
+        """What `_agent_command` reads of `step` before it asks whether a tool is named there, which no tool
+        changes: the command lines and their languages, the shells a PowerShell or cmd script is put in for, the
+        step's other inputs and `env` values, every text a tool's name is looked for in, the `env` scopes, the
+        workflow's ledgers and the cheap put-ins. Worked out once for each step and handed to each tool's
+        reading (flagship slice 2d.28, #227): it was worked out again for each of the agent tools, a dozen
+        times for every step, which with the second pass over local actions was a fifth of a large check."""
         # What the step gives a shell, and in what language: (text, read as bash, the step names the tool).
         parts: list = []
         languages: dict = {}
@@ -3357,6 +3378,15 @@ class WorkflowRules:
                 cheap_cache[key] = agent_flags.put_in_cheaply(
                     text, scopes, put_ins.names if put_ins is not None else None, (step.seq, n))
             cheap.append((text, cheap_cache[key]))
+        return parts, languages, shell_sources, others, named, scopes, scoped, put_ins, cheap
+
+    def _agent_command(self, job: Job, step: Step, tool: str, name: str, flags: list, programs: list,
+                       packages: list, command: tuple | None = None) -> None:
+        # What the step gives a shell is the same for every tool, so it is worked out once for the step
+        # (`_command_parts`, flagship slice 2d.28, #227), and only what names this tool is read for each.
+        if command is None:
+            command = self._command_parts(job, step)
+        parts, languages, shell_sources, others, named, scopes, scoped, put_ins, cheap = command
         named_unread = any(put is None and agent_flags.names_when_put_in(text, scopes, programs, packages)
                            for text, put in cheap)
         if not named_unread and not any(agent_flags.appears(t, programs, packages) for t in named) and not any(
@@ -6551,20 +6581,15 @@ class WorkflowRules:
                      "Job '{job}' can read every secret ({how}){passed}{environment}, so any signing key stored "
                      "for it is available to what it runs.", job, severity=severity, kind="any-secret",
                      how=Fact(every, shown), passed=self._passed_fact(job, every), environment=environment)
-        commands = [re.compile(p, re.M) for p in self.detection.get("signing_commands", [])]
+        commands = tuple(self.detection.get("signing_commands", []))
         actions = list(self.detection.get("signing_actions", []))
         for step in job.steps:
-            # A command continued on the next line is one command to the shell: a backslash in sh and
-            # bash, a backtick in PowerShell, a caret in cmd.
-            # Both readings are matched, so joining never hides what a line alone shows (a later
-            # command on the joined line can stop a pattern that looks ahead, such as cosign's).
             raw = step.text()
-            joined = re.sub(r"[\\`^][ \t]*\r?\n", " ", raw)
             if any(step.uses_action(a) for a in actions):
                 self.add("OBAAF-GHA-018", step.line,
                          "Step '{step}' loads a signing key into the build environment.", job, step,
                          severity=severity, kind="action")
-            elif raw and any(rx.search(raw) or rx.search(joined) for rx in commands):
+            elif raw and _signing_command_in(raw, commands):
                 self.add("OBAAF-GHA-018", step.line,
                          "Step '{step}' loads a signing key into the build environment.", job, step,
                          severity=severity, kind="command")
