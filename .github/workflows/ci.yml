@@ -517,6 +517,62 @@ jobs:
           }
           "$($env:RUNNER_OS): as recorded."
 
+  shell-env-premise:
+    # What slice 2d.25 (#411) assumes when the lanes and OBAAF-GHA-026 put a step's `env` into PowerShell's
+    # `$env:NAME` and cmd's `%NAME%`: the process holds the `env` the step runs with, the nearest scope winning;
+    # PowerShell looks a name up as written on GitHub-hosted Linux and macOS and without regard to case on Windows;
+    # cmd (Windows only) without regard to case; a single-quoted string, a backtick and cmd's `%%` keep a reference
+    # as written. Advisory, as the job above: a change on a new image turns its leg red and is seen there.
+    name: "Runner premise: $env:NAME and %NAME% letter case (2d.25, ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    env:
+      PREMISE_TWO_CASES: from-job
+      PREMISE_JOB_ONLY: job-only
+    steps:
+      - name: Read the environment in PowerShell
+        env:
+          premise_two_cases: from-step
+        shell: pwsh
+        run: |
+          # `sensitive` is what Linux and macOS are taken to give, `folded` what Windows is.
+          $seen = @(
+            [pscustomobject]@{ read = '$env:PREMISE_TWO_CASES'; got = $env:PREMISE_TWO_CASES; sensitive = 'from-job'; folded = 'from-step' }
+            [pscustomobject]@{ read = '$env:premise_two_cases'; got = $env:premise_two_cases; sensitive = 'from-step'; folded = 'from-step' }
+            [pscustomobject]@{ read = '$env:Premise_Two_Cases'; got = $env:Premise_Two_Cases; sensitive = ''; folded = 'from-step' }
+            [pscustomobject]@{ read = '${env:premise_job_only}'; got = ${env:premise_job_only}; sensitive = ''; folded = 'job-only' }
+            [pscustomobject]@{ read = '$ENV:PREMISE_JOB_ONLY'; got = $ENV:PREMISE_JOB_ONLY; sensitive = 'job-only'; folded = 'job-only' }
+            [pscustomobject]@{ read = 'in single quotes'; got = '$env:PREMISE_JOB_ONLY'; sensitive = '$env:PREMISE_JOB_ONLY'; folded = '$env:PREMISE_JOB_ONLY' }
+            [pscustomobject]@{ read = 'after a backtick'; got = "`$env:PREMISE_JOB_ONLY"; sensitive = '$env:PREMISE_JOB_ONLY'; folded = '$env:PREMISE_JOB_ONLY' }
+            [pscustomobject]@{ read = 'in double quotes'; got = "$env:PREMISE_JOB_ONLY"; sensitive = 'job-only'; folded = 'job-only' }
+          )
+          "image: $env:ImageOS $env:ImageVersion ($env:RUNNER_OS), PowerShell $($PSVersionTable.PSVersion)"
+          $seen | Format-Table read, got -AutoSize | Out-String -Width 200
+          $folds = $env:RUNNER_OS -eq 'Windows'
+          foreach ($row in $seen) {
+            $expected = if ($folds) { $row.folded } else { $row.sensitive }
+            if (-not ("$($row.got)" -ceq $expected)) { throw "$($row.read) gave '$($row.got)', expected '$expected'" }
+          }
+          "$($env:RUNNER_OS): as recorded."
+      - name: Read the environment in cmd
+        if: runner.os == 'Windows'
+        env:
+          premise_two_cases: from-step
+        shell: cmd
+        run: |
+          echo two cases: [%PREMISE_TWO_CASES%] [%premise_two_cases%] [%Premise_Two_Cases%]
+          echo job only: [%premise_job_only%] escaped: [%%PREMISE_JOB_ONLY%%]
+          if not "%Premise_Two_Cases%"=="from-step" exit /b 1
+          if not "%premise_job_only%"=="job-only" exit /b 1
+          if "%%PREMISE_JOB_ONLY%%"=="job-only" exit /b 1
+          echo Windows cmd: as recorded.
+
   composite-env-premise:
     # What slice 2d.19f (#382) assumes before OBAAF-GHA-026 works out `${{ }}` expressions that read `env` in a
     # local composite action's steps: on a GitHub-hosted runner, a composite step's `env` context holds the job's,

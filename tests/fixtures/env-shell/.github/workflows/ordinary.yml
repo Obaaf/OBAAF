@@ -1,0 +1,41 @@
+# Flagship slice 2d.25 (#411): PowerShell and cmd steps that read `env` and run no agent. None of these jobs may be
+# an agent job or get OBAAF-GHA-026. Nothing here is run: the checker reads it.
+on: workflow_dispatch
+permissions: {}
+jobs:
+  pwsh-region:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh
+        run: 'aws s3 ls --region $env:REGION'
+        env: {REGION: cn-north-1}
+  pwsh-tool-from-env:
+    runs-on: windows-latest
+    env: {TOOL: make}
+    steps:
+      - run: '& $env:TOOL build'
+  cmd-greeting:
+    runs-on: windows-latest
+    steps:
+      - shell: cmd
+        run: 'echo %GREETING% %%AGENT%% --dangerously-skip-permissions'
+        env: {GREETING: hello, AGENT: claude}
+  pwsh-linux-other-case:
+    runs-on: ubuntu-latest
+    env: {AGENT: claude}
+    steps:
+      - shell: pwsh
+        run: '& $env:agent --dangerously-skip-permissions -p x'
+  pwsh-single-quoted-and-escaped:
+    runs-on: ubuntu-latest
+    env: {AGENT: claude}
+    steps:
+      - shell: pwsh
+        run: |
+          Write-Host 'run $env:AGENT later'
+          Write-Host "`$env:AGENT stays as written"
+  bash-reads-no-pwsh-reference:
+    runs-on: ubuntu-latest
+    env: {AGENT: claude}
+    steps:
+      - run: 'echo "$env:AGENT"'
