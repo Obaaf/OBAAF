@@ -54,7 +54,7 @@ jobs:
           python "$RUNNER_TEMP/acceptance.py" before
           git config user.name 'Sean Keluo-Udeke'
           git config user.email '55066947+seanudeke@users.noreply.github.com'
-          git merge --no-ff --no-commit b705c8577d5d76750fd3f86236c388ccadbba973
+          git merge --no-ff --no-commit 9acb0885006fc6e8d9024668afcf4aa9c3cd6efd
           git commit -qm 'Combine the shell reader with the adoption drafts for verification' -m $'Assisted-by: ChatGPT (OpenAI)\nSigned-off-by: Sean Keluo-Udeke <55066947+seanudeke@users.noreply.github.com>'
           git merge --no-ff --no-commit c79b863d219d53e2c65f216d80c2e3b043781c86
           git write-tree
