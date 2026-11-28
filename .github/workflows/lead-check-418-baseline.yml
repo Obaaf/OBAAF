@@ -27,7 +27,25 @@ jobs:
           if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
           git config user.name "OBAAF integration check"
           git config user.email "integration@localhost"
-          git merge --no-ff --no-edit c25eb820af609b25dc0aca42f09d7ec992954a20
+          if git merge --no-ff --no-commit c25eb820af609b25dc0aca42f09d7ec992954a20; then exit 1; fi
+          test "$(git diff --name-only --diff-filter=U)" = src/obaaf/checker/rules.py
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          path = Path("src/obaaf/checker/rules.py")
+          source = path.read_text(encoding="utf-8")
+          conflict = (r"^<<<<<<< [^\n]+\nfrom obaaf.checker import agent_flags, artifact_consumers\n"
+                      r"=======\nfrom obaaf.checker import agent_code\nfrom obaaf.checker import agent_flags\n"
+                      r">>>>>>> [^\n]+\n")
+          replacement = "from obaaf.checker import agent_code\nfrom obaaf.checker import agent_flags, artifact_consumers\n"
+          result, count = re.subn(conflict, replacement, source, flags=re.MULTILINE)
+          assert count == 1 and "<<<<<<<" not in result and ">>>>>>>" not in result
+          assert "return agent_code.cmd_carets_out(text)" in result
+          path.write_text(result, encoding="utf-8")
+          PY
+          git add -- src/obaaf/checker/rules.py
+          git diff --cached --check
+          git commit --no-edit
           git worktree add -q --detach "$RUNNER_TEMP/before-tests" HEAD
           git merge --no-ff --no-edit 5554d5cb1d16ad98c8d66c02ed373fa04e559e37
           git diff --check 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e HEAD
