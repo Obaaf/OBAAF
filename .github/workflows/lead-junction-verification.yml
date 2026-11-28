@@ -1,0 +1,54 @@
+name: Verify init aliases and patch export on Windows
+on:
+  push:
+    branches: [lead/verify-417-2a2c408]
+permissions:
+  contents: read
+jobs:
+  native-windows:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 2a2c408665ce7316d45b0046aadcf336648669cd
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Install the checker and run the Windows regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse 'HEAD^{tree}') -ne 'f922b49b78c18894c9e174f9636bdd013e50a249') { throw 'Unexpected source tree' }
+          $scratch = Join-Path $env:RUNNER_TEMP 'obaaf-junction'
+          New-Item -Type Directory -Path $scratch | Out-Null
+          $env:TMPDIR = $scratch
+          $env:TEMP = $scratch
+          $env:TMP = $scratch
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+          if ($LASTEXITCODE -ne 0) { throw 'Installation failed' }
+          @'
+          import os, sys, tempfile, unittest
+          from pathlib import Path
+
+          root = Path(tempfile.gettempdir()).resolve()
+          assert root == Path(os.environ['TMPDIR']).resolve()
+          assert not any((p / '.git').exists() for p in (root, *root.parents))
+          assert os.name == 'nt'
+          # Compare relative targets using Git-style slashes and the platform spelling.
+          for spelling in ('nested/sample.yml', os.path.join('nested', 'sample.yml')):
+              with tempfile.TemporaryDirectory() as folder:
+                  base = Path(folder)
+                  link = base / 'alias.yml'
+                  os.symlink(spelling, link)
+                  target = base / 'nested' / 'sample.yml'
+                  target.parent.mkdir()
+                  target.write_text('example')
+                  print('target', repr(spelling), 'readlink', repr(os.readlink(link)), 'is_file', link.is_file(), 'resolved', link.resolve(strict=False), flush=True)
+          sys.path.insert(0, 'tests')
+          case = 'test_fix_patch.FixPatchTest.test_windows_refuses_reparse_before_creating_patch'
+          result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames([case, 'test_init.InitTests.test_a_link_that_only_inits_own_file_resolves_is_a_lookalike', 'test_init.InitTests.test_a_link_the_system_does_not_resolve_is_not_a_lookalike_once_set_up', 'test_init.InitTests.test_a_link_to_the_configuration_init_writes_is_not_a_lookalike', 'test_init.InitTests.test_alias_of_supported_config_is_accepted', 'test_init.InitTests.test_lookalikes_report_the_default_checker_error_without_writing']))
+          sys.exit(0 if result.testsRun == 6 and result.wasSuccessful() and not result.skipped else 1)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Native junction verification failed or skipped' }
