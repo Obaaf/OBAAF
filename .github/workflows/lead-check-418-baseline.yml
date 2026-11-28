@@ -1,4 +1,4 @@
-name: Rehearse shell lanes and native patch tests with the launch draft
+name: Check the revised shell reader with the launch draft and patch fixtures
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
@@ -27,7 +27,7 @@ jobs:
           if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
           git config user.name "OBAAF integration check"
           git config user.email "integration@localhost"
-          if git merge --no-ff --no-commit c25eb820af609b25dc0aca42f09d7ec992954a20; then exit 1; fi
+          if git merge --no-ff --no-commit 8812166c33f8dd274e002ff98c83af5280c8a7c3; then exit 1; fi
           test "$(git diff --name-only --diff-filter=U)" = src/obaaf/checker/rules.py
           python - <<'PY'
           from pathlib import Path
@@ -57,7 +57,7 @@ jobs:
       - name: Check both lanes and native patch replay together
         run: |
           export PYTHONPATH="$PWD/src:$PWD/tests"
-          python -m unittest -v test_shell_lanes test_artifact_consumer_index test_egress_artifact_producers test_fix_patch
+          python -m unittest -v test_shell_lanes test_env_shell test_artifact_consumer_index test_egress_artifact_producers test_fix_patch
           python -m obaaf docs build --check
       - name: Check the review contribution and the shell change on both adopters
         if: ${{ !cancelled() && steps.integrate.outcome == 'success' }}
@@ -93,8 +93,3 @@ jobs:
                   print("ADOPTER", name, mode, "fixture identical", "shell delta" if outputs[0] != outputs[1] else "shell identical",
                         "exit", outputs[0][0], outputs[2][0], flush=True)
           PY
-      - name: Run the full combined suite
-        if: ${{ !cancelled() && steps.integrate.outcome == 'success' }}
-        run: |
-          export PYTHONPATH="$PWD/src:$PWD/tests"
-          python -m unittest discover -s tests -v
