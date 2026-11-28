@@ -2434,10 +2434,16 @@ class Step:
         if isinstance(shell, str):
             lines.append(shell)
         lines.extend(v for v in self.env.values() if isinstance(v, str))
-        signature = tuple((p.pattern, p.flags) for p in commands)
+        # The patterns' (pattern, flags) pairs, which key the readings kept by text, worked out where first needed.
+        kept: list = []
+
+        def patterns_key() -> tuple:
+            if not kept:
+                kept.append(tuple((p.pattern, p.flags) for p in commands))
+            return kept[0]
         for value in lines:
             # The whole value, wrappers included: `npx` before a package is what runs it (2c.8).
-            variant = _command_reading(value, None, signature, commands)
+            variant = _command_reading(value, None, patterns_key(), commands)
             if variant is not None:
                 found.append(variant[0])
         # `run: $AGENT -p x` with `env: {AGENT: claude}`: the script with the step's env values put in, read
@@ -2451,8 +2457,8 @@ class Step:
         worked = self.env_expressions_text(own)
         made, put, _why = self._env_put_in_reading(own)
         if put is not None and put != own:
-            if signature in made.found:
-                found.extend(made.found[signature])
+            if patterns_key() in made.found:
+                found.extend(made.found[patterns_key()])
             else:
                 here: list = []
                 # In PowerShell and cmd, also the program a launcher runs (`Start-Process -FilePath $env:AGENT`, `call
@@ -2460,12 +2466,12 @@ class Step:
                 # command that matched is kept beside the reading, so that it is found where the reading is searched.
                 family = self.shell_family() if self.run else None
                 for text_read in (put, made.assigned):
-                    reading = _command_reading(text_read or "", family, signature, commands)
+                    reading = _command_reading(text_read or "", family, patterns_key(), commands)
                     if reading is not None:
                         here.append(reading[0])
                         if family is not None:
                             here.append(reading[1])
-                made.found[signature] = tuple(here)
+                made.found[patterns_key()] = tuple(here)
                 found.extend(here)
         probe = made.probe if made is not None and put is not None else None
         # A PowerShell or cmd step's own lines are read for the program a launcher runs too (`@claude -p x`,
@@ -3463,6 +3469,8 @@ class Job:
     def upload_steps(self, detection: dict) -> list[Step]:
         actions = detection.get("upload_actions", [])
         patterns = tuple(detection.get("upload_commands", []))
+        for pattern in patterns:
+            re.compile(pattern, re.M)       # a pattern that is not one fails here, as before slice 2d.28
         out = []
         for step in self.steps:
             if str(step.env.get("OBAAF_STEP", "")).lower() == "publish":
@@ -3606,6 +3614,7 @@ def matches_any(commands, text: str, anchored: bool = False) -> bool:
 # them, and the second pass over local actions reads each action's steps again for every job that uses it.
 _COMMAND_READINGS: dict = {}
 _COMMAND_READINGS_KEPT = 8192
+_UNREAD = object()
 
 
 def _command_reading(text: str, family: str | None, signature: tuple, commands) -> tuple | None:
@@ -3614,8 +3623,9 @@ def _command_reading(text: str, family: str | None, signature: tuple, commands) 
     the form that matched: (reading, form), or None. With a `family` (`pwsh` or `cmd`), the program a launcher of
     that shell runs is a form too (`shell_env.command_forms`). Kept by (text, family, signature)."""
     key = (text, family, signature)
-    if key in _COMMAND_READINGS:
-        return _COMMAND_READINGS[key]
+    out = _COMMAND_READINGS.get(key, _UNREAD)
+    if out is not _UNREAD:
+        return out
     out = None
     for variant in _readings(text):
         hit = next((candidate for segment in command_segments(variant)

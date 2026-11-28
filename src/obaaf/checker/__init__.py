@@ -172,7 +172,9 @@ def _lexed_script_targets(run_text: str, root: Path) -> list[str]:
                 path = path.resolve()
                 if root in path.parents and path.exists():
                     return path
-            except (OSError, RuntimeError):
+            except (OSError, RuntimeError, ValueError):
+                # ValueError: a NUL byte or a lone surrogate in the name, which no file has (flagship slice
+                # 2d.28, from its review: it ended the check in a traceback).
                 continue
         return None
 
@@ -250,7 +252,7 @@ def _script_with_agent(root: Path, run: str, commands: list, memo: dict | None =
                 continue
             with path.open(encoding="utf-8", errors="replace") as script:
                 text = script.read(200_000)
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):      # ValueError: see `_lexed_script_targets`
             continue
         found = wf_mod.matches_any(commands, text)
         if memo is not None:
@@ -1909,7 +1911,7 @@ def _action_folder_script(root: Path, folder: str, run: str, workdir, commands: 
             continue
         try:
             path = (root / where).resolve()
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):      # ValueError: see `_lexed_script_targets`
             continue
         if root_r not in path.parents:
             continue

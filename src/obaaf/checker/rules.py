@@ -6582,6 +6582,8 @@ class WorkflowRules:
                      "for it is available to what it runs.", job, severity=severity, kind="any-secret",
                      how=Fact(every, shown), passed=self._passed_fact(job, every), environment=environment)
         commands = tuple(self.detection.get("signing_commands", []))
+        for pattern in commands:
+            re.compile(pattern, re.M)       # a pattern that is not one fails here, as before slice 2d.28
         actions = list(self.detection.get("signing_actions", []))
         for step in job.steps:
             raw = step.text()

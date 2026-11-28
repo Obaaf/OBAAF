@@ -3,14 +3,19 @@
 The second pass over local composite actions (slice 2d.4b2) reads every step of an action again for each
 job that uses it, so a repository of many jobs that share an action asks the same questions of the same
 scripts hundreds of times. `test_a_large_repository_with_realistic_actions_passes` in
-tests/test_local_composite_actions.py took 14.8 s on this session's machine on `flagship` `d6410ce` and
+tests/test_local_composite_actions.py took 12.9 s on this session's machine on `flagship` `d6410ce` and
 failed its 30 s limit on CI's Python 3.10 on four heads of #426. The slice keeps what those questions
 answer by their text, and works out once for a step what OBAAF-GHA-026 read again for each agent tool.
 
 None of that may change a finding. These tests hold each short cut to the reading it stands for: the
 lexer's targets with and without the test that skips it, on seeded random lines; `appears`, `_command_reading`,
-`_uploads_in` and `_signing_command_in` against the loops they replace; and a count that GHA-026 works out a
-step's command lines once, not once for each tool. The seeds are fixed, so CI runs the same cases every time.
+`_uploads_in` and `_signing_command_in` against the loops they replace; OBAAF-GHA-026's findings with the step's
+command lines shared by the tools and worked out again for each, on steps that name tools; and a count that it
+works them out once per step. The seeds are fixed, so CI runs the same cases every time.
+
+One result changes, found by the slice's review: a script that names a path with a NUL byte or a lone surrogate
+(`cp a\0b dest`, `bash ./a\0b.sh`) ended the check in a traceback. Such a path names no file, and is now read
+as one that does not exist.
 """
 
 import random
@@ -34,7 +39,8 @@ PIECES = ["bash", "sh", "source", ".", "exec", "timeout", "env", "cp", "-r", "-f
           "./scripts/run.sh", "scripts/run.sh", "$D/run.sh", "${D}/run.sh", "$D", "${D}", "scripts", "out",
           ".s'h'", '.s"h"', ".s\\h", "'.sh'", '".bash"', ".\\sh", "x.s", "h", "'", '"', "\\", "#", "# a.sh",
           ";", "&&", "||", "|", "&", " ", "  ", "\t", "\n", "echo", "make", "x" * 40, "run.s", "h.sh", ".ba",
-          "sh;", "a.sh#", "$(", ")", "`", "=", "D=out", ".SH", "run.BASH", "\u00a0", "é"]
+          "sh;", "a.sh#", "$(", ")", "`", "=", "D=out", ".SH", "run.BASH", "\u00a0", "é", "\x00", "a\x00b.sh",
+          "\ud800", "\ud800.sh", "\r", "\x0b", "\x0c", "\x1c", "\x85", "\u2028", "a.s\x00h"]
 
 
 class TheLexerShortCutTest(unittest.TestCase):
@@ -61,6 +67,22 @@ class TheLexerShortCutTest(unittest.TestCase):
             # The test is worth something only if both sides of the short cut are taken often.
             self.assertGreater(skipped, 400)
             self.assertLess(skipped, 3600)
+
+    def test_a_path_with_a_nul_or_a_lone_surrogate_is_no_file(self):
+        # Before the slice, `cp a\0b dest` and `bash ./a\0b.sh` ended the check in a ValueError (a
+        # UnicodeEncodeError for the surrogate) from resolving the path.
+        for run in ("cp a\\0b dest", "bash ./a\\0b.sh", "cp a\\0b.sh out; bash out/a\\0b.sh",
+                    "bash ./a\\ud800b.sh", "cd ./x\\0y && bash run.sh"):
+            with self.subTest(run=run), TempDir() as tmp:
+                root = tmp / "repo"
+                (root / ".github" / "workflows").mkdir(parents=True)
+                (root / ".github" / "workflows" / "w.yml").write_text(
+                    "on: push\npermissions: {}\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n"
+                    f"      - run: \"{run}\"\n", encoding="utf-8")
+                result = checker.check(root)
+                self.assertEqual(result.errors, [])
+                self.assertNotIn("a", {job for _w, job, lane, _r in checker.lanes(root, notes=[], errors=[], seen=[])
+                                       if lane == "agent"})
 
     def test_a_target_behind_quotes_is_still_found(self):
         with TempDir() as tmp:
@@ -130,6 +152,18 @@ class TheKeptAnswersTest(unittest.TestCase):
                 self.assertEqual(wf_mod._command_reading(text, family, signature, commands), expected)
                 self.assertEqual(wf_mod._command_reading(text, family, signature, commands), expected)
 
+    def test_two_pattern_lists_are_kept_apart(self):
+        # The same text asked with a repository's own agent pattern and without it (`agents.commands`).
+        detection = load().detection
+        plain = [re.compile(p, re.M) for p in detection.get("agent_commands", [])]
+        own = plain + [re.compile(r"^my-bot\b", re.M)]
+        for text in ("my-bot --go", "sudo my-bot --go", "echo my-bot"):
+            with self.subTest(text=text):
+                first = wf_mod._command_reading(text, None, tuple((p.pattern, p.flags) for p in own), own)
+                second = wf_mod._command_reading(text, None, tuple((p.pattern, p.flags) for p in plain), plain)
+                self.assertEqual(second, None)
+                self.assertEqual(first is None, text == "echo my-bot")
+
     def test_release_and_signing_commands_are_as_before(self):
         detection = load().detection
         uploads = tuple(detection.get("upload_commands", []))
@@ -153,9 +187,72 @@ def _workflow(steps):
         f"      - run: echo step {n} \"$KEY\"\n        env:\n          KEY: k{n}\n" for n in range(steps)))
 
 
+# Steps that name agent tools, each read by OBAAF-GHA-026 through the command lines the tools now share: bash,
+# PowerShell and cmd, a value put in from `env`, github-script, a `${{ env }}` expression, an input that is a
+# command, and a matrix over Windows and Linux.
+NAMING = """on: pull_request
+permissions: {}
+env:
+  FLAGS: --dangerously-skip-permissions
+jobs:
+  a:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      AGENT: codex
+    steps:
+      - run: claude --dangerously-skip-permissions -p "review"
+      - run: claude ${{ env.FLAGS }} -p x
+      - run: $AGENT --yolo exec x
+      - run: '& $env:AGENT --dangerously-bypass-approvals-and-sandbox exec x'
+        shell: pwsh
+      - run: '%AGENT% --yolo exec x'
+        shell: cmd
+      - uses: actions/github-script@0000000000000000000000000000000000000000
+        with:
+          script: await exec.exec('gemini', ['--yolo', '-p', 'x'])
+      - uses: some/retry@0000000000000000000000000000000000000000
+        with:
+          command: claude --permission-mode bypassPermissions -p x
+      - run: echo nothing to see
+"""
+
+
 class OneReadingForEveryToolTest(unittest.TestCase):
     """OBAAF-GHA-026 works out what a step gives a shell once for the step, not once for each of the agent
-    tools whose options it reads (a dozen): before the slice, `_step_shell` ran for every step and tool."""
+    tools whose options it reads (a dozen): before the slice, `_agent_command` worked it out for every step
+    and tool."""
+
+    def _check(self, text):
+        with TempDir() as tmp:
+            root = tmp / "repo"
+            (root / ".github" / "workflows").mkdir(parents=True)
+            (root / ".github" / "workflows" / "wf.yml").write_text(text, encoding="utf-8")
+            result = checker.check(root)
+        return sorted((f.rule, f.job, f.step, f.kind, f.severity, f.message, repr(f.facts)) for f in result.findings
+                      if f.rule == "OBAAF-GHA-026"), result.errors
+
+    def test_the_shared_reading_gives_what_a_reading_for_each_tool_gives(self):
+        shared, errors = self._check(NAMING)
+        real = rules.WorkflowRules._agent_command
+
+        def alone(self, job, step, tool, name, flags, programs, packages, command=None):
+            # As before the slice: each tool works the step's command lines out for itself.
+            return real(self, job, step, tool, name, flags, programs, packages, None)
+
+        rules.WorkflowRules._agent_command = alone
+        try:
+            each, errors_each = self._check(NAMING)
+        finally:
+            rules.WorkflowRules._agent_command = real
+        self.assertEqual(shared, each)
+        self.assertEqual(errors, errors_each)
+        # The steps above are read: several tools' options are reported, among them a "cannot tell".
+        self.assertGreaterEqual(len({row[2] for row in shared}), 5, shared)
+        self.assertTrue({"codex", "claude", "gemini"} <= {
+            word for row in shared for word in ("codex", "claude", "gemini") if word in row[5].lower()}, shared)
 
     def test_each_step_is_worked_out_once(self):
         calls = []
