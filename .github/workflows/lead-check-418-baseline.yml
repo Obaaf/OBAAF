@@ -1,4 +1,4 @@
-name: Compare launch walkthrough timing with draft 428 on Python 3.10
+name: Verify the corrected performance draft with the launch walkthrough
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
@@ -16,7 +16,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
-          python-version: '3.10'
+          python-version: '3.13'
       - name: Combine the two draft heads with the verified walkthrough
         id: resolve
         run: |
@@ -32,40 +32,52 @@ jobs:
           git worktree add -q --detach "$RUNNER_TEMP/previous-adoption" 21d730dba5ac5fbe83199b1f444ad4eb4bdb250e
           git -C "$RUNNER_TEMP/previous-adoption" apply --3way --index "$RUNNER_TEMP/walkthrough.patch"
           test "$(git -C "$RUNNER_TEMP/previous-adoption" write-tree)" = 97829a0dd3fbf9c66c50c928b58efe2482c11c96
-          git merge --no-ff --no-commit a85ed7d17802c4971cdd148581419428b2599a6c
+          git merge --no-ff --no-commit 43990e6c068d6638d98e02ae6d8c36a2ce1cb481
           git diff --cached --check
           echo "Adoption tree $(git write-tree)"
           git commit --no-edit
           git apply --3way --index "$RUNNER_TEMP/walkthrough.patch"
           git diff --cached --check
           echo "Combined tree $(git write-tree)"
-      - name: Compare the two walkthrough trees on the 400-job fixture
+      - name: Compare four report formats on both adopters
         run: |
-          export TMPDIR="$RUNNER_TEMP" PYTHONDONTWRITEBYTECODE=1
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
           if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          git worktree add -q --detach "$RUNNER_TEMP/flagship" d6410ceb8f9ed7d1782c0bb1e4204a5f4c3308a3
+          git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
           python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
-          cmp tests/test_local_composite_actions.py "$RUNNER_TEMP/previous-adoption/tests/test_local_composite_actions.py"
-          cat > "$TMPDIR/measure_launch.py" <<'PY'
-          import sys
-          import unittest
+          python - <<'PY'
+          import os, subprocess, sys
           from pathlib import Path
-
-          root = Path.cwd()
-          sys.path[:0] = [str(root / "src"), str(root / "tests")]
-          from test_local_composite_actions import TheReviewersSixthPassTest
-
-          class MeasuredFixture(TheReviewersSixthPassTest):
-              def assertLess(self, actual, limit, msg=None):
-                  print(f"WALKTHROUGH {sys.argv[1]} {actual:.3f}s (limit {limit}s)", flush=True)
-                  super().assertLess(actual, limit, msg)
-
-          result = unittest.TextTestRunner(verbosity=2).run(
-              MeasuredFixture("test_a_large_repository_with_realistic_actions_passes")
-          )
-          sys.exit(int(not result.wasSuccessful()))
+          root = Path(os.environ["RUNNER_TEMP"])
+          settings = root / "flagship"
+          sites = [
+              ("OBAAF", settings, settings / ".github/obaaf-settings.json", "medium", 0),
+              ("Expectrail", root / "expectrail", settings / "tests/fixtures/settings/live-expectrail-2026-11-13/snapshot.json", "low", 1),
+          ]
+          for label, before, after in [("Combined checker", root / "previous-adoption", Path.cwd())]:
+              for name, site, snapshot, threshold, expected in sites:
+                  for mode in ("text", "json", "sarif", "summary"):
+                      command = [sys.executable, "-m", "obaaf", "check", ".", "--settings", str(snapshot),
+                                 "--baseline", ".github/obaaf-baseline.json", "--fail-on", threshold]
+                      command.extend(["--summary"] if mode=="summary" else ["--format", mode])
+                      if name=="Expectrail":
+                          command.append("--no-fixes")
+                      outputs = []
+                      for source in (before, after):
+                          env = dict(os.environ, PYTHONPATH=str(source/"src"), PYTHONDONTWRITEBYTECODE="1")
+                          result = subprocess.run(command, cwd=site, env=env, capture_output=True)
+                          assert result.returncode==expected, (name, mode, result.stderr[-300:])
+                          assert b"git did not list the tracked files" not in result.stdout
+                          outputs.append((result.stdout, result.stderr, result.returncode))
+                      assert outputs[0]==outputs[1], (label,name,mode)
+                      print(label, name, mode, "matched", expected, flush=True)
           PY
-          failed=0
-          for checkout in "$RUNNER_TEMP/previous-adoption" "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" "$RUNNER_TEMP/previous-adoption"; do
-            (cd "$checkout" && python "$TMPDIR/measure_launch.py" "$(git write-tree)") || failed=1
-          done
-          exit "$failed"
+      - name: Run the full combined acceptance suite
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: |
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          python -m obaaf docs build --check
+          python -m unittest discover -s tests -v
