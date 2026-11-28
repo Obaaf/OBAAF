@@ -1,0 +1,60 @@
+name: Check D-122 against the native Windows CLI
+on:
+  push:
+    branches: [lead/check-417-platform-wording]
+permissions:
+  contents: read
+jobs:
+  native-windows:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 2a2c408665ce7316d45b0046aadcf336648669cd
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Install the checker and run the Windows regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse 'HEAD^{tree}') -ne 'f922b49b78c18894c9e174f9636bdd013e50a249') { throw 'Unexpected source tree' }
+          $scratch = Join-Path $env:RUNNER_TEMP 'obaaf-junction'
+          New-Item -Type Directory -Path $scratch | Out-Null
+          $env:TMPDIR = $scratch
+          $env:TEMP = $scratch
+          $env:TMP = $scratch
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+          if ($LASTEXITCODE -ne 0) { throw 'Installation failed' }
+          @'
+          import os, sys, tempfile, unittest
+          from pathlib import Path
+
+          root = Path(tempfile.gettempdir()).resolve()
+          assert root == Path(os.environ['TMPDIR']).resolve()
+          assert not any((p / '.git').exists() for p in (root, *root.parents))
+          assert os.name == 'nt'
+          import subprocess
+          with tempfile.TemporaryDirectory() as directory:
+              repo = Path(directory)
+              workflow = repo / '.github/workflows/obaaf-pipeline-check.yml'
+              link = repo / 'obaaf.yaml'
+              os.symlink('.github/workflows/obaaf-pipeline-check.yml', link)
+              def check(args, expected):
+                  result = subprocess.run([sys.executable, '-m', 'obaaf', *args], cwd=repo, text=True, capture_output=True)
+                  print(args, result.returncode, result.stdout, result.stderr, flush=True)
+                  assert result.returncode == expected
+                  return result.stdout + result.stderr
+              for flags in ([], ['--apply']):
+                  output = check(['init', '.', *flags], 1)
+                  assert 'looks like a checker configuration' in output
+                  assert not workflow.exists() and not (repo / '.github/obaaf.yml').exists()
+              workflow.parent.mkdir(parents=True)
+              workflow.write_text('name: Example\non: push\njobs:\n  example:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo example\n')
+              assert not link.is_file()
+              output = check(['check', '.', '--fail-on', 'never'], 0)
+              assert 'looks like a checker configuration' not in output
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Native junction verification failed or skipped' }
