@@ -671,6 +671,10 @@ def _heredoc_parts(text: str) -> _Parts:
     parts = _Parts()
     # `\\` is one backslash and `\$` a dollar sign; what is left of `$` is expanded.
     text = text.replace("\\\\", "\x00").replace("\\$", "\x00").replace("\\`", "\x00")
+    for expression in re.findall(r"\$\{\{.*?\}\}", text, re.S):
+        if not _PLAIN_CONTEXT_RE.match(expression):
+            parts.indirect = True       # as in a word: GitHub writes its result before the shell expands it
+    text = re.sub(r"\$\{\{.*?\}\}", "", text, flags=re.S)
     if "$(" in text or "`" in text:
         parts.substitution = True
     for default in _DEFAULT_SET_RE.finditer(text):
@@ -777,6 +781,7 @@ def _runner_file_writes(script: str, held: frozenset, every: bool = False, clean
     opaque = opaque or bool(_OPAQUE_RE.search(script))
     infos = []                  # (command, name, parts, plain sets {name: parts}, other names set)
     skip = set()
+    array_words: set = set()
     previous = None
     for n, command in enumerate(commands):
         if n in skip:
@@ -807,7 +812,10 @@ def _runner_file_writes(script: str, held: frozenset, every: bool = False, clean
                     # with `)` on the same line; otherwise what it holds is not known.
                     if n + 1 < len(commands) and commands[n + 1].ended_by == ")":
                         # Its words, which are also read as a command: a subshell on the next line looks the same.
+                        # As an array's words they open and close nothing (`A=(done)`), so the stack pass leaves
+                        # them out.
                         value = _command_parts(commands[n + 1])
+                        array_words.add(id(commands[n + 1]))
                     else:
                         others.add(match.group(1))
                 sets.setdefault(match.group(1), _Parts()).add(value)
@@ -956,6 +964,10 @@ def _runner_file_writes(script: str, held: frozenset, every: bool = False, clean
     stack: list = []            # [opener word, results so far]
     for k, (command, name, _p, _s, _o) in enumerate(infos):
         words = command.words
+        if id(command) in array_words:
+            if stack:
+                stack[-1][1].add("unresolved" if _p.names & holding or _p.substitution else "clean")
+            continue
         first = words[0].text if words and plain(words[0]) else ""
         if first in _OPENERS:
             want = _OPENERS[first]

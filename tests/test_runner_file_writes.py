@@ -382,6 +382,27 @@ class ThirdReviewTest(unittest.TestCase):
                 self.assertEqual(self.outcome(code + ' >> "$GITHUB_ENV"'), [("high", "")])
 
 
+class FourthReviewTest(unittest.TestCase):
+    """The fourth review of slice 2d.26 (58d30fe)."""
+
+    def outcome(self, script, env=f"BODY: {BODY}", **kwargs):
+        return [(f.severity, f.kind) for f in gha028(check(job(script, env=env, **kwargs)))]
+
+    def test_an_array_s_words_open_and_close_nothing(self):
+        for script in ('for i in 1; do\n  echo "X=$BODY"\n  A=(done)\n  B=(while)\ndone >> "$GITHUB_ENV"',
+                       '{\n  echo "X=$BODY"\n  A=(})\n  B=({)\n} >> "$GITHUB_ENV"',
+                       'if true; then\n  echo "X=$BODY"\n  A=(fi)\n  B=(if)\nfi >> "$GITHUB_ENV"'):
+            with self.subTest(script):
+                self.assertEqual(self.outcome(script), [("high", "")])
+        self.assertEqual(self.outcome('{ ARGS=("--body" "x"); echo "A=1"; } >> "$GITHUB_ENV"'), [])
+
+    def test_an_expression_in_a_here_document(self):
+        script = 'cat >> "$GITHUB_ENV" <<EOF\nX=${{ env.LIT }}\nEOF'
+        self.assertEqual(self.outcome(script, env=f"BODY: {BODY}\nLIT: $BODY"), [("medium", "unresolved")])
+        clean = 'cat >> "$GITHUB_ENV" <<EOF\nX=${{ github.sha }}\nEOF'
+        self.assertEqual(self.outcome(clean), [])
+
+
 class CostTest(unittest.TestCase):
     def test_many_names_and_many_writes(self):
         # The first review: 1,000 copies and 1,000 writes took 45.7 s; 10,000 redirected loops 16.1 s.
