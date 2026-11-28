@@ -1938,7 +1938,7 @@ class WorkflowRules:
             for each in job.steps:
                 flags.append(seen)
                 seen = seen or bool(self._ENV_CONTEXT_WRITERS_RE.search(_squeeze(
-                    as_text(each.raw.get("run") or "") + as_text(each.raw.get("with") or ""))))
+                    self._values_text([each.raw.get("run"), each.raw.get("with")]))))
             known = memo[id(job)] = (job, flags)
         flags = known[1]
         return flags[step.index] if step.index < len(flags) else True
@@ -1949,12 +1949,12 @@ class WorkflowRules:
         where they name a way to write those files and the step's environment holds the text (for github-script,
         also where the script names the event's payload)."""
         script = step.run if isinstance(step.raw.get("run"), str) and step.run and not step.uses else ""
-        others = [text for text in self._script_texts(job, step) if text and text != script
-                  and text != as_text(step.raw.get("shell") or "")]
+        shell_text = self._values_text(step.raw.get("shell"))
+        others = [text for text in self._script_texts(job, step) if text and text != script and text != shell_text]
         if not script and step.raw.get("run") is not None and not step.uses:
-            others.append(as_text(step.raw.get("run")))
+            others.append(self._values_text(step.raw.get("run")))    # a value YAML aliases is read once a node
         scopes = [scope or {} for scope in (self.wf.env, job.env, step.env)]
-        path_in_env = any(_names_runner_files(as_text(v)) for scope in scopes for v in scope.values())
+        path_in_env = any(_names_runner_files(self._values_text(list(scope.values()))) for scope in scopes)
         if not path_in_env and not any(self._RUNNER_FILE_TEXT_RE.search(_squeeze(text)) or _names_runner_files(text)
                                        for text in (script, *others) if text):
             return
@@ -1976,7 +1976,7 @@ class WorkflowRules:
                 shells |= set(shell_env.runner_shells(job))
             if shells & {"bash", "sh"}:
                 # Tracing or functions set from outside the script: the shell's own options, or the `env`.
-                given = as_text(shell_env.explicit_shell(step.raw, (job.raw, self.wf.raw)) or "")
+                given = self._values_text(shell_env.explicit_shell(step.raw, (job.raw, self.wf.raw)))
                 outside = bool(re.search(r"\s-[a-zA-Z]*x|xtrace", given)) or any(
                     re.match(r"\s*(SHELLOPTS|BASHOPTS|BASH_ENV|BASH_FUNC_|ENV\s*$)", str(k))
                     for scope in scopes for k in scope)
@@ -2012,7 +2012,9 @@ class WorkflowRules:
         references = sorted("$" + name for name in names if name != "*") or ["every variable"]
         files = sorted(found.files)
         trigger_fact = Fact(sorted(job.triggers()), "")
-        script_fact = Fact([f"script: {digest_of([step.raw.get('run'), step.raw.get('with')])}"], "")
+        # Each node once, so a value YAML aliases many times costs little (`_values_text`).
+        written = self._values_text([step.raw.get("run"), step.raw.get("with")])
+        script_fact = Fact([f"script: {hashlib.sha256(written.encode('utf-8', 'surrogatepass')).hexdigest()[:16]}"], "")
         if found.state == "written":
             commit_text = any(self._commit_field(f) for f in fields)
             severity = "high" if untrusted or (commits_pushed and commit_text) else "medium"
