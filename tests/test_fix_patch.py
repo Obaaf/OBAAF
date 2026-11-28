@@ -308,6 +308,6 @@ class FixPatchReviewTest(unittest.TestCase):
         target = self.root / "notes.txt"
         target.write_bytes(b"a\n")
         save_patch(self.root, self.patch, (Edit(Path("notes.txt"), b"a\n", b"b\n", ()),))
-        done = subprocess.run(["git", "apply", str(self.patch)], cwd=self.root, capture_output=True)
-        self.assertEqual(done.returncode, 0, done.stderr)
+        # Removing .git above also removed the fixture's line-ending setting.
+        self.git("-c", "core.autocrlf=false", "apply", str(self.patch))
         self.assertEqual(target.read_bytes(), b"b\n")
