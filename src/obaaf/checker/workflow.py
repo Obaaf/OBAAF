@@ -21,6 +21,7 @@ from obaaf import yamlutil
 from obaaf.catalog import load as load_catalog
 from obaaf.checker import env_expr
 from obaaf.checker import expr as expr_mod
+from obaaf.checker import shell_env
 
 LANES = ("untrusted", "agent", "effect", "release", "trusted")
 # A job is in every lane it qualifies for, and gets the rules of each. This is the order they are
@@ -2237,12 +2238,14 @@ class _MadeText:
     """What `Step.env_put_in` makes of some command lines and `env` values (flagship slice 2d.17): the
     characters of values it puts in, or None where the step's own bound stops it; the text, made only once a
     step's use of it fits the workflow's bound (None until then); the values, kept so that their ids, which the
-    key holds, stay theirs; and what `agent_text` found in the text, by the patterns it looked for."""
+    key holds, stay theirs; and what `agent_text` found in the text, by the patterns it looked for. `probe`
+    (flagship slice 2d.25): for a PowerShell or cmd step, the lines of the text in which a value of one word was put
+    in, which `agent_text` searches as it searches the step's own lines."""
 
-    __slots__ = ("text", "size", "kept", "found")
+    __slots__ = ("text", "size", "kept", "found", "probe")
 
     def __init__(self, text, size, kept) -> None:
-        self.text, self.size, self.kept, self.found = text, size, kept, {}
+        self.text, self.size, self.kept, self.found, self.probe = text, size, kept, {}, None
 
 
 _ENV_NAME_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
@@ -2451,14 +2454,37 @@ class Step:
                 found.extend(made.found[signature])
             else:
                 here: list = []
+                # In PowerShell and cmd, also the program a launcher runs (`Start-Process -FilePath $env:AGENT`, `call
+                # %AGENT%`; flagship slice 2d.25), as OBAAF-GHA-026's reader of those shells reads it, and the
+                # command that matched is kept beside the reading, so that it is found where the reading is searched.
+                family = self.shell_family() if self.run else None
                 for variant in _readings(put):
-                    if any(matches_any(commands, candidate, anchored=True) for segment in command_segments(variant)
-                           for candidate in _first_word_forms(segment)):
+                    hit = next((candidate for segment in command_segments(variant)
+                                for form in [segment, *shell_env.command_forms(segment, family)]
+                                for candidate in _first_word_forms(form)
+                                if matches_any(commands, candidate, anchored=True)), None)
+                    if hit is not None:
                         here.append(variant)
+                        if family is not None:
+                            here.append(hit)
                         break
                 made.found[signature] = tuple(here)
                 found.extend(here)
-        text = "\n".join(p for p in [own, worked if worked != own else None, *found] if p)
+        probe = made.probe if made is not None and put is not None else None
+        # A PowerShell or cmd step's own lines are read for the program a launcher runs too (`@claude -p x`,
+        # `Start-Process claude -ArgumentList '-p','x'`, `call claude ...`), as OBAAF-GHA-026's readers of those
+        # shells read them, so that a program written out and one put in give the same lane (flagship slice 2d.25).
+        family = self.shell_family() if self.run else None
+        if family is not None and own:
+            cache = self.__dict__.setdefault("_launched", {})
+            signature = (own, tuple((p.pattern, p.flags) for p in commands))
+            if signature not in cache:
+                cache[signature] = [candidate for variant in _readings(own) for segment in command_segments(variant)
+                                    for form in shell_env.command_forms(segment, family)
+                                    for candidate in _first_word_forms(form)
+                                    if matches_any(commands, candidate, anchored=True)][:1]
+            found.extend(cache[signature])
+        text = "\n".join(p for p in [own, worked if worked != own else None, probe, *found] if p)
         return "\n".join(dict.fromkeys(v for v in _readings(text) if v))
 
     def env_expressions_text(self, own: str | None = None) -> str | None:
@@ -2562,6 +2588,17 @@ class Step:
             text = made[1] = env_expr.build(own, plan)
         return text, plan.size, plan.readings, None
 
+    def shell_family(self) -> str | None:
+        """`pwsh` or `cmd` where the step's `run` script is given to PowerShell or cmd, as OBAAF-GHA-026 reads it
+        (`shell_env.run_shell` and `run_language`: the step's `shell`, its job's and workflow's `defaults`); with none,
+        `pwsh` where the runner may be Windows (`shell_env.runner_shells`: a matrix over Windows and Linux too, whose
+        put-in text holds bash's as well); None for any other shell (flagship slice 2d.25)."""
+        if shell_env.explicit_shell(self.raw, self.inherited) is None:
+            return "pwsh" if "pwsh" in shell_env.runner_shells(self.job) else None
+        holders = self.inherited
+        runs_on = self.job.runs_on if self.job is not None else ()
+        return shell_env.family(shell_env.run_language(self.raw, shell_env.run_shell(self.raw, holders, runs_on)))
+
     def _env_put_in_reading(self, own: str) -> tuple:
         """(made, text, why) for `env_put_in`: `made` the `_MadeText` (None where nothing is put in, and then
         the text is `own`), the text or None, and why it is None. The text is made once for the same command
@@ -2569,7 +2606,13 @@ class Step:
         the workflow's ledger, whichever step asks; each step's use of it is settled there once, by the step's
         number, because each step hands what is found in it on to the rules (found by the review: 300 steps
         that YAML makes of one mapping took 72 s when the text was counted once for all of them)."""
-        if not own or "$" not in own:
+        if not own:
+            return None, own, None
+        # A step given to PowerShell or cmd reads its `env` as `$env:NAME` or `%NAME%` too (flagship slice 2d.25).
+        family = self.shell_family() if self.run else None
+        if family is not None:
+            return self._shell_put_in_reading(own, family)
+        if "$" not in own:
             return None, own, None
         # `${{ }}` expressions that read `env` are worked out first, as GitHub works them out before the shell
         # starts (flagship slice 2d.19; before, `run: ${{ env.AGENT }} -p x` was read as written and was in no
@@ -2617,6 +2660,95 @@ class Step:
             return made, None, put_ins.unread
         if made.text is None:
             made.text = _ENV_NAME_RE.sub(lambda m: env.get(m.group(1), m.group(0)), base) if env else base
+        return made, made.text, None
+
+    def _shell_put_in_reading(self, own: str, family: str) -> tuple:
+        """`_env_put_in_reading` for a step whose `run` PowerShell or cmd runs (flagship slice 2d.25, #411): as for
+        bash, each `$NAME` and `${NAME}` the `env` the step runs with gives a text is put in, and so is each
+        `$env:NAME` and `${env:NAME}` (PowerShell) or `%NAME%` (cmd), wherever it stands (`shell_env.lane_pattern`;
+        the lanes read the widest way, as their bash put-in does in quotes). Their names are compared as the runner
+        compares them (`shell_env.case_of`): where it may compare either way and the two give other values, the text
+        is made both ways, one after the other, and D-137's bound is twice as wide. Bounded and kept as
+        `_env_put_in_reading` is: D-137 for the step, D-138 on the workflow's lanes ledger."""
+        if "$" not in own and not (family == "cmd" and "%" in own):
+            return None, own, None
+        base, extra, lines, expressions_why = own, 0, 1, None
+        if env_expr.may_read_env(own):
+            base, extra, lines, expressions_why = self._env_expressions(own)
+            if base is None:
+                return None, None, expressions_why
+        pattern = shell_env.lane_pattern(family)
+        refs = [(match,) + shell_env.lane_reference(match) for match in pattern.finditer(base)]
+        if not any(kind for _m, kind, _name in refs) and base == own:
+            return None, own, None
+        given = self.run_env
+        lookup = shell_env.Lookup([self.raw.get("env"), *(holder.get("env") if isinstance(holder, dict) else None
+                                                         for holder in self.inherited)])
+        case = shell_env.case_of(family, self.job)
+        modes = ["exact", "folded"] if case == "both" else [case]
+        readings = []
+        for mode in modes:
+            readings.append([given.get(name) if kind == "bash" else lookup.get(name, mode) if kind else None
+                             for _m, kind, name in refs])
+        if len(readings) == 2 and all(a is b for a, b in zip(*readings)):
+            readings = readings[:1]
+        if all(value is None for values in readings for value in values) and base == own:
+            return None, own, None
+        put_ins = self.put_ins
+        used = tuple(dict.fromkeys((kind, name, n, id(value)) for n, values in enumerate(readings)
+                                   for (_m, kind, name), value in zip(refs, values) if value is not None))
+        key = ("shell-put-in", family, case, own, used)
+        if base != own:
+            key = (key, "env-expressions", base)
+        made = put_ins.lanes.made.get(key) if put_ins is not None else None
+        if made is None:
+            budget = PutInBudget(scale=max(1, min(self.readings, 16), min(lines, env_expr.LINE_READINGS))
+                                 * len(readings))
+            size = extra
+            for values in readings:
+                for value in values:
+                    if value is None:
+                        continue
+                    if not budget.take(value):
+                        size = None
+                        break
+                    size += len(value)
+                if size is None:
+                    break
+            made = _MadeText(None, size, tuple(v for values in readings for v in values if v is not None))
+            if put_ins is not None:
+                put_ins.lanes.made[key] = made
+        if made.size is None:
+            return made, None, ENV_PUT_IN_UNREAD
+        if put_ins is not None and not put_ins.lanes.settle((self.seq, key), made.size):
+            return made, None, put_ins.unread
+        if made.text is None:
+            # Line by line, since no reference spans a line: a line in which a value of one word (a program's name,
+            # `C:\tools\claude.exe`) was put in is kept as the probe, which `agent_text` reads as it reads the
+            # step's own lines (from the review: `if 1==1 %AGENT% -p x`, `cmd /d /c %AGENT% ...` and `-ArgumentList`
+            # before `-FilePath` are read for a literal program and were not for one put in). A value with a space
+            # is read only command by command, as D-139 reads a put-in text, so prose in it is not an agent.
+            texts, probes = [], []
+            for values in readings:
+                found = iter(values)
+                lines = []
+                for line in base.split("\n"):
+                    single = []
+
+                    def one(m, found=found, single=single):
+                        value = next(found)
+                        if value is None:
+                            return m.group(0)
+                        if value and not any(ch.isspace() for ch in value):
+                            single.append(True)
+                        return value
+                    made_line = pattern.sub(one, line)
+                    lines.append(made_line)
+                    if single:
+                        probes.append(made_line)
+                texts.append("\n".join(lines))
+            made.text = "\n".join(texts)
+            made.probe = "\n".join(probes) or None
         return made, made.text, None
 
     @property
