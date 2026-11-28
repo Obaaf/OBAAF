@@ -9,14 +9,14 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 Slice 2d.27a, split from #420; decision D-155. OBAAF-GHA-026 reads PowerShell and cmd scripts with a reader of those shells. The lanes read the same scripts with bash's word splitting. So these each got OBAAF-GHA-026 high and no agent rule: `& “claude” ...`, `claude.exe ...`, `C:\tools\claude.exe ...`, cmd's `^claude ...`, `Start-Process -WorkingDirectory C:\w claude ...`, `$a = 'claude'; & $a ...`, and `set BIN=claude` followed by `%BIN% ...`.
 
 - **Can fail a check that passed.** Wherever OBAAF-GHA-026's reader names the program of a command, the lanes match the agent patterns against that command, so the job is now an agent job with every agent rule.
-- **OBAAF-GHA-026 reads more, and can fail a check that passed.** These forms are new:
+- **OBAAF-GHA-026 reads more, and can fail a check that passed**, where the program is not a plain word (curly quotes, a quoted path, a name given it); with a plain `claude.exe` it already reported most of these. These forms are new:
   - `cmd /d /s /c "..."` and `cmd /e:on /c ...`;
   - `pwsh -NoProfile -Command "..."` and `powershell -c ...`;
   - `iex 'claude ...'`, cmd's repeated `if`, and `start /d C:\w ...`;
   - `Start-Process -Path`, `-PSPath` and `-A`, and lists with spaced commas or continued lines;
   - a PowerShell line continued after a trailing `,` or `|`;
   - an option after `2>&1`, and an option after an inline `<# ... #>`.
-- **It stops reading** cmd `rem` and label lines.
+- **Its cmd reader skips** `rem` and label lines, so no lane comes from them; OBAAF-GHA-026's loose reading still reports a warned option written on one.
 - **Not given to the lanes:**
   - a PowerShell string or a variable used as a value (`$a = 'claude'`, `$y = $x + ' -p x'`);
   - what a bracket in a cmd command's text holds (`echo (...)`, a `for` set);
@@ -24,6 +24,7 @@ Slice 2d.27a, split from #420; decision D-155. OBAAF-GHA-026 reads PowerShell an
 - **Still not read**, so these give OBAAF-GHA-026 "cannot tell" and no agent lane (#420):
   - a group, a subexpression, a method's result, a splat;
   - a typed copy, a `foreach` variable, a pipeline's `$_`.
+- **Forms its reader does not enter**, which give OBAAF-GHA-026 high and no agent lane: `for /f ... in ('claude ...')`, `&claude.exe`, `-CommandWithArgs`, `Invoke-Expression -Command`, `iex ('...')`; and a bash step's `claude.exe`.
 - On this repository and on the first adopter the reports are byte-identical with `flagship` `67f84e5`.
 
 ### OBAAF-GHA-028: an outsider's text written to GITHUB_ENV or GITHUB_PATH

@@ -1636,7 +1636,7 @@ The line is drawn where an agent's name written out would be seen. A value at an
 **Decision.** From slice 2d.27a (split from #420 by run `dickcissel`, on the lead's order on #420) and its review. It amends D-153's stated limits.
 
 - **What the lanes read.** For a `run` step whose script PowerShell or cmd runs, `agent_code.program_lines` gives the command line of every command whose program OBAAF-GHA-026's reader of those shells (`read_shell_lines`) names. Each line is the program's name, then its arguments as the shell gives them.
-  - The program's name has no folder, no `.exe`, `.cmd`, `.bat`, `.ps1` or `.com`, and is in lower case; a package keeps its name as written.
+  - The program's name has no folder, no `.exe`, `.cmd`, `.bat`, `.ps1` or `.com`, and is in lower case; a package keeps its name, in lower case.
   - A name the script gives the program's name (`$a = 'claude'`, `set C=claude`) counts, wherever the script sets it, as OBAAF-GHA-026 reads it.
   - `Step.agent_text` matches the catalogue's agent patterns, anchored, against those lines. It reads the step's own text, the text with its `${{ }}` worked out, and the text with its `env` put in.
   - These are now agent jobs: `& “claude” ...`, `claude.exe ...`, `C:\tools\claude.exe ...`, cmd's `^claude ...` and `c^laude ...`, `Start-Process -WorkingDirectory C:\w claude ...`, `$a = 'claude'; & $a ...`, and `set BIN=claude` with `%BIN% ...`.
@@ -1655,14 +1655,14 @@ The line is drawn where an agent's name written out would be seen. A value at an
   - A PowerShell line continues on the next where `,` or `|` is its last word outside a comment and a string. The next line is joined where the carried line's code ends.
   - A redirection that holds its target (`2>&1`) no longer drops the word after it.
   - `<# ... #>` on one line is a comment, and the line goes on after it.
-  - cmd's `rem` lines and label lines (`:name`, `::`) run nothing, including a command after a `&`.
+  - cmd's `rem` lines and label lines (`:name`, `::`) run nothing, including a command after a `&`, so this reader skips them.
 
-**Reason.** #420 found that OBAAF-GHA-026 read these programs while the lanes, reading the same scripts with bash's word splitting, did not. Each of those jobs got OBAAF-GHA-026 high and no agent rule (OBAAF-GHA-003, 005, 020). A copy of the reader's knowledge in a second place is what 2d.25's reviews got past each time. So the lanes now take the program from the reader itself, and a test holds the two together: across 240 generated commands, wherever OBAAF-GHA-026 names the program and the command has the pattern's prompt flag, the job is an agent job. The review found the reader's own gaps under the slice's first head; each is fixed by its class above, because the lanes now inherit them.
+**Reason.** #420 found that OBAAF-GHA-026 read these programs while the lanes, reading the same scripts with bash's word splitting, did not. Each of those jobs got OBAAF-GHA-026 high and no agent rule (OBAAF-GHA-003, 005, 020). A copy of the reader's knowledge in a second place is what 2d.25's reviews got past each time. So the lanes now take the program from the reader itself, and a test holds the two together: across 240 commands in the forms its generator writes, wherever OBAAF-GHA-026 names the program and the command has the pattern's prompt flag, the job is an agent job. The review found the reader's own gaps under the slice's first head, which the lanes now inherit: those listed above are fixed in the reader by class; the rest are the stated limits below.
 
 **Consequences.**
 - **A gate can go red where it passed.** Such a job is now an agent job and gets every agent rule.
-- **OBAAF-GHA-026 now reports options it did not see before:** after `2>&1`, after an inline `<# #>`, inside `cmd /d /s /c "..."`, `pwsh -Command "..."` and `iex '...'`, and in a `Start-Process` list with spaced commas or continued lines.
-- **It stops reporting** a `rem` or label line in cmd.
+- **OBAAF-GHA-026 now reports options its loose reading missed** where the program is not a plain word (curly quotes, a quoted path, a name given it): after `2>&1`, after an inline `<# #>`, inside `pwsh -Command "..."` and `iex '...'`, and in a `Start-Process` list with spaced commas or continued lines. With a plain `claude.exe` it already reported most of these.
+- Its cmd reader no longer reads `rem` or label lines; OBAAF-GHA-026's loose reading still reports a warned option on one, as on `67f84e5`, and no lane comes from it.
 - On this repository and on the first adopter nothing changes: text, JSON, SARIF, `--summary`, `--lanes` and the first adopter's gate are byte-identical with `flagship` `67f84e5`.
 - Over the review's corpus of about 730 steps with OBAAF-GHA-026 findings, two steps lose one, and both are right to lose it:
   - a run line inside a here-string;
@@ -1682,12 +1682,13 @@ The line is drawn where an agent's name written out would be seen. A value at an
   - cmd's `2> &1` and `>& 2`;
   - a block comment that spans lines inside a continued argument list.
 - **How the reader reads text and order:**
-  - A here-string's lines, and an ordinary string's later lines, are read as commands, as OBAAF-GHA-026 reads them. A first head left here-strings out, which hid real runs (`iex @"..."@`) and took `'@'` for an opener.
+  - A here-string's lines, and an ordinary string's later lines, are read as commands, as OBAAF-GHA-026 reads them. The second head (`c1f0ccf`) left here-strings out, which hid real runs (`iex @"..."@`) and took `'@'` for an opener.
   - A quoted argument that spans lines is split there.
-  - A cmd `for` set that spans lines is read as commands.
+  - A cmd `for` set that spans lines is read as commands. cmd's `if/i ... (` and a block after a redirection (`>log.txt (...)`) are read as text, so no lane; `if exist x echo Run (claude ...)` is read as a block, a false lane.
   - A name given the program's name counts whatever is assigned to it later, and in a function that is never called.
 - **What this slice leaves out:**
-  - A bash step's `claude.exe` and folder are not given to the lanes; this slice reads only PowerShell and cmd.
+  - A bash step's `claude.exe` and folder, and the same inside `bash -c '...'` in a PowerShell step, are not given to the lanes; this slice reads only PowerShell and cmd.
+  - OBAAF-GHA-026's loose reading still reports where nothing runs (`Write-Host claude.exe --dangerously-skip-permissions -p x`), with no agent lane.
   - A repository's own agents (`agents.commands`) are patterns, not names, so the reader does not name them.
   - D-153's cost for a value left out, its unquoted values in PowerShell code, and its cmd assignment noise are unchanged.
 

@@ -3458,10 +3458,10 @@ Slice 2d.27a (split from #420; D-155). Before it, OBAAF-GHA-026 read `claude.exe
 
 | Pass | Head | Jobs | Blocking | Found |
 | --- | --- | --- | --- | --- |
-| 1 | `aee3816` | ~370 | 2 classes | the lanes inherited the reader's gaps. The reader did not enter wrappers and launchers (`cmd /d /s /c`, `cmd /e:on /c`, `pwsh -Command`, `powershell -c`, `iex '...'`, `start /d`, a repeated `if`). `Start-Process` dropped arguments (spaced commas, a continued list, `-Path`, `-PSPath`, `-A`). Not blocking: a word after `2>&1` was dropped, OBAAF-GHA-026's option too; `<# #>` cut the line; `;`, `&` and `\|` inside an argument stopped the pattern; the bash reader's `.exe` is not given to the lanes. New false lanes: here-strings, cmd brackets in text and `for` sets, an escaped `^&`, `rem ... &`, `:: ... &`, a variable in a command's place without `&` |
+| 1 | `aee3816` | ~370 | 2 classes | the lanes inherited the reader's gaps. The reader did not enter wrappers and launchers (`cmd /d /s /c`, `cmd /e:on /c`, `pwsh -Command`, `powershell -c`, `iex '...'`, `start /d`, a repeated `if`). `Start-Process` dropped arguments (spaced commas, a continued list, `-Path`, `-PSPath`, `-A`). Not blocking: a word after `2>&1` was dropped, OBAAF-GHA-026's option too; `<# #>` cut the line; `;`, `&` and `\|` inside an argument stopped the pattern; the bash reader's `.exe` is not given to the lanes. New false lanes: here-strings, cmd brackets in text and `for` sets, an escaped `^&`, `rem ... &`, `:: ... &`, a variable in a command's place without `&`; a name reassigned later and a function never called (stated) |
 | 2 | `c1f0ccf` | ~230 | 2 | the here-string masking hid real runs (`iex @"..."@`, `& ([scriptblock]::Create(@'...'@))`) and took `'@'`, `"@"` and `@"` in a comment for openers, losing every run after them. Joining after a trailing `,` or `\|` ran the next line into a comment, losing OBAAF-GHA-026's finding where the base had it. Not blocking: a cmd text bracket held a later `&`; `@(` was read as text; `^^&` |
-| 3 | `c25eb82` | ~45 | 1 | a comment after a trailing `\|` or `,` still took the joined line. Not blocking: the join was quadratic (17 s for 80,000 lines) |
-| 4 | `8812166` | ~25 | 0 | both fixed (0.93 s for 80,000 lines). Over about 730 steps with OBAAF-GHA-026 findings, two lose one, both right to: a run line inside a here-string, and `Write-Host a,` / `& ...`, which PowerShell refuses |
+| 3 | `c25eb82` | ~45 | 1 | a comment after a trailing `\|` or `,` still took the joined line. Not blocking: the join was quadratic (17 s for 80,000 64-character lines, 5.1 MB) |
+| 4 | `8812166` | ~25 | 0 | both fixed (0.93 s for 80,000 lines). Over about 730 steps with OBAAF-GHA-026 findings, two lose one, both right to: a run line inside a here-string, and `Write-Host a,` / `& ...`, which PowerShell refuses. Not blocking: a block comment spanning lines inside a continued list |
 
 **What changed in response.**
 - The lanes take the program from the reader, so every class of the first pass was fixed in the reader, for OBAAF-GHA-026 too.
@@ -3478,7 +3478,9 @@ Slice 2d.27a (split from #420; D-155). Before it, OBAAF-GHA-026 read `claude.exe
 - Forms the reader does not read: `for /f ('...')`, a call operator joined to its word, `-CommandWithArgs`, `iex ('...')`, `-EncodedCommand`, and cmd's `2> &1`.
 - Here-strings and multi-line strings, which are read as lines, and a quoted argument split at a line break.
 - A name given the program's name, which counts whatever is assigned later.
-- The bash reader's `.exe` and folder.
+- The bash reader's `.exe` and folder, also inside `bash -c '...'` in a PowerShell step.
+- cmd's `if/i ... (` and a block after a redirection, read as text; `if exist x echo Run (claude ...)`, read as a block.
+- OBAAF-GHA-026's loose reading, which still reports where nothing runs (`Write-Host claude.exe ...`) and on `rem` lines, with no agent lane.
 
 All of these are in D-155 and #420.
 
