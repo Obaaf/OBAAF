@@ -282,6 +282,71 @@ class FirstReviewTest(unittest.TestCase):
         self.assertNotEqual(one[0].facts["script"], two[0].facts["script"])
 
 
+class SecondReviewTest(unittest.TestCase):
+    """The second review of slice 2d.26 (b27fee9): each case now a test."""
+
+    def outcome(self, script, env=f"BODY: {BODY}", **kwargs):
+        return [(f.severity, f.kind) for f in gha028(check(job(script, env=env, **kwargs)))]
+
+    def test_not_silent(self):
+        high = [("high", "")]
+        unread = [("medium", "unresolved")]
+        cases = {
+            'FILES=()\necho "PR_BODY=$BODY" >> "$GITHUB_ENV"': high,
+            'ARGS=()\nARGS+=("$BODY")\necho "ARGS=${ARGS[*]}" >> "$GITHUB_ENV"': high,
+            'ARGS=(\n"--body"\n"$BODY"\n)\necho "ARGS=${ARGS[*]}" >> "$GITHUB_ENV"': unread,
+            'cat >> "$GITHUB_ENV" <<EOT\nX=\\\\$BODY\nEOT': high,
+            'echo | cat <<< "X=$BODY" >> "$GITHUB_ENV"': high,
+            'echo A=1 | tee -a "$GITHUB_ENV" <<< "X=$BODY"': high,
+            'echo "$BODY" > t.txt\necho A=1 | cat < t.txt >> "$GITHUB_ENV"': unread,
+            "cat() { printenv BODY; }\ncat >> \"$GITHUB_ENV\" <<'EOT'\nA=1\nEOT": unread,
+            './echo "A=1" >> "$GITHUB_ENV"': unread,
+            ': "${RUNNER_X:=$BODY}"\necho "X=$RUNNER_X" >> "$GITHUB_ENV"': high,
+            '{ [ "$BODY" -eq 1 ] || echo A=1; } &>> "$GITHUB_ENV"': unread,
+            "trap 'printenv BODY' DEBUG\n{ echo A=1; } >> \"$GITHUB_ENV\"": unread,
+            'set -x\n{ echo A=1; } >> "$GITHUB_ENV" 2>&1': unread,
+            "{\necho \"X=$BODY\"\n'{' 2>/dev/null || true\n} >> \"$GITHUB_ENV\"": high,
+            'for f in "$RUNNER_TEMP"/_runner_file_comm*/set_env_*; do echo "X=$BODY" >> "$f"; done': unread,
+        }
+        for script, expected in cases.items():
+            with self.subTest(script):
+                self.assertEqual(self.outcome(script), expected)
+
+    def test_the_event_file_by_its_path(self):
+        script = "jq -r '\"T=\" + .pull_request.title' \"$RUNNER_TEMP/_github_workflow/event.json\" >> \"$GITHUB_ENV\""
+        self.assertEqual(self.outcome(script, env=""), [("medium", "unresolved")])
+
+    def test_no_false_high_from_a_name_in_literal_text(self):
+        for script in ('git rev-parse --abbrev-ref HEAD | sed "s/^/BODY=/" >> "$GITHUB_ENV"',
+                       "jq -r '\"BODY=\" + .title' meta.json >> \"$GITHUB_ENV\"",
+                       "python3 -c 'print(\"BODY=fixed\")' >> \"$GITHUB_ENV\""):
+            with self.subTest(script):
+                self.assertEqual(self.outcome(script), [("medium", "unresolved")])
+        script = "python3 -c 'import os; print(os.environ[\"BODY\"])' >> \"$GITHUB_ENV\""
+        self.assertEqual(self.outcome(script), [("high", "")])
+
+    def test_clean_writes_stay_clean(self):
+        for script in ('shopt -s nullglob\necho "A=1" >> "$GITHUB_ENV"',
+                       'echo "SHA=${{ github.sha }}" >> "$GITHUB_ENV"',
+                       'echo "${{ github.workspace }}/bin" >> "$GITHUB_PATH"',
+                       'for f in a.txt; do\n  case "$f" in\n    *.txt) echo "T=1" ;;\n  esac\ndone >> "$GITHUB_ENV"'):
+            with self.subTest(script):
+                self.assertEqual(self.outcome(script), [])
+
+    def test_nested_groups_and_many_steps_cost_little(self):
+        nested = "\n".join(["for x in a; do"] * 8000 + ['done >> "$GITHUB_ENV"'] * 8000)
+        started = time.monotonic()
+        rules._runner_file_writes(nested, frozenset({"BODY"}))
+        self.assertLess(time.monotonic() - started, 5)
+        steps = "".join(f"      - name: s{n}\n        env:\n          BODY: {BODY}\n"
+                        f"        run: echo \"A=1\" >> \"$GITHUB_ENV\"\n" for n in range(1500))
+        text = "on: pull_request_target\npermissions:\n  contents: read\njobs:\n  a:\n    runs-on: ubuntu-latest\n" \
+               "    steps:\n" + steps
+        started = time.monotonic()
+        check(text)
+        self.assertLess(time.monotonic() - started, 20)
+
+
 class CostTest(unittest.TestCase):
     def test_many_names_and_many_writes(self):
         # The first review: 1,000 copies and 1,000 writes took 45.7 s; 10,000 redirected loops 16.1 s.
