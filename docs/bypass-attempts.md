@@ -3483,4 +3483,3 @@ Slice 2d.27a (split from #420; D-155). Before it, OBAAF-GHA-026 read `claude.exe
 - OBAAF-GHA-026's loose reading, which still reports where nothing runs (`Write-Host claude.exe ...`) and on `rem` lines, with no agent lane.
 
 All of these are in D-155 and #420.
-
