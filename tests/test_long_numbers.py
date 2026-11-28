@@ -5,7 +5,8 @@ more than 4,300 decimal digits. `workflow.as_text` gives such a number in hexade
 a value they do not know; others called `str()` and raised `ValueError`. Before this slice `obaaf check` and
 `--lanes` ended in a traceback where such a number stood as a github-script `script:`, a step's `shell:` (or a
 default one), a job's `if:` or `needs:`, a `docker://` step's arguments, the egress action's step `id`, a
-harden-runner input, or the `env` and `with` of a step before a key the egress action holds. Found by #423's
+harden-runner input, the `env` and `with` of a step before a key the egress action holds, or an `env` value a
+`${{ env.N }}` expression reads. Found by #423's
 reviewer and by this slice's probes, which put such a number at every place a probe workflow has and at 2,000
 places sampled from real workflows (`tests/fixtures`, the templates, this repository's workflows and the first
 adopter's).
@@ -49,6 +50,8 @@ PLACES = {
         f"          b: {LONG}\n      - uses: Obaaf/OBAAF/actions/egress@{SHA}\n        with:\n          run: claude -p x\n"
         "          allow: api.anthropic.com\n          model-keys: ANTHROPIC_API_KEY\n",
         job="    env:\n      ANTHROPIC_API_KEY: ${{ secrets.K }}\n"),
+    "env read by an expression": workflow(f"      - run: echo ${{{{ env.N }}}} ${{{{ env['N'] }}}}\n",
+                                          job=f"    env:\n      N: {LONG}\n"),
 }
 
 

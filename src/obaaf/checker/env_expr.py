@@ -306,7 +306,13 @@ def _number_text(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
-        return str(value)
+        try:
+            return str(value)
+        except ValueError:
+            # More digits than Python prints (YAML reads `0x` and thousands of hex digits as one integer): in
+            # hexadecimal, as `workflow.as_text` gives it (flagship slice 2d.29, #425: it ended the check in a
+            # traceback). No text a number makes, in any base, names an agent or holds an option's letters.
+            return hex(value)
     if math.isnan(value):
         return "NaN"
     if math.isinf(value):

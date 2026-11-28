@@ -14,7 +14,8 @@ Slice 2d.29, #425. YAML reads `0x` and thousands of hex digits as one integer, a
 - an action input read as code, or a `docker://` step's arguments;
 - the egress action's step `id`;
 - a harden-runner input;
-- the `env` or `with` of a step before a key the egress action holds.
+- the `env` or `with` of a step before a key the egress action holds;
+- an `env` value that a `${{ env.N }}` expression reads.
 
 Each place now reads the number as `as_text` already gave it elsewhere, in hexadecimal. A value that holds one (`printed`) prints the same way. Readers that already treat such a number as a value they do not know are unchanged. Every other value reads as before, so nothing else a check reports changes; on this repository and on the first adopter the reports are byte-identical with `flagship` `1115f20`.
 
