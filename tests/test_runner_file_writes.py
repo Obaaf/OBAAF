@@ -347,6 +347,41 @@ class SecondReviewTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 20)
 
 
+class ThirdReviewTest(unittest.TestCase):
+    """The third review of slice 2d.26 (87c943b): each case now a test."""
+
+    def outcome(self, script, env=f"BODY: {BODY}", **kwargs):
+        return [(f.severity, f.kind) for f in gha028(check(job(script, env=env, **kwargs)))]
+
+    def test_not_silent(self):
+        high = [("high", "")]
+        unread = [("medium", "unresolved")]
+        cases = {
+            'X=()\n(echo "X=$BODY" >> "$GITHUB_ENV")': high,
+            'declare -a X=()\n( printf "X=%s\\n" "$BODY" >> "$GITHUB_ENV" )': high,
+            'echo "X=${{ \'$BODY\' }}" >> "$GITHUB_ENV"': unread,
+            'echo "X=${{ env.LIT }}" >> "$GITHUB_ENV"': unread,
+            'set -e -x\n{ T="$BODY"; echo A=1; } >> "$GITHUB_ENV" 2>&1': unread,
+            'set -eu -o xtrace\n{ T="$BODY"; echo A=1; } >> "$GITHUB_ENV" 2>&1': unread,
+            ': "${GITHUB_X[0]:=$BODY}"\necho "X=${GITHUB_X[0]}" >> "$GITHUB_ENV"': high,
+        }
+        for script, expected in cases.items():
+            with self.subTest(script):
+                self.assertEqual(self.outcome(script), expected)
+
+    def test_tracing_from_outside_the_script(self):
+        script = '{ T="$BODY"; echo A=1; } >> "$GITHUB_ENV" 2>&1'
+        self.assertEqual(self.outcome(script, shell="bash -x {0}"), [("medium", "unresolved")])
+        self.assertEqual(self.outcome(script, env=f"BODY: {BODY}\nSHELLOPTS: xtrace"), [("medium", "unresolved")])
+        self.assertEqual(self.outcome(script), [])
+
+    def test_more_ways_to_read_the_environment(self):
+        for code in ("python3 -c 'import os; print(os.environ.get(\"BODY\"))'", "ruby -e 'puts ENV[\"BODY\"]'",
+                     "perl -e 'print $ENV{BODY}'"):
+            with self.subTest(code):
+                self.assertEqual(self.outcome(code + ' >> "$GITHUB_ENV"'), [("high", "")])
+
+
 class CostTest(unittest.TestCase):
     def test_many_names_and_many_writes(self):
         # The first review: 1,000 copies and 1,000 writes took 45.7 s; 10,000 redirected loops 16.1 s.

@@ -570,8 +570,9 @@ def _github_env_names(script: str) -> set | None:
 _MARKED_RE = re.compile("\x03([^\x03]*)\x03")
 _VAR_PART_RE = re.compile(r"\$(?:\{\s*(?P<bang>!)?\s*(?P<braced>[A-Za-z_][A-Za-z0-9_]*|[@*]|[0-9]+)|(?P<plain>[A-Za-z_][A-Za-z0-9_]*|[@*0-9]))")
 _LENGTH_PART_RE = re.compile(r"\$\{\s*#\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\Z")
-# `${NAME:=word}` and `${NAME=word}` set NAME where it is unset (or empty).
-_DEFAULT_SET_RE = re.compile(r"\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:?=")
+# `${NAME:=word}` and `${NAME=word}` set NAME where it is unset (or empty), `${NAME[i]:=word}` too.
+_DEFAULT_SET_RE = re.compile(r"\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\s*:?=")
+_PLAIN_CONTEXT_RE = re.compile(r"\$\{\{\s*(github|runner)(\.[A-Za-z_][A-Za-z0-9_-]*)+\s*\}\}\Z", re.I)
 # A here-document the shell expands, read as text: `\$` is a dollar sign.
 _HEREDOC_REF_RE = re.compile(r"\$(?:\{\s*(!)?\s*([A-Za-z_][A-Za-z0-9_]*|[@*]|[0-9]+)|([A-Za-z_][A-Za-z0-9_]*|[@*0-9]))")
 _ASSIGNMENT_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\[[^\]]*\])?\+?=")
@@ -588,7 +589,7 @@ _DECLARERS = frozenset({"export", "declare", "typeset", "local", "readonly"})
 # A script in which no command can be taken for what its name says: a function (which can be named `echo` or `cat`),
 # an alias with `expand_aliases`, a builtin loaded or turned off, a DEBUG or other trap, tracing (`set -x`).
 _OPAQUE_RE = re.compile(r"(?<![\w./-])(function|alias|enable|trap)(?![\w./-])|[A-Za-z_][\w.:-]*\s*\(\s*\)"
-                        r"|expand_aliases|\bset\s+(-[a-zA-Z]*x|-o\s+xtrace)|\bBASH_XTRACEFD\b")
+                        r"|expand_aliases|\bset\b[^\n;|&]*?(\s-[a-zA-Z]*x|xtrace)|\bBASH_XTRACEFD\b|SHELLOPTS|BASHOPTS")
 # Builtins that set the names they are given from what they read, the names left unknown.
 _SETTERS = frozenset({"read", "mapfile", "readarray", "getopts", "for", "select"})
 # Builtins after which no variable of the script can be vouched for: they run text as code or rename variables.
@@ -642,7 +643,11 @@ def _word_parts(text: str) -> _Parts:
             parts.substitution = True
             continue
         if marked.startswith("${{"):
-            continue                    # a `${{ }}` expression: an outsider's field there is OBAAF-GHA-010's
+            # A plain reference to the `github` or `runner` context: an outsider's field there is OBAAF-GHA-010's.
+            # Any other expression may give text the shell then expands (`${{ '$BODY' }}`, an `env` value).
+            if not _PLAIN_CONTEXT_RE.match(marked):
+                parts.indirect = True
+            continue
         for default in _DEFAULT_SET_RE.finditer(marked):
             parts.defaults.add(default.group(1))
         if _LENGTH_PART_RE.match(marked):
@@ -738,7 +743,8 @@ def _names_runner_files(text: str) -> bool:
 
 
 def _runner_file_writes(script: str, held: frozenset, every: bool = False, clean: frozenset = frozenset(),
-                        source: bool = False, path_in_env: bool = False) -> RunnerFileWrite | None:
+                        source: bool = False, path_in_env: bool = False,
+                        opaque: bool = False) -> RunnerFileWrite | None:
     """What a bash or sh script writes to GITHUB_ENV or GITHUB_PATH of text an outsider can write. `held`: the
     step's environment variables that hold such text, as `env:` spells them; `every`: an `env:` written as one
     expression, so any variable may; `clean`: the step's other `env:` names, which the checker can vouch for;
@@ -768,7 +774,7 @@ def _runner_file_writes(script: str, held: frozenset, every: bool = False, clean
     if problem:
         return RunnerFileWrite("unresolved", frozenset(held) or frozenset({"*"}), _SINK_FILES,
                                "the checker cannot read the script as bash")
-    opaque = bool(_OPAQUE_RE.search(script))
+    opaque = opaque or bool(_OPAQUE_RE.search(script))
     infos = []                  # (command, name, parts, plain sets {name: parts}, other names set)
     skip = set()
     previous = None
@@ -800,8 +806,8 @@ def _runner_file_writes(script: str, held: frozenset, every: bool = False, clean
                     # An array, `NAME=( ... )`: the lexer gives its words as the next command only when it ends
                     # with `)` on the same line; otherwise what it holds is not known.
                     if n + 1 < len(commands) and commands[n + 1].ended_by == ")":
+                        # Its words, which are also read as a command: a subshell on the next line looks the same.
                         value = _command_parts(commands[n + 1])
-                        skip.add(n + 1)
                     else:
                         others.add(match.group(1))
                 sets.setdefault(match.group(1), _Parts()).add(value)
@@ -874,8 +880,9 @@ def _runner_file_writes(script: str, held: frozenset, every: bool = False, clean
     vouched = set() if opaque else (base | set(assigned)) - unclean
     # A program's code that reads a variable of the step's by name: `os.environ["BODY"]`, `getenv("BODY")`,
     # `process.env.BODY`, awk's `ENVIRON["BODY"]`, jq's `env.BODY` and `$ENV.BODY`.
-    env_word = re.compile(r"(?:environ|ENVIRON|getenv|Getenv|GetEnvironmentVariable|process\.env|\benv|\$ENV)"
-                          r"\s*(?:\.|\[|\()?\s*[\"']?(" + "|".join(sorted(map(re.escape, held), key=len, reverse=True))
+    env_word = re.compile(r"(?:environ(?:\.get)?|ENVIRON|getenv|Getenv|GetEnvironmentVariable|process\.env|\benv"
+                          r"|\$ENV|\bENV)"
+                          r"\s*(?:\.|\[|\(|\{)?\s*[\"']?(" + "|".join(sorted(map(re.escape, held), key=len, reverse=True))
                           + r")(?![A-Za-z0-9_])") if held else None
 
     written_names: set = set()
@@ -1956,7 +1963,12 @@ class WorkflowRules:
             if shell_env.explicit_shell(step.raw, (job.raw, self.wf.raw)) is None:
                 shells |= set(shell_env.runner_shells(job))
             if shells & {"bash", "sh"}:
-                found = _runner_file_writes(script, held_names, every, clean, source, path_in_env)
+                # Tracing or functions set from outside the script: the shell's own options, or the `env`.
+                given = as_text(shell_env.explicit_shell(step.raw, (job.raw, self.wf.raw)) or "")
+                outside = bool(re.search(r"\s-[a-zA-Z]*x|xtrace", given)) or any(
+                    re.match(r"\s*(SHELLOPTS|BASHOPTS|BASH_ENV|BASH_FUNC_|ENV\s*$)", str(k))
+                    for scope in scopes for k in scope)
+                found = _runner_file_writes(script, held_names, every, clean, source, path_in_env, outside)
             if shells - {"bash", "sh"} and (held_names or every or source) and (
                     self._RUNNER_FILE_TEXT_RE.search(_squeeze(script)) or path_in_env) \
                     and (found is None or found.state != "written"):

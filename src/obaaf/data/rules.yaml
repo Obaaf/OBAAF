@@ -1168,9 +1168,10 @@ rules:
       command substitution (in `echo`, `printf`, a here-document of `cat`, or `tee` or `cat` given what one of
       those prints), where it prints every variable (`env`, `printenv`, `export -p`, `/proc/self/environ`), or
       where a program's code reads such a variable of the step's by name (`os.environ["BODY"]`, `getenv`,
-      `process.env`, `ENVIRON`, jq's `env`). A write is clean only when it is the builtin `echo` or `printf`
-      (not `./echo`) or a here-document of `cat`, with no input redirected, whose text is literal, a `${{ }}`
-      expression (whose outsider fields are OBAAF-GHA-010's) or reads only the runner's own `GITHUB_` and
+      `process.env`, `ENVIRON`, jq's `env`, Ruby's `ENV[...]`, Perl's `$ENV{...}`). A write is clean only when it is the builtin `echo` or `printf`
+      (not `./echo`) or a here-document of `cat`, with no input redirected, whose text is literal, a plain
+      `${{ github... }}` or `${{ runner... }}` reference (whose outsider fields are OBAAF-GHA-010's; any other
+      expression may give text the shell expands) or reads only the runner's own `GITHUB_` and
       `RUNNER_` values the script does not set (not `GITHUB_HEAD_REF`) and `HOME`, the step's other `env`
       values (when no earlier step can set variables) and variables the script sets from those by plain
       assignment.
@@ -1179,7 +1180,8 @@ rules:
       `mapfile` or `printf -v` set, `exec`, a subshell, a computed command or target, the runner's files
       named in any other place or through an `env:` value, a builtin inside a group so redirected that reads
       the text (its error would print it), a script that defines a function or an alias, sets a trap or
-      tracing (`set -x`), or runs `eval` or `source`, and a script the checker cannot read as bash. So is a `run` in another shell,
+      tracing (`set -x` in any of its forms, a `shell:` with `-x`, `SHELLOPTS`, `BASH_ENV` or `BASH_FUNC_`
+      in the `env`), or runs `eval` or `source`, and a script the checker cannot read as bash. So is a `run` in another shell,
       an actions/github-script script or another script input that names a way to write those files
       (`exportVariable`, `addPath`, the files' variables or folder) where the step's environment holds the
       text or the script names the event's payload (`context.payload`, `GITHUB_EVENT_PATH`). A bash script
