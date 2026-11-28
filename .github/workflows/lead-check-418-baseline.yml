@@ -1,4 +1,4 @@
-name: Verify the shell release notes and the launch walkthrough together
+name: Verify the corrected patch fixtures on the launch walkthrough and native Git
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
@@ -48,7 +48,7 @@ jobs:
           git diff --cached --check -- . ':(exclude)docs/bypass-attempts.md'
           git commit --no-edit
           git worktree add -q --detach "$RUNNER_TEMP/before-tests" HEAD
-          git merge --no-ff --no-edit 5554d5cb1d16ad98c8d66c02ed373fa04e559e37
+          git merge --no-ff --no-edit a1d6cea678e3ab165b7e2c92cf87cb2330f22682
           git diff --check 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e HEAD -- . ':(exclude)docs/bypass-attempts.md'
           test "$(git diff --name-only HEAD^1 HEAD)" = tests/test_fix_patch.py
           echo "Integration tree $(git rev-parse HEAD^{tree})"
@@ -73,42 +73,69 @@ jobs:
           export PYTHONPATH="$PWD/src:$PWD/tests"
           python -m unittest -v test_adoption_path test_docs test_todo_upgrade test_templates_install_docs test_shell_lanes test_env_shell test_artifact_consumer_index test_egress_artifact_producers test_fix_patch
           python -m obaaf docs build --check
-      - name: Check the review contribution and the shell change on both adopters
-        if: ${{ !cancelled() && steps.integrate.outcome == 'success' }}
+      - name: Verify the scope of the reviewer correction
         run: |
-          git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
-          git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
-          python - <<'PY'
+          test "$(git diff --name-only 5554d5cb1d16ad98c8d66c02ed373fa04e559e37 a1d6cea678e3ab165b7e2c92cf87cb2330f22682)" = tests/test_fix_patch.py
+  replay:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: a1d6cea678e3ab165b7e2c92cf87cb2330f22682
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Exercise user Git settings and independent line-ending subtests
+        shell: python
+        run: |
           import os
+          from pathlib import Path
           import subprocess
           import sys
-          from pathlib import Path
+          import tempfile
+          import unittest
+
+          root = Path.cwd()
           scratch = Path(os.environ["RUNNER_TEMP"])
-          settings = scratch / "flagship"
-          adopters = [
-              ("OBAAF", settings, settings / ".github/obaaf-settings.json", "medium"),
-              ("Expectrail", scratch / "expectrail", settings / "tests/fixtures/settings/live-expectrail-2026-11-13/snapshot.json", "low"),
-          ]
-          for name, site, snapshot, threshold in adopters:
-              for mode in ("text", "json", "sarif", "summary"):
-                  command = [sys.executable, "-m", "obaaf", "check", ".", "--settings", str(snapshot),
-                             "--baseline", ".github/obaaf-baseline.json", "--fail-on", threshold]
-                  command.extend(["--summary"] if mode == "summary" else ["--format", mode])
-                  if name == "Expectrail":
-                      command.append("--no-fixes")
-                  outputs = []
-                  for src in (scratch / "adoption", scratch / "before-tests", Path.cwd()):
-                      env = dict(os.environ, PYTHONPATH=str(src / "src"))
-                      result = subprocess.run(command, cwd=site, env=env, capture_output=True)
-                      assert result.returncode in (0, 1), (name, mode, result.stderr[-500:])
-                      assert b"git did not list the tracked files" not in result.stdout
-                      outputs.append((result.returncode, result.stdout, result.stderr))
-                  assert outputs[1] == outputs[2], (name, mode, "fixture-only change affected public output")
-                  print("ADOPTER", name, mode, "fixture identical", "shell delta" if outputs[0] != outputs[1] else "shell identical",
-                        "exit", outputs[0][0], outputs[2][0], flush=True)
-          PY
-      - name: Run the full combined suite
-        if: ${{ !cancelled() && steps.integrate.outcome == 'success' }}
-        run: |
-          export PYTHONPATH="$PWD/src:$PWD/tests"
-          python -m unittest discover -s tests -v
+          assert subprocess.run(["git", "-C", str(scratch), "rev-parse", "--git-dir"], capture_output=True).returncode != 0
+          os.environ["TMPDIR"] = os.environ["TEMP"] = os.environ["TMP"] = str(scratch)
+          assert Path(tempfile.gettempdir()).resolve() == scratch.resolve()
+          os.environ["PYTHONPATH"] = os.pathsep.join(str(root / folder) for folder in ["src", "tests"])
+          subprocess.run([sys.executable, "-m", "pip", "install", "--constraint",
+                          "actions/setup-obaaf/constraints.txt", "-e", ".[keys]"], check=True)
+          with tempfile.TemporaryDirectory() as fixture:
+              config = Path(fixture) / "developer.gitconfig"
+              attrs = Path(fixture) / "developer.attributes"
+              subprocess.run(["git", "config", "--file", str(config), "core.attributesFile", attrs.as_posix()], check=True)
+              os.environ.update(GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_COUNT="1",
+                                GIT_CONFIG_KEY_0="core.autocrlf", GIT_CONFIG_VALUE_0="true")
+              for setting in ["* text eol=crlf", "* text=auto"]:
+                  attrs.write_text(setting + "\n", encoding="utf-8")
+                  subprocess.run(["git", "config", "--file", str(config), "core.eol", "crlf"], check=True)
+                  subprocess.run([sys.executable, "-m", "unittest", "test_fix_patch", "-v"], check=True)
+              sys.path[:0] = [str(root / "src"), str(root / "tests")]
+              from test_fix_patch import FixPatchTest
+              class OneFailure(FixPatchTest):
+                  checks = 0
+                  def assertIn(self, member, container, msg=None):
+                      if member == "You are accepting risk (1 finding)":
+                          self.checks += 1
+                          if self.checks == 1:
+                              self.fail("intentional first-case failure")
+                      super().assertIn(member, container, msg)
+              case = OneFailure("test_git_checks_and_applies_exact_bytes")
+              result = unittest.TestResult()
+              case.run(result)
+              assert case.checks == 4, case.checks
+              assert len(result.failures) == 1 and not result.errors, (result.failures, result.errors)
+              assert "intentional first-case failure" in result.failures[0][1]
+              assert os.environ["GIT_CONFIG_GLOBAL"] == str(config)
+              assert os.environ["GIT_CONFIG_COUNT"] == "1"
+              print("Four cases ran, with only the injected failure. Developer environment restored.")
