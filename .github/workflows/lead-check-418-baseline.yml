@@ -1,4 +1,4 @@
-name: Full adoption integration and report comparison
+name: Integrate merged runner-file checks into the item 7 draft
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
@@ -11,61 +11,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
+          ref: 55661337e24248ac7d2346e6ab9cb0069261dffa
           fetch-depth: 0
           persist-credentials: false
-      - name: Check the three-file guide and locate conflicts with the adoption build
-        env:
-          CORE_HEAD: 002745465021d58bde72b685652aae1d414dcedc
-          GUIDE_HEAD: 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
-          ADOPTION_HEAD: e49616ec3b1abe58e73273c852f2073e3dcb9f30
-        run: |
-          export TMPDIR="$RUNNER_TEMP"
-          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          git config user.name 'OBAAF integration check'
-          git config user.email 'integration@localhost'
-          python - <<'PY'
-          import os
-          import subprocess
-
-          def merge(label, left, right):
-              result = subprocess.run(
-                  ["git", "merge-tree", "--write-tree", "--name-only", left, right],
-                  capture_output=True, text=True,
-              )
-              if result.returncode not in (0, 1):
-                  raise RuntimeError(result.stderr)
-              entries = result.stdout.splitlines()
-              print(label, "CLEAN" if result.returncode == 0 else "CONFLICT", entries[0], flush=True)
-              for name in entries[1:]:
-                  if not name:
-                      break
-                  print(label, "requires resolution:", name, flush=True)
-              if result.returncode == 0:
-                  commit = subprocess.check_output(
-                      ["git", "commit-tree", entries[0], "-p", left, "-p", right, "-m", label],
-                      text=True,
-                  )
-                  return commit.strip()
-
-          core = os.environ["CORE_HEAD"]
-          guide = os.environ["GUIDE_HEAD"]
-          adoption = os.environ["ADOPTION_HEAD"]
-          merged = merge("#423 + #422", core, guide)
-          merge("#423 + #366/#297", core, adoption)
-          if merged:
-              merge("#423/#422 + #366/#297", merged, adoption)
-          PY
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.13'
-      - name: Rehearse the catalogue resolution in the runner checkout
+      - name: Resolve the draft against the flagship handover
         id: resolve
         run: |
           export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
-          git checkout -q --detach 002745465021d58bde72b685652aae1d414dcedc
-          git merge --no-ff -m 'Temporary guide integration' 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
-          if git merge --no-ff --no-commit e49616ec3b1abe58e73273c852f2073e3dcb9f30; then exit 1; fi
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          git config user.name 'OBAAF integration check'
+          git config user.email 'integration@localhost'
+          echo "Ready guide on actual flagship"
+          git merge-tree --write-tree 55661337e24248ac7d2346e6ab9cb0069261dffa 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
+          if git merge --no-ff --no-commit 41eb870457a1b2b2bae46d3eb6453f8d0ab3fdb2; then exit 1; fi
           python - <<'PY'
           import subprocess
           from pathlib import Path
@@ -88,16 +49,110 @@ jobs:
           python -m obaaf docs build
           git add -- spec/profile.md src/obaaf/data/profile.yaml tests/test_todo_catalog.py
           git diff --exit-code
+          git diff --cached --check
+          git write-tree
+          python -m obaaf catalog
+          python -m obaaf docs build --check
+          python - <<'PY'
+          import difflib
+          import json
+          import subprocess
+
+          def git(*args):
+              return subprocess.check_output(["git", *args])
+
+          def files(tree):
+              entries = {}
+              for line in git("ls-tree", "-r", tree).decode().splitlines():
+                  info, path = line.split("\t", 1)
+                  mode, kind, oid = info.split()
+                  entries[path] = (mode, oid)
+              return entries
+
+          draft = files("41eb870457a1b2b2bae46d3eb6453f8d0ab3fdb2")
+          flagship = files("55661337e24248ac7d2346e6ab9cb0069261dffa")
+          tree = git("write-tree").decode().strip()
+          merged = files(tree)
+          print("ACTUAL_TREE", tree)
+          for path in sorted(set(draft) | set(merged)):
+              if draft.get(path) == merged.get(path):
+                  continue
+              mode, sha = merged[path]
+              entry = dict(path=path, mode=mode, sha=sha, type="blob")
+              if merged[path] != flagship.get(path):
+                  choices = []
+                  result = git("cat-file", "blob", sha).decode().splitlines(keepends=True)
+                  for parent in (draft, flagship):
+                      if path not in parent:
+                          continue
+                      reference = parent[path][1]
+                      original = git("cat-file", "blob", reference).decode().splitlines(keepends=True)
+                      matcher = difflib.SequenceMatcher(None, original, result, autojunk=False)
+                      changes = [[a, b, "".join(result[c:d])] for op, a, b, c, d in matcher.get_opcodes() if op != "equal"]
+                      choices.append((len(json.dumps(changes)), reference, changes))
+                  _, entry["reference"], entry["changes"] = min(choices, key=lambda c:c[0])
+              print("MERGED_ENTRY", json.dumps(entry, ensure_ascii=True))
+          PY
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 55661337e24248ac7d2346e6ab9cb0069261dffa
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Resolve the draft against the flagship handover
+        id: resolve
+        run: |
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          git config user.name 'OBAAF integration check'
+          git config user.email 'integration@localhost'
+          echo "Ready guide on actual flagship"
+          git merge-tree --write-tree 55661337e24248ac7d2346e6ab9cb0069261dffa 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
+          if git merge --no-ff --no-commit 41eb870457a1b2b2bae46d3eb6453f8d0ab3fdb2; then exit 1; fi
+          python - <<'PY'
+          import subprocess
+          from pathlib import Path
+          profile = "src/obaaf/data/profile.yaml"
+          spec = "spec/profile.md"
+          tests = "tests/test_todo_catalog.py"
+          unmerged = subprocess.check_output(["git", "diff", "--name-only", "--diff-filter=U"], text=True)
+          assert set(unmerged.splitlines()) == {profile, spec, tests}, unmerged
+          subprocess.run(["git", "checkout", "--ours", "--", profile, spec, tests], check=True)
+          for file, anchor, updated in [
+              (profile, "OBAAF-GHA-022, OBAAF-JEN-001", "OBAAF-GHA-022, OBAAF-GHA-027, OBAAF-JEN-001"),
+              (tests, '    "OBAAF-GHA-028": {""},', '    "OBAAF-GHA-027": {""},\n    "OBAAF-GHA-028": {""},'),
+          ]:
+              path = Path(file)
+              content = path.read_text(encoding="utf-8")
+              assert content.count(anchor) == 1, file
+              path.write_text(content.replace(anchor, updated), encoding="utf-8")
+          PY
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+          python -m obaaf docs build
+          git add -- spec/profile.md src/obaaf/data/profile.yaml tests/test_todo_catalog.py
+          git diff --exit-code
+          git diff --cached --check
           git write-tree
           python -m obaaf catalog
           python -m obaaf docs build --check
           git commit --no-edit
-          git rev-parse HEAD^{tree}
+          git diff --quiet 41eb870457a1b2b2bae46d3eb6453f8d0ab3fdb2 e49616ec3b1abe58e73273c852f2073e3dcb9f30 -- . ':(exclude)docs/from-report-to-gate.md' ':(exclude)docs/upgrading.md'
+          git diff --binary 41eb870457a1b2b2bae46d3eb6453f8d0ab3fdb2 e49616ec3b1abe58e73273c852f2073e3dcb9f30 -- docs/from-report-to-gate.md docs/upgrading.md > "$RUNNER_TEMP/walkthrough.patch"
+          git apply --3way --index "$RUNNER_TEMP/walkthrough.patch"
+          git diff --cached --check
+          echo "Actual draft plus walkthrough"
+          git write-tree
       - name: Compare four report formats on both adopters
         run: |
           export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
           if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          git worktree add -q --detach "$RUNNER_TEMP/flagship" b4985c76b8305b9463a61177a6a8904e62f1a486
+          git worktree add -q --detach "$RUNNER_TEMP/flagship" 55661337e24248ac7d2346e6ab9cb0069261dffa
           git worktree add -q --detach "$RUNNER_TEMP/previous-adoption" e49616ec3b1abe58e73273c852f2073e3dcb9f30
           git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
           git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
@@ -129,7 +184,7 @@ jobs:
                       assert outputs[0]==outputs[1], (label,name,mode)
                       print(label, name, mode, "matched", expected, flush=True)
           PY
-      - name: Run the full four-draft acceptance suite
+      - name: Run the full combined acceptance suite
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         run: |
           export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
