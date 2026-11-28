@@ -1,15 +1,13 @@
-name: Verify the corrected patch fixtures on the launch walkthrough and native Git
+name: Integrate the reviewed replay fixtures into the launch draft
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
 permissions:
   contents: read
 jobs:
-  integration:
+  merge-trees:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -19,123 +17,126 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.13'
-      - name: Merge the three pinned heads in the checkout
-        id: integrate
+      - name: Resolve the draft against the flagship handover
+        id: resolve
         run: |
-          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
-          export TMPDIR="$RUNNER_TEMP"
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
           if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          git config user.name "OBAAF integration check"
-          git config user.email "integration@localhost"
-          if git merge --no-ff --no-commit f13262d4805b280bb4cc9ba61a2614affbfdb2b2; then exit 1; fi
-          test "$(git diff --name-only --diff-filter=U)" = src/obaaf/checker/rules.py
-          python - <<'PY'
-          from pathlib import Path
-          import re
-          path = Path("src/obaaf/checker/rules.py")
-          source = path.read_text(encoding="utf-8")
-          conflict = (r"^<<<<<<< [^\n]+\nfrom obaaf.checker import agent_flags, artifact_consumers\n"
-                      r"=======\nfrom obaaf.checker import agent_code\nfrom obaaf.checker import agent_flags\n"
-                      r">>>>>>> [^\n]+\n")
-          replacement = "from obaaf.checker import agent_code\nfrom obaaf.checker import agent_flags, artifact_consumers\n"
-          result, count = re.subn(conflict, replacement, source, flags=re.MULTILINE)
-          assert count == 1 and "<<<<<<<" not in result and ">>>>>>>" not in result
-          assert "return agent_code.cmd_carets_out(text)" in result
-          path.write_text(result, encoding="utf-8")
-          PY
-          git add -- src/obaaf/checker/rules.py
-          test "$(git rev-parse :docs/bypass-attempts.md)" = "$(git rev-parse f13262d4805b280bb4cc9ba61a2614affbfdb2b2:docs/bypass-attempts.md)"
-          git diff --cached --check -- . ':(exclude)docs/bypass-attempts.md'
-          git commit --no-edit
-          git worktree add -q --detach "$RUNNER_TEMP/before-tests" HEAD
-          git merge --no-ff --no-edit d136ce979b34a24b1072d20ea482856d032d765d
-          git diff --check 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e HEAD -- . ':(exclude)docs/bypass-attempts.md'
-          test "$(git diff --name-only HEAD^1 HEAD)" = tests/test_fix_patch.py
-          echo "Integration tree $(git rev-parse HEAD^{tree})"
-          git merge-base --is-ancestor d884604e00e7ef660a0e13667581dc8430d33a38 e49616ec3b1abe58e73273c852f2073e3dcb9f30
-          git worktree add -q --detach "$RUNNER_TEMP/earlier" e49616ec3b1abe58e73273c852f2073e3dcb9f30
-          git -C "$RUNNER_TEMP/earlier" merge --no-ff --no-commit b4985c76b8305b9463a61177a6a8904e62f1a486
-          test "$(git -C "$RUNNER_TEMP/earlier" write-tree)" = c26bdd0826bfd2a1d153fe7f1e729326aadb9e3f
-          git diff --quiet 41eb870457a1b2b2bae46d3eb6453f8d0ab3fdb2 c26bdd0826bfd2a1d153fe7f1e729326aadb9e3f -- . ':(exclude)docs/from-report-to-gate.md' ':(exclude)docs/upgrading.md'
-          git diff --binary 41eb870457a1b2b2bae46d3eb6453f8d0ab3fdb2 c26bdd0826bfd2a1d153fe7f1e729326aadb9e3f -- docs/from-report-to-gate.md docs/upgrading.md > "$RUNNER_TEMP/walkthrough.patch"
-          git apply --3way --index "$RUNNER_TEMP/walkthrough.patch"
+          git config user.name 'OBAAF integration check'
+          git config user.email 'integration@localhost'
+          git merge --no-ff --no-commit e74185a4efe779d178d8658d0eec30dad8106cfe
           git diff --cached --check
-          test "$(git diff --cached --name-only)" = "$(printf '%s\n' docs/from-report-to-gate.md docs/upgrading.md)"
-          git diff --binary 8812166c33f8dd274e002ff98c83af5280c8a7c3 f13262d4805b280bb4cc9ba61a2614affbfdb2b2 -- CHANGELOG.md DECISIONS.md docs/bypass-attempts.md docs/upgrading.md > "$RUNNER_TEMP/reviewed-docs.patch"
-          git apply --reverse --check "$RUNNER_TEMP/reviewed-docs.patch"
-          git apply --reverse --check "$RUNNER_TEMP/walkthrough.patch"
-          echo "Combined walkthrough tree $(git write-tree)"
-          git worktree add -q --detach "$RUNNER_TEMP/flagship" 67f84e5231146b2ff312b64f0c8021d7e2f544ec
-          git worktree add -q --detach "$RUNNER_TEMP/adoption" 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e
-          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
-      - name: Check both lanes and native patch replay together
-        run: |
-          export PYTHONPATH="$PWD/src:$PWD/tests"
-          python -m unittest -v test_adoption_path test_docs test_todo_upgrade test_templates_install_docs test_shell_lanes test_env_shell test_artifact_consumer_index test_egress_artifact_producers test_fix_patch
-          python -m obaaf docs build --check
-      - name: Verify the scope of the reviewer correction
-        run: |
-          test "$(git diff --name-only 5554d5cb1d16ad98c8d66c02ed373fa04e559e37 d136ce979b34a24b1072d20ea482856d032d765d)" = tests/test_fix_patch.py
-  replay:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+          python - <<'PY'
+          import difflib
+          import json
+          import subprocess
+
+          def git(*args):
+              return subprocess.check_output(["git", *args])
+
+          def files(tree):
+              entries = {}
+              for line in git("ls-tree", "-r", tree).decode().splitlines():
+                  info, path = line.split("\t", 1)
+                  mode, kind, oid = info.split()
+                  entries[path] = (mode, oid)
+              return entries
+
+          draft = files("6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e")
+          flagship = files("e74185a4efe779d178d8658d0eec30dad8106cfe")
+          tree = git("write-tree").decode().strip()
+          merged = files(tree)
+          print("ACTUAL_TREE", tree)
+          for path in sorted(set(draft) | set(merged)):
+              if draft.get(path) == merged.get(path):
+                  continue
+              mode, sha = merged[path]
+              entry = dict(path=path, mode=mode, sha=sha, type="blob")
+              if merged[path] != flagship.get(path):
+                  choices = []
+                  result = git("cat-file", "blob", sha).decode().splitlines(keepends=True)
+                  for parent in (draft, flagship):
+                      if path not in parent:
+                          continue
+                      reference = parent[path][1]
+                      original = git("cat-file", "blob", reference).decode().splitlines(keepends=True)
+                      matcher = difflib.SequenceMatcher(None, original, result, autojunk=False)
+                      changes = [[a, b, "".join(result[c:d])] for op, a, b, c, d in matcher.get_opcodes() if op != "equal"]
+                      choices.append((len(json.dumps(changes)), reference, changes))
+                  _, entry["reference"], entry["changes"] = min(choices, key=lambda c:c[0])
+              print("MERGED_ENTRY", json.dumps(entry, ensure_ascii=True))
+          PY
+  acceptance:
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: d136ce979b34a24b1072d20ea482856d032d765d
+          ref: 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.13'
-      - name: Exercise user Git settings and independent line-ending subtests
-        shell: python
+      - name: Resolve the draft against the flagship handover
+        id: resolve
         run: |
-          import os
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          git config user.name 'OBAAF integration check'
+          git config user.email 'integration@localhost'
+          git worktree add -q --detach "$RUNNER_TEMP/earlier" e49616ec3b1abe58e73273c852f2073e3dcb9f30
+          git -C "$RUNNER_TEMP/earlier" merge --no-ff --no-commit b4985c76b8305b9463a61177a6a8904e62f1a486
+          test "$(git -C "$RUNNER_TEMP/earlier" write-tree)" = c26bdd0826bfd2a1d153fe7f1e729326aadb9e3f
+          git diff --quiet 41eb870457a1b2b2bae46d3eb6453f8d0ab3fdb2 c26bdd0826bfd2a1d153fe7f1e729326aadb9e3f -- . ':(exclude)docs/from-report-to-gate.md' ':(exclude)docs/upgrading.md'
+          git diff --binary 41eb870457a1b2b2bae46d3eb6453f8d0ab3fdb2 c26bdd0826bfd2a1d153fe7f1e729326aadb9e3f -- docs/from-report-to-gate.md docs/upgrading.md > "$RUNNER_TEMP/walkthrough.patch"
+          git worktree add -q --detach "$RUNNER_TEMP/previous-adoption" 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e
+          git -C "$RUNNER_TEMP/previous-adoption" apply --3way --index "$RUNNER_TEMP/walkthrough.patch"
+          test "$(git -C "$RUNNER_TEMP/previous-adoption" write-tree)" = fc66be631b8fdc92da7f38937f11bef19abe717f
+          git merge --no-ff --no-commit e74185a4efe779d178d8658d0eec30dad8106cfe
+          git commit --no-edit
+          git apply --3way --index "$RUNNER_TEMP/walkthrough.patch"
+          git diff --cached --check
+          echo "Combined tree $(git write-tree)"
+      - name: Compare four report formats on both adopters
+        run: |
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          git worktree add -q --detach "$RUNNER_TEMP/flagship" e74185a4efe779d178d8658d0eec30dad8106cfe
+          git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+          python - <<'PY'
+          import os, subprocess, sys
           from pathlib import Path
-          import subprocess
-          import sys
-          import tempfile
-          import unittest
-
-          root = Path.cwd()
-          scratch = Path(os.environ["RUNNER_TEMP"])
-          assert subprocess.run(["git", "-C", str(scratch), "rev-parse", "--git-dir"], capture_output=True).returncode != 0
-          os.environ["TMPDIR"] = os.environ["TEMP"] = os.environ["TMP"] = str(scratch)
-          assert Path(tempfile.gettempdir()).resolve() == scratch.resolve()
-          os.environ["PYTHONPATH"] = os.pathsep.join(str(root / folder) for folder in ["src", "tests"])
-          subprocess.run([sys.executable, "-m", "pip", "install", "--constraint",
-                          "actions/setup-obaaf/constraints.txt", "-e", ".[keys]"], check=True)
-          with tempfile.TemporaryDirectory() as fixture:
-              config = Path(fixture) / "developer.gitconfig"
-              attrs = Path(fixture) / "developer.attributes"
-              subprocess.run(["git", "config", "--file", str(config), "core.attributesFile", attrs.as_posix()], check=True)
-              os.environ.update(GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_COUNT="1",
-                                GIT_CONFIG_KEY_0="core.autocrlf", GIT_CONFIG_VALUE_0="true")
-              for setting in ["* text eol=crlf", "* text=auto"]:
-                  attrs.write_text(setting + "\n", encoding="utf-8")
-                  subprocess.run(["git", "config", "--file", str(config), "core.eol", "crlf"], check=True)
-                  subprocess.run([sys.executable, "-m", "unittest", "test_fix_patch", "-v"], check=True)
-              sys.path[:0] = [str(root / "src"), str(root / "tests")]
-              from test_fix_patch import FixPatchTest
-              class OneFailure(FixPatchTest):
-                  checks = 0
-                  def assertIn(self, member, container, msg=None):
-                      if member == "You are accepting risk (1 finding)":
-                          self.checks += 1
-                          if self.checks == 1:
-                              self.fail("intentional first-case failure")
-                      super().assertIn(member, container, msg)
-              case = OneFailure("test_git_checks_and_applies_exact_bytes")
-              result = unittest.TestResult()
-              case.run(result)
-              assert case.checks == 4, case.checks
-              assert len(result.failures) == 1 and not result.errors, (result.failures, result.errors)
-              assert "intentional first-case failure" in result.failures[0][1]
-              assert os.environ["GIT_CONFIG_GLOBAL"] == str(config)
-              assert os.environ["GIT_CONFIG_COUNT"] == "1"
-              print("Four cases ran, with only the injected failure. Developer environment restored.")
+          root = Path(os.environ["RUNNER_TEMP"])
+          settings = root / "flagship"
+          sites = [
+              ("OBAAF", settings, settings / ".github/obaaf-settings.json", "medium", 0),
+              ("Expectrail", root / "expectrail", settings / "tests/fixtures/settings/live-expectrail-2026-11-13/snapshot.json", "low", 1),
+          ]
+          for label, before, after in [("Combined checker", root / "previous-adoption", Path.cwd())]:
+              for name, site, snapshot, threshold, expected in sites:
+                  for mode in ("text", "json", "sarif", "summary"):
+                      command = [sys.executable, "-m", "obaaf", "check", ".", "--settings", str(snapshot),
+                                 "--baseline", ".github/obaaf-baseline.json", "--fail-on", threshold]
+                      command.extend(["--summary"] if mode=="summary" else ["--format", mode])
+                      if name=="Expectrail":
+                          command.append("--no-fixes")
+                      outputs = []
+                      for source in (before, after):
+                          env = dict(os.environ, PYTHONPATH=str(source/"src"), PYTHONDONTWRITEBYTECODE="1")
+                          result = subprocess.run(command, cwd=site, env=env, capture_output=True)
+                          assert result.returncode==expected, (name, mode, result.stderr[-300:])
+                          assert b"git did not list the tracked files" not in result.stdout
+                          outputs.append((result.stdout, result.stderr, result.returncode))
+                      assert outputs[0]==outputs[1], (label,name,mode)
+                      print(label, name, mode, "matched", expected, flush=True)
+          PY
+      - name: Run the full combined acceptance suite
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: |
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          python -m obaaf docs build --check
+          python -m unittest discover -s tests -v
