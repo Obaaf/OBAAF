@@ -7,7 +7,7 @@ permissions:
 jobs:
   recheck:
     runs-on: ubuntu-latest
-    timeout-minutes: 24
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -54,7 +54,30 @@ jobs:
           python "$RUNNER_TEMP/acceptance.py" before
           git config user.name 'Sean Keluo-Udeke'
           git config user.email '55066947+seanudeke@users.noreply.github.com'
-          git merge --no-ff --no-commit aa2a4a57399818a3fb7d8af9a29a4f7d82bd7f68
+          git merge --no-ff --no-commit b705c8577d5d76750fd3f86236c388ccadbba973
+          git commit -qm 'Combine the shell reader with the adoption drafts for verification' -m 
+          python "$RUNNER_TEMP/acceptance.py" after
+          python -m unittest -v test_short_names.WhereTheToolIsNamedTest.test_a_name_in_the_steps_env test_docs.LinksTest.test_relative_links_and_anchors_resolve test_fix_patch
+      - name: Read the producer and consumer fixtures through the combined checker
+        run: |
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          python - <<'PY'
+          from test_egress_recognised import workflow, run_check, FIREWALL, SHA, VERIFIED
+          from test_egress_artifact_producers import upload
+          for shell, invocation, runner in [('pwsh','& $env:TOOL -p review','ubuntu-24.04-firewall'), ('cmd','%TOOL% -p review','windows-latest')]:
+              steps=f"      - shell: {shell}\n        run: '{invocation}'\n        env: {{TOOL: claude}}\n"+upload()
+              src=workflow(steps,runs_on=runner).replace('  agent:', '  assemble:')
+              for command,wanted in [('cat result/report.txt',[]),('sh result/report.txt',['read'])]:
+                  wf=src+f"  read:\n    needs: assemble\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/download-artifact@{SHA}\n        with: {{name: report, path: result}}\n      - run: {command}\n"
+                  result=run_check(wf,config={'lanes':{}}, policy=FIREWALL)
+                  found=[f.job for f in result.findings if f.rule=='OBAAF-GHA-027']
+                  controls=[f.controls[0] for f in result.findings if f.rule=='OBAAF-GHA-020' and f.job=='assemble']
+                  assert len(controls)==1 and found==wanted
+                  if shell=='pwsh':assert controls[0].verdict==VERIFIED and 'can miss' in controls[0].detail
+                  print(shell,command,controls[0].verdict,found)
+          PY
+Assisted-by: ChatGPT (OpenAI)\nSigned-off-by: Sean Keluo-Udeke <55066947+seanudeke@users.noreply.github.com>'
+          git merge --no-ff --no-commit c79b863d219d53e2c65f216d80c2e3b043781c86
           git write-tree
           python "$RUNNER_TEMP/acceptance.py" after
           python -m unittest -v test_short_names.WhereTheToolIsNamedTest.test_a_name_in_the_steps_env
@@ -76,17 +99,3 @@ jobs:
                   if shell=='pwsh':assert controls[0].verdict==VERIFIED and 'can miss' in controls[0].detail
                   print(shell,command,controls[0].verdict,found)
           PY
-      - name: Verify all four open PRs together
-        run: |
-          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
-          test "$(git write-tree)" = 43a15e7f002d35b5c6a797110c7d34bb08036ec4
-          git commit -qm 'Rehearse the revised shell and adoption drafts' -m 'Assisted-by: ChatGPT (OpenAI)
-          Signed-off-by: Sean Keluo-Udeke <55066947+seanudeke@users.noreply.github.com>'
-          git merge --no-ff --no-commit c79b863d219d53e2c65f216d80c2e3b043781c86
-          git write-tree
-          obaaf catalog
-          obaaf docs build --check
-          python site/build.py --output "$RUNNER_TEMP/site"
-          obaaf check . --settings .github/obaaf-settings.json --baseline .github/obaaf-baseline.json --fail-on medium
-          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          python -m unittest discover -s tests -v
