@@ -4,6 +4,16 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### OBAAF-GHA-028: an outsider's text written to GITHUB_ENV or GITHUB_PATH
+
+Slice 2d.26, from #232; decision D-154. OBAAF-GHA-010's fix is to pass an outsider's text through an environment variable. A script that then wrote that variable to `GITHUB_ENV` or `GITHUB_PATH` got no finding: #232's workflow, `echo "PR_BODY=$BODY" >> "$GITHUB_ENV"` with `BODY` set from the pull request's body on `pull_request_target`, gave 0 findings and exit 0. The runner reads every line of `GITHUB_ENV` into every later step as a variable, and every line of `GITHUB_PATH` as a folder to search first, so a line break in that text can set `BASH_ENV` or `LD_PRELOAD`. zizmor's `github-env` and Octoscan's `dangerous-write` report this.
+
+- **Can fail a check that passed.** Such a write is now OBAAF-GHA-028, at OBAAF-GHA-010's severity for the job's triggers: high on `pull_request_target`, `pull_request`, a comment event or `workflow_call`.
+- **Read in a bash or sh `run`, command by command**, with the script's own copies of the variable followed (assignment, `export`, `declare`, `local`, one-line arrays, `${NAME:=...}`, `for`), groups and loops redirected as a whole, `tee`, here-documents, and the commands that print every variable.
+- **"Cannot tell", at medium, where the checker cannot vouch for what is written** in a step whose environment holds such text. Examples: another program or a pipeline through one, a command substitution, what `read` sets, `exec`, a subshell, a function, a trap, `set -x` or `eval` in the script, an `env:` value that names the runner's files, another shell, and actions/github-script naming the event's payload. A bash step that names the event's file counts as holding the text. A write by the builtin `echo` or `printf` of literal text, a plain `${{ github... }}` reference (whose outsider fields stay OBAAF-GHA-010's) or the runner's own values such as `GITHUB_SHA` and `HOME` is clean.
+- **An acceptance names the step's script**, so any edit of it makes the finding new.
+- The risky test set gains `github-env-injection.yml`. On this repository and on the first adopter the reports are byte-identical with `flagship` `b4985c7`.
+
 ### An agent named through `env` in a PowerShell or cmd step is read
 
 Slice 2d.25, from #411; decision D-153. PowerShell reads a step's `env` as `$env:NAME` or `${env:NAME}`, and cmd as `%NAME%`. Neither the lanes nor OBAAF-GHA-026 put those in, so `& $env:AGENT --dangerously-skip-permissions -p x` with `AGENT: claude` (in the step's, the job's or the workflow's `env`) made no agent job, gave no agent rule and no OBAAF-GHA-026, where the same step in bash gave the agent lane and a high finding. cmd's `%AGENT% ...` was the same.

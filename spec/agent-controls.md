@@ -65,7 +65,7 @@ The [GitHub Actions templates](../templates/github-actions/README.md) implement 
 
 **New relative to existing standards.** Trust labels for content an automated actor reads.
 
-**In this repository.** Tools: `obaaf snapshot` · Templates: `obaaf-agent-propose.yml: snapshot job` · Checker rules: `OBAAF-GHA-010`, `OBAAF-JEN-009`
+**In this repository.** Tools: `obaaf snapshot` · Templates: `obaaf-agent-propose.yml: snapshot job` · Checker rules: `OBAAF-GHA-010`, `OBAAF-GHA-028`, `OBAAF-JEN-009`
 
 ### R2 Derive authority from labels
 

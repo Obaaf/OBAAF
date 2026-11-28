@@ -1208,6 +1208,7 @@
    "clinejection-triage.yml": "b683867fbf64fe7ff1a9dfdd9fefcebf5cb98fed053d47fe3dde51eb6e475fd0",
    "effect-without-checks.yml": "c1ccb66f55f1f0d6be74ea8663b3716fb8cbe373545ba50910b4e3c0fe104215",
    "expression-spellings.yml": "4cb11e06bd6a8ca7bb14c287e52e2569161be553a6f64782f0c072c23e65c019",
+   "github-env-injection.yml": "f331b14e068360a532734b13458ee985a09ecc55562d580b30f583ccf14879cb",
    "nx-title-injection.yml": "69e840f4e8cc763d07a788b835262f0aaac5b31f4d79bc2e3aaec9cb87c4e15c",
    "promptpwnd-issue-agent.yml": "9a7fcbab8f9586ab06b0d023c737c7979f689a3429090e76d3791fa46f9b004b",
    "protected-secret-repo-scope.yml": "d08ed420c39091df5b55238c5ccd1b0f5f42da9e55e56f31dab74ef20586367a",
