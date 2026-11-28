@@ -71,6 +71,7 @@ AGENT_FORMS = [
     # does not hold the next command; `^^` is an escaped caret, so the `&` after it is an operator.
     ("pwsh-comment-ending-with-a-comma", "pwsh", "# First install it,\nC:\\tools\\claude.exe " + F + " -p x", {}),
     ("pwsh-code-then-comment-with-a-pipe", "pwsh", "$a = 'claude' # the cli |\n& $a " + F + " -p x", {}),
+    ("pwsh-pipe-then-comment", "pwsh", "Get-Content p.txt | # feed the prompt\n  C:\\tools\\claude.exe " + F + " -p x", {}),
     ("cmd-text-bracket-then-ampersand", "cmd", "echo :-( & claude.exe " + F + " -p x", {}),
     ("cmd-at-block", "cmd", "@(claude.exe " + F + " -p x) > log.txt", {}),
     ("cmd-escaped-caret-then-ampersand", "cmd", "echo a ^^& claude.exe " + F + " -p x", {}),
@@ -258,6 +259,8 @@ class TheProgramLinesTest(unittest.TestCase):
             "pwsh-unclosed-here-strings": ("pwsh", lambda n: "\n".join("@'" for _ in range(n)) + "\nclaude -p x"),
             "cmd-sets": ("cmd", lambda n: "\n".join([*(f"set B{i}=claude" for i in range(n)), "%B1% -p x"])),
             "cmd-brackets": ("cmd", lambda n: "echo " + "(" * n + " claude -p x"),
+            "pwsh-continued-lines": ("pwsh", lambda n: "Start-Process claude -ArgumentList " + "\n".join(
+                f"'a{i}', # note {i}" for i in range(n)) + "\n'-p'"),
         }
         for name, (family, make) in shapes.items():
             with self.subTest(shape=name):

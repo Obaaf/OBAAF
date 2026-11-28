@@ -2137,7 +2137,7 @@ def _held_lists(code: _Code) -> None:
 _CMD_VARIABLE_RE = re.compile(r"%[^%\s]+%|%[*~0-9]|%%\w|![^!\s]+!")
 
 
-def _ps_words(line: str, family: str) -> list:
+def _ps_words(line: str, family: str, stop: list | None = None) -> list:
     """A PowerShell or cmd line split into words: (text as the shell reads it, how it was written: "plain",
     "single", "double", "group", "op"). Quotes (straight and, in PowerShell, curly), PowerShell's backtick
     escapes, and groups `(...)`, `@(...)`, `$(...)`, `{...}` are one word; `;`, `|`, `&&`, `||`, a lone `&`
@@ -2160,10 +2160,14 @@ def _ps_words(line: str, family: str) -> list:
             # its review: `claude <# note #> -p x` was cut at the `#`).
             close = line.find("#>", i + 2)
             if close < 0:
+                if stop is not None:
+                    stop.append(i)      # where the line's code ends (`_logical_lines`)
                 break
             i = close + 2
             continue
         if ps and c == "#" and (i == 0 or line[i - 1].isspace()):
+            if stop is not None:
+                stop.append(i)
             break
         if ps and (c == "(" or line.startswith(("@(", "$(", "@{"), i)):
             j = i + (2 if c in "@$" else 1)
@@ -2244,15 +2248,26 @@ def _logical_lines(text: str, family: str) -> list:
     # Only where the `,` or `|` is the line's last word, outside a comment and a string: a comment ends its line
     # and carries nothing on (the second review: `# install it,` joined the next line into the comment). Each line is
     # split into words once, so this stays linear.
+    # A carried line's comment is left out, so that the next line is joined to its code, not into the comment (the third
+    # review: `Get-Content p | # feed it` lost the next line); the pieces are joined once, so this stays linear.
     out: list = []
-    carry = False
+    pieces: list | None = None
     for line in lines:
-        if carry:
-            out[-1] += " " + line
-        else:
-            out.append(line)
-        words = _ps_words(line, family)
+        stop: list = []
+        words = _ps_words(line, family, stop)
         carry = bool(words) and (words[-1] == ("|", "op") or words[-1][1] == "plain" and words[-1][0].endswith(","))
+        code = line[:stop[0]] if stop and carry else line
+        if pieces is None and not carry:
+            out.append(line)
+            continue
+        if pieces is None:
+            pieces = []
+        pieces.append(code)
+        if not carry:
+            out.append(" ".join(pieces))
+            pieces = None
+    if pieces is not None:
+        out.append(" ".join(pieces))
     return out
 
 
