@@ -48,14 +48,14 @@ AGENT_JOBS = {
     "pwsh-self-hosted-other-case": ("agent", "medium", "command-computed"),
     "pwsh-after-github-env": ("agent", "medium", "command-computed"),
     # From the second review: a value copied into a variable and run on the next line, `-FilePath:`, `call :label`.
-    # The lanes follow neither a value copied into a script's variable nor the script's own assignments, for a
-    # program written out as for one put in (`$a = 'claude'; & $a`; D-153's stated limits): those jobs are in no
-    # agent lane, and OBAAF-GHA-026 reads them.
-    "pwsh-copied-into-a-variable": ("trusted", "high", "command-option"),
+    # Since flagship slice 2d.27a (#420) the lanes take the program from OBAAF-GHA-026's reader of these shells, which
+    # follows a name given the program's name (`$a = 'claude'; & $a`, `set C=claude` and `%C%`, wherever the script
+    # sets it): those jobs are agent jobs now, where D-153 stated them as limits of the lanes.
+    "pwsh-copied-into-a-variable": ("agent", "high", "command-option"),
     "pwsh-copied-after-github-env": ("agent", "medium", "command-computed"),
     "pwsh-file-path-after-a-colon": ("agent", "high", "command-option"),
-    "cmd-copied-into-a-variable": ("trusted", "high", "command-option"),
-    "cmd-call-label-sets-it": ("trusted", "high", "command-option"),
+    "cmd-copied-into-a-variable": ("agent", "high", "command-option"),
+    "cmd-call-label-sets-it": ("agent", "high", "command-option"),
     # From the third review: a value left out (after `GITHUB_ENV`) run where the reader reads it, and setters the
     # checker does not list. The copies and the script's own assignments are stated limits of the lanes.
     "pwsh-typed-copy-after-github-env": ("trusted", "medium", "command-computed"),
@@ -66,9 +66,9 @@ AGENT_JOBS = {
     # From the fifth review: a typed or indexed assignment of a command line, run through `Invoke-Expression`.
     "pwsh-typed-command-line": ("agent", "medium", "command-computed"),
 }
-# The jobs above where the lanes and OBAAF-GHA-026 disagree, each for a reason D-153 states.
-STATED_DISAGREEMENTS = {"pwsh-copied-into-a-variable", "cmd-copied-into-a-variable", "cmd-call-label-sets-it",
-                        "pwsh-typed-copy-after-github-env", "pwsh-foreach-after-github-env",
+# The jobs above where the lanes and OBAAF-GHA-026 disagree, each for a reason D-153 states. Each is a "cannot tell"
+# of OBAAF-GHA-026 (`command-computed`); a job where it names the program is an agent job (2d.27a, #420).
+STATED_DISAGREEMENTS = {"pwsh-typed-copy-after-github-env", "pwsh-foreach-after-github-env",
                         "pwsh-set-by-an-unlisted-setter", "cmd-set-p-without-a-space"}
 ORDINARY_JOBS = ["pwsh-region", "pwsh-tool-from-env", "cmd-greeting", "pwsh-linux-other-case",
                  "pwsh-single-quoted-and-escaped", "bash-reads-no-pwsh-reference", "pwsh-tool-named-in-prose",
