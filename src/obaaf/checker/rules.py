@@ -1069,7 +1069,7 @@ def _distinct_texts(value, limit: int = 20_000) -> list:
             else:
                 stack.extend(reversed(node))
         elif node is not None:
-            text = str(node)
+            text = as_text(node)        # a number of any length (`as_text`)
             if text not in texts:
                 texts.add(text)
                 out.append(text)
