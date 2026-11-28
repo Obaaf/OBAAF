@@ -4,6 +4,7 @@ import os
 from datetime import date, timedelta
 import subprocess
 import unittest
+from unittest import mock
 
 from helpers import TempDir, run_cli
 
@@ -13,6 +14,23 @@ class FixPatchTest(unittest.TestCase):
         tmp = TempDir()
         outside = tmp.__enter__()
         self.addCleanup(tmp.__exit__)
+        # Keep developer Git settings out of the fixture. Individual tests can still
+        # supply their own configuration or attributes and exercise the public CLI.
+        # A system attributes file that gives a target `filter`, `ident` or
+        # `working-tree-encoding` still reaches the product's checks, which do not pass
+        # GIT_ATTR_NOSYSTEM on (docs/upgrading.md, since #422): there export refuses, as it
+        # should, and the tests that expect a patch fail or error (review-gpt #427).
+        environment = mock.patch.dict(os.environ, {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": str(outside / "empty.gitconfig"),
+            "GIT_CONFIG_COUNT": "0",
+            "GIT_ATTR_NOSYSTEM": "1",
+            "XDG_CONFIG_HOME": str(outside / "xdg"),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+        os.environ.pop("GIT_CONFIG", None)
         self.root = outside / "source"
         self.patch = outside / "review.patch"
         flows = self.root / ".github/workflows"
@@ -53,7 +71,7 @@ class FixPatchTest(unittest.TestCase):
                     self.git("apply", str(self.patch))
                     expected = before.replace(b"- rule:", b'- owner: "@team"' + ending + b"    rule:")
                     self.assertEqual(self.config.read_bytes(), expected)
-                    self.patch.unlink()
+                self.patch.unlink(missing_ok=True)
 
     def test_generated_gate_patch_uses_the_proven_workflow(self):
         from importlib.resources import files
@@ -152,19 +170,23 @@ class FixPatchReviewTest(unittest.TestCase):
                     self.git(*hide, str(self.config.relative_to(self.root)))
                 if attribute:
                     (self.root / ".gitattributes").write_text(f"*.yml {attribute}\n")
-                code, _, err = self.export()
-                self.assertEqual(code, 2, err)
-                self.assertFalse(self.patch.exists())
-                if hide:
-                    self.git(hide[0], hide[1].replace("--", "--no-"), str(self.config.relative_to(self.root)))
-                if attribute:
-                    (self.root / ".gitattributes").unlink()
+                try:
+                    code, _, err = self.export()
+                    self.assertEqual(code, 2, err)
+                    self.assertFalse(self.patch.exists())
+                finally:
+                    # Undone whether the subtest passed or not, so that one failure does not
+                    # make the later cases fail too (review-gpt #427).
+                    if hide:
+                        self.git(hide[0], hide[1].replace("--", "--no-"), str(self.config.relative_to(self.root)))
+                    if attribute:
+                        (self.root / ".gitattributes").unlink()
+            self.patch.unlink(missing_ok=True)
         code, _, err = self.export()
         self.assertEqual(code, 0, err)
 
     def test_a_failed_write_leaves_no_patch_and_a_retry_succeeds(self):
         import errno
-        from unittest import mock
 
         self.config.write_bytes(self.policy(b"\n", True))
         self.git("add", ".")
@@ -190,7 +212,6 @@ class FixPatchReviewTest(unittest.TestCase):
     def test_below_the_top_git_must_answer(self):
         # Second review: with no git program, or a repository Git refuses (another user's), the
         # check took the folder to be outside a work tree and saved the patch.
-        from unittest import mock
         from obaaf.fix_proof import ProofError
 
         inner, config = self.inner_root()
@@ -201,10 +222,9 @@ class FixPatchReviewTest(unittest.TestCase):
                 self.assertEqual(code, 2, err)
                 self.assertIn("top folder of the Git work tree", err)
                 self.assertFalse(self.patch.exists())
+            self.patch.unlink(missing_ok=True)
 
     def test_git_location_variables_are_refused(self):
-        from unittest import mock
-
         self.config.write_bytes(self.policy(b"\n", True))
         self.git("add", ".")
         for name, values in (("GIT_DIR", {"GIT_DIR": str(self.root / ".git")}),
@@ -214,6 +234,7 @@ class FixPatchReviewTest(unittest.TestCase):
                 self.assertEqual(code, 2, err)
                 self.assertIn(name, err)
                 self.assertFalse(self.patch.exists())
+            self.patch.unlink(missing_ok=True)
         # Other configuration in the environment, such as a URL rewrite, is not refused.
         other = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "url.https://example.com/.insteadOf",
                  "GIT_CONFIG_VALUE_0": "git@example.com:"}
@@ -225,8 +246,6 @@ class FixPatchReviewTest(unittest.TestCase):
         # Third review: a config file named in the environment, or included from one, set attributes
         # that the check, which ran Git without them, never saw. (Git reads core.worktree only from the
         # repository's own configuration, so in the environment it moves nothing.)
-        from unittest import mock
-
         self.config.write_bytes(self.policy(b"\n", True))
         self.git("add", ".")
         attributes = self.root.parent / "attributes"
@@ -239,6 +258,21 @@ class FixPatchReviewTest(unittest.TestCase):
                 code, _, err = self.export()
                 self.assertEqual(code, 2, err)
                 self.assertFalse(self.patch.exists())
+            self.patch.unlink(missing_ok=True)
+
+    def test_text_and_eol_are_not_refused_and_git_converts_the_line_endings(self):
+        # D-103's clarification and docs/upgrading.md say so: `text`, `eol` and `crlf` are not
+        # refused, and `git apply` converts the line endings as it writes the file. Pinned here so
+        # that the isolation above does not hide it (review-gpt #427).
+        before = self.policy(b"\n", True)
+        self.config.write_bytes(before)
+        (self.root / ".gitattributes").write_text("*.yml text eol=crlf\n")
+        self.git("add", ".")
+        code, _, err = self.export()
+        self.assertEqual(code, 0, err)
+        self.git("apply", str(self.patch))
+        proven = before.replace(b"- rule:", b'- owner: "@team"\n    rule:')
+        self.assertEqual(self.config.read_bytes(), proven.replace(b"\n", b"\r\n"))
 
     def test_a_stray_git_entry_above_a_plain_folder_is_not_a_work_tree(self):
         import shutil
@@ -277,6 +311,7 @@ class FixPatchReviewTest(unittest.TestCase):
                 self.assertEqual(code, 2, err)
                 self.assertIn("ignores", err)
                 self.assertFalse(self.patch.exists())
+            self.patch.unlink(missing_ok=True)
         (self.root / ".git/info/exclude").write_text("")
         code, _, err = self.export()
         self.assertEqual(code, 0, err)
