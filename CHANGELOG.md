@@ -4,6 +4,16 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### A check of many jobs that share a local action is about three times faster
+
+Slice 2d.28, #227. Nothing a check reports changes: no finding, note, error or exit status. The second pass over local composite actions (slice 2d.4b2) reads an action's steps again for every job that uses it, and several readers asked the same question of the same text each time:
+
+- OBAAF-GHA-026 worked out what each step gives a shell once for each agent tool whose options it reads, about a dozen times per step. It now works it out once per step.
+- The lanes looked for an agent command, a release command and a signing command in the same scripts in every job. They now keep each answer by the text.
+- Looking for a shell script that a step copies and runs, the checker split every script into words, even a script that names no `.sh` or `.bash` file. It now skips those.
+
+The 400-job case in `tests/test_local_composite_actions.py`, where each job gives its own input to a local action whose 18 steps run through three action files, took 12.9 s before and 3.9 s after, on one machine. On CI's Python 3.10 it had failed its 30 s limit on four heads of #426. On 12,040 calls to the checker recorded from the test suite, and on this repository and on the first adopter in six output modes, the results are identical with `flagship` `d6410ce`.
+
 ### The lanes read the program a PowerShell or cmd command runs as OBAAF-GHA-026 reads it
 
 Slice 2d.27a, split from #420; decision D-155. OBAAF-GHA-026 reads PowerShell and cmd scripts with a reader of those shells. The lanes read the same scripts with bash's word splitting. So these each got OBAAF-GHA-026 high and no agent rule: `& “claude” ...`, `claude.exe ...`, `C:\tools\claude.exe ...`, cmd's `^claude ...`, `Start-Process -WorkingDirectory C:\w claude ...`, `$a = 'claude'; & $a ...`, and `set BIN=claude` followed by `%BIN% ...`.

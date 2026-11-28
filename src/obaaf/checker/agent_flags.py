@@ -1851,14 +1851,27 @@ def appears(text: str, programs: list, packages: list) -> bool:
     `kilo` in `kilobyte`), so where a "cannot tell" turns on the tool being named, `mentions` or `names`
     decides (flagship slice 2d.23, #388)."""
     names = [n.casefold() for n in programs + packages]
-    low = re.sub(r"[\"'\\]", "", text).casefold()
+    low = _appears_folded(text)
     if any(n in low for n in names):
         return True
     if "$'" in text:
-        decoded = re.sub(r"[\"'\\]", "", re.sub(r"\$'((?:[^'\\]|\\.)*)'", lambda m: _ansi_c(m.group(1)),
-                                                  text)).casefold()
+        decoded = _appears_decoded(text)
         return any(n in decoded for n in names)
     return False
+
+
+# The two texts `appears` looks for a name in, kept by text (flagship slice 2d.28, #227): OBAAF-GHA-026 asks it
+# for every agent tool, about a dozen, of every text of every step, and the second pass over local actions asks
+# again for the same scripts in every job that uses them.
+@functools.lru_cache(maxsize=8192)
+def _appears_folded(text: str) -> str:
+    return re.sub(r"[\"'\\]", "", text).casefold()
+
+
+@functools.lru_cache(maxsize=1024)
+def _appears_decoded(text: str) -> str:
+    return re.sub(r"[\"'\\]", "", re.sub(r"\$'((?:[^'\\]|\\.)*)'", lambda m: _ansi_c(m.group(1)),
+                                          text)).casefold()
 
 
 @functools.lru_cache(maxsize=512)
