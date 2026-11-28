@@ -1,4 +1,4 @@
-name: Check integration of the runner-file rule and adoption drafts
+name: Full adoption integration and report comparison
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
@@ -7,7 +7,7 @@ permissions:
 jobs:
   merge-trees:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -16,7 +16,7 @@ jobs:
           persist-credentials: false
       - name: Check the three-file guide and locate conflicts with the adoption build
         env:
-          CORE_HEAD: f21d6638f0e2bc57976769f3d1d748054d56563b
+          CORE_HEAD: e8f7a6c929a98dbb8694a296030cbd1604109a6d
           GUIDE_HEAD: 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
           ADOPTION_HEAD: e49616ec3b1abe58e73273c852f2073e3dcb9f30
         run: |
@@ -60,9 +60,10 @@ jobs:
         with:
           python-version: '3.13'
       - name: Rehearse the catalogue resolution in the runner checkout
+        id: resolve
         run: |
           export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
-          git checkout -q --detach f21d6638f0e2bc57976769f3d1d748054d56563b
+          git checkout -q --detach e8f7a6c929a98dbb8694a296030cbd1604109a6d
           git merge --no-ff -m 'Temporary guide integration' 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
           if git merge --no-ff --no-commit e49616ec3b1abe58e73273c852f2073e3dcb9f30; then exit 1; fi
           python - <<'PY'
@@ -90,64 +91,47 @@ jobs:
           git write-tree
           python -m obaaf catalog
           python -m obaaf docs build --check
-          python -m unittest -v test_todo_catalog test_docs test_site_claims test_first_run test_templates_install_docs test_todo_upgrade
-  plain-folder:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
-        with:
-          python-version: '3.13'
-      - name: Install the submitted checker
-        run: python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
-      - name: Export in an ordinary folder without Git and replay with native Git
-        shell: python
+          git commit --no-edit
+          git rev-parse HEAD^{tree}
+      - name: Compare four report formats on both adopters
         run: |
-          import os
-          import shutil
-          import subprocess
-          import sys
-          import tempfile
-          from datetime import date, timedelta
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          git worktree add -q --detach "$RUNNER_TEMP/flagship" b4985c76b8305b9463a61177a6a8904e62f1a486
+          git worktree add -q --detach "$RUNNER_TEMP/previous-adoption" e49616ec3b1abe58e73273c852f2073e3dcb9f30
+          git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+          python - <<'PY'
+          import os, subprocess, sys
           from pathlib import Path
-
-          git = shutil.which("git")
-          assert git
-          temp = Path(os.environ["RUNNER_TEMP"]).resolve()
-          outside = subprocess.run([git, "-C", str(temp), "rev-parse", "--git-dir"], capture_output=True)
-          assert outside.returncode != 0
-          with tempfile.TemporaryDirectory(dir=temp) as tmp:
-              root = Path(tmp) / "ordinary folder"
-              flows = root / ".github" / "workflows"
-              flows.mkdir(parents=True)
-              workflow = flows / "build.yml"
-              workflow.write_bytes(b"on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n")
-              config = root / ".github" / "policy.yml"
-              until = (date.today() + timedelta(days=28)).isoformat()
-              before = ("ignore:\n  - rule: OBAAF-GHA-008\n    path: .github/workflows/build.yml\n"
-                        f"    reason: reviewed for adoption\n    until: {until}\n").encode()
-              config.write_bytes(before)
-              expected = before.replace(b"- rule:", b'- owner: "@team"\n    rule:')
-              patch = Path(tmp) / "review.patch"
-              empty_bin = Path(tmp) / "empty-bin"
-              empty_bin.mkdir()
-              assert shutil.which("git", path=str(empty_bin)) is None
-              env = dict(os.environ, TMPDIR=str(temp), TMP=str(temp), TEMP=str(temp), PATH=str(empty_bin))
-              cmd = [sys.executable, "-m", "obaaf", "fix", ".", "--config", str(config),
-                     "--owner", "@team", "--patch", str(patch)]
-              result = subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True)
-              assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
-              assert "You are accepting risk (1 finding)" in result.stdout
-              assert patch.is_file() and config.read_bytes() == before
-              for opts in (["--check"], []):
-                  subprocess.run([git, "-c", "core.autocrlf=false", "apply", *opts, str(patch)], cwd=root, check=True)
-              assert config.read_bytes() == expected
-              print("Export with no Git on PATH preserved the source; native Git checked and applied the reviewed owner edit byte-for-byte.")
+          root = Path(os.environ["RUNNER_TEMP"])
+          settings = root / "flagship"
+          sites = [
+              ("OBAAF", settings, settings / ".github/obaaf-settings.json", "medium", 0),
+              ("Expectrail", root / "expectrail", settings / "tests/fixtures/settings/live-expectrail-2026-11-13/snapshot.json", "low", 1),
+          ]
+          for label, before, after in [("Combined checker", root / "previous-adoption", Path.cwd())]:
+              for name, site, snapshot, threshold, expected in sites:
+                  for mode in ("text", "json", "sarif", "summary"):
+                      command = [sys.executable, "-m", "obaaf", "check", ".", "--settings", str(snapshot),
+                                 "--baseline", ".github/obaaf-baseline.json", "--fail-on", threshold]
+                      command.extend(["--summary"] if mode=="summary" else ["--format", mode])
+                      if name=="Expectrail":
+                          command.append("--no-fixes")
+                      outputs = []
+                      for source in (before, after):
+                          env = dict(os.environ, PYTHONPATH=str(source/"src"), PYTHONDONTWRITEBYTECODE="1")
+                          result = subprocess.run(command, cwd=site, env=env, capture_output=True)
+                          assert result.returncode==expected, (name, mode, result.stderr[-300:])
+                          assert b"git did not list the tracked files" not in result.stdout
+                          outputs.append((result.stdout, result.stderr, result.returncode))
+                      assert outputs[0]==outputs[1], (label,name,mode)
+                      print(label, name, mode, "matched", expected, flush=True)
+          PY
+      - name: Run the full four-draft acceptance suite
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: |
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          python -m unittest discover -s tests -v
