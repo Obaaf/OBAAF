@@ -93,7 +93,7 @@ requirements:
     obaaf:
       tools: ["obaaf snapshot"]
       templates: ["obaaf-agent-propose.yml: snapshot job"]
-      checks: [OBAAF-GHA-010, OBAAF-JEN-009]
+      checks: [OBAAF-GHA-010, OBAAF-GHA-028, OBAAF-JEN-009]
 
   - id: R2
     name: Authority derived from labels

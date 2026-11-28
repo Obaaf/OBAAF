@@ -563,6 +563,524 @@ def _github_env_names(script: str) -> set | None:
     return names
 
 
+# ------------------------------------ OBAAF-GHA-028: an outsider's text written to the runner's files
+# Flagship slice 2d.26, from #232. The lexer marks each expansion it cannot work out between two `\x03`; one such
+# part of a word is a variable (`$NAME`, `${NAME...}`), a positional parameter, a name that is itself a value
+# (`${!NAME}`) or a command substitution.
+_MARKED_RE = re.compile("\x03([^\x03]*)\x03")
+_VAR_PART_RE = re.compile(r"\$(?:\{\s*(?P<bang>!)?\s*(?P<braced>[A-Za-z_][A-Za-z0-9_]*|[@*]|[0-9]+)|(?P<plain>[A-Za-z_][A-Za-z0-9_]*|[@*0-9]))")
+_LENGTH_PART_RE = re.compile(r"\$\{\s*#\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\Z")
+# `${NAME:=word}` and `${NAME=word}` set NAME where it is unset (or empty), `${NAME[i]:=word}` too.
+_DEFAULT_SET_RE = re.compile(r"\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\s*:?=")
+_PLAIN_CONTEXT_RE = re.compile(r"\$\{\{\s*(github|runner)(\.[A-Za-z_][A-Za-z0-9_-]*)+\s*\}\}\Z", re.I)
+# A here-document the shell expands, read as text: `\$` is a dollar sign.
+_HEREDOC_REF_RE = re.compile(r"\$(?:\{\s*(!)?\s*([A-Za-z_][A-Za-z0-9_]*|[@*]|[0-9]+)|([A-Za-z_][A-Za-z0-9_]*|[@*0-9]))")
+_ASSIGNMENT_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\[[^\]]*\])?\+?=")
+_PLAIN_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+# A redirection's or tee's target written as the runner's own context for the file: `${{ github.env }}`.
+_FILE_CONTEXT_TARGET_RE = re.compile(r"\$\{\{\s*github\s*\.\s*(env|path|output|state|step_summary)\s*\}\}\Z", re.I)
+_FILE_NAMES = frozenset({"GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"})
+# The two files whose lines the runner reads into later steps: a variable, and a folder put first on `PATH`.
+_SINK_FILES = frozenset({"GITHUB_ENV", "GITHUB_PATH"})
+# The runner's own variables whose values the workflow's author does not write and an outsider cannot (the head
+# branch's name, `GITHUB_HEAD_REF`, is an outsider's and is left out).
+_RUNNER_VALUES_RE = re.compile(r"(GITHUB_(?!HEAD_REF\Z)[A-Z_]+|RUNNER_[A-Z_]+|HOME|CI|ImageOS|ImageVersion)\Z")
+_DECLARERS = frozenset({"export", "declare", "typeset", "local", "readonly"})
+# A script in which no command can be taken for what its name says: a function (which can be named `echo` or `cat`),
+# an alias with `expand_aliases`, a builtin loaded or turned off, a DEBUG or other trap, tracing (`set -x`).
+_OPAQUE_RE = re.compile(r"(?<![\w./-])(function|alias|enable|trap)(?![\w./-])|[A-Za-z_][\w.:-]*\s*\(\s*\)"
+                        r"|expand_aliases|\bset\b[^\n;|&]*?(\s-[a-zA-Z]*x|xtrace)|\bBASH_XTRACEFD\b|SHELLOPTS|BASHOPTS")
+# Builtins that set the names they are given from what they read, the names left unknown.
+_SETTERS = frozenset({"read", "mapfile", "readarray", "getopts", "for", "select"})
+# Builtins after which no variable of the script can be vouched for: they run text as code or rename variables.
+_RENAMERS = frozenset({"eval", "source", ".", "let", "unset"})
+# Commands that print every variable's value: `env` and `printenv` with no name, the others bare or with `-p`.
+_PRINTERS_BARE = frozenset({"export", "declare", "typeset", "set", "readonly", "local"})
+# A compound command's words: the closer, after which a redirection applies to everything since its opener, and
+# that opener (`do`, `then`, `else` and `elif` are inside a loop's or an `if`'s own).
+_OPENERS = {"}": "{", "done": ("while", "until", "for", "select"), "fi": "if", "esac": "case"}
+_OPENING = frozenset({"{", "while", "until", "for", "select", "if", "case"})
+# Builtins that print nothing, read inside a redirected group or loop.
+_QUIET = frozenset({"read", "mapfile", "readarray", "getopts", "test", "[", "[[", "shift", "break", "continue",
+                    "exit", "return", "true", ":", "false"})
+
+
+@dataclass
+class RunnerFileWrite:
+    """What a step's script writes to GITHUB_ENV or GITHUB_PATH of an outsider's text (`_runner_file_writes`):
+    `state` is "written" where a write's text holds it, "unresolved" where the checker cannot tell; `names` the
+    variables written that hold it, as the script spells them ("*" for every variable); `files` the files
+    written; `why` what the checker could not read, for "unresolved"."""
+    state: str
+    names: frozenset
+    files: frozenset
+    why: str = ""
+
+
+@dataclass
+class _Parts:
+    """What a command's words (or a here-document) expand: the variables read outside a command substitution,
+    whether a positional parameter, a name that is itself a value, or a command substitution is among them."""
+    names: set = field(default_factory=set)
+    positional: bool = False
+    indirect: bool = False
+    substitution: bool = False
+    defaults: set = field(default_factory=set)      # names `${NAME:=...}` or `${NAME=...}` may set
+
+    def add(self, other: "_Parts") -> None:
+        self.names |= other.names
+        self.defaults |= other.defaults
+        self.positional |= other.positional
+        self.indirect |= other.indirect
+        self.substitution |= other.substitution
+
+
+def _word_parts(text: str) -> _Parts:
+    """The expansions of one word as the lexer gives it (`Word.text`)."""
+    parts = _Parts()
+    for marked in _MARKED_RE.findall(text):
+        if marked.startswith(("$(", "`")):
+            parts.substitution = True
+            continue
+        if marked.startswith("${{"):
+            # A plain reference to the `github` or `runner` context: an outsider's field there is OBAAF-GHA-010's.
+            # Any other expression may give text the shell then expands (`${{ '$BODY' }}`, an `env` value).
+            if not _PLAIN_CONTEXT_RE.match(marked):
+                parts.indirect = True
+            continue
+        for default in _DEFAULT_SET_RE.finditer(marked):
+            parts.defaults.add(default.group(1))
+        if _LENGTH_PART_RE.match(marked):
+            continue                    # `${#NAME}` is a length, not the text
+        found = False
+        for match in _VAR_PART_RE.finditer(marked):
+            found = True
+            name = match.group("braced") or match.group("plain")
+            if match.group("bang"):
+                parts.indirect = True
+            elif not (name[0].isalpha() or name[0] == "_"):
+                parts.positional = True
+            else:
+                parts.names.add(name)
+        if not found:
+            parts.indirect = True       # an expansion the checker cannot name
+    return parts
+
+
+def _heredoc_parts(text: str) -> _Parts:
+    parts = _Parts()
+    # `\\` is one backslash and `\$` a dollar sign; what is left of `$` is expanded.
+    text = text.replace("\\\\", "\x00").replace("\\$", "\x00").replace("\\`", "\x00")
+    for expression in re.findall(r"\$\{\{.*?\}\}", text, re.S):
+        if not _PLAIN_CONTEXT_RE.match(expression):
+            parts.indirect = True       # as in a word: GitHub writes its result before the shell expands it
+    text = re.sub(r"\$\{\{.*?\}\}", "", text, flags=re.S)
+    if "$(" in text or "`" in text:
+        parts.substitution = True
+    for default in _DEFAULT_SET_RE.finditer(text):
+        parts.defaults.add(default.group(1))
+    for match in _HEREDOC_REF_RE.finditer(text):
+        name = match.group(2) or match.group(3)
+        if match.group(1):
+            parts.indirect = True
+        elif not (name[0].isalpha() or name[0] == "_"):
+            parts.positional = True
+        else:
+            parts.names.add(name)
+    return parts
+
+
+def _command_parts(command, words=None) -> _Parts:
+    parts = _Parts()
+    for word in (command.words if words is None else words):
+        if not word.redirect:
+            parts.add(_word_parts(word.text))
+    for _kind, text, literal in command.stdin:
+        if not literal:
+            parts.add(_word_parts(text) if "\x03" in text else _heredoc_parts(text))
+    return parts
+
+
+def _command_name(words: list) -> tuple:
+    """A command's name and its index among `words`, after the words that may begin a command (`then`, `do`, ...)
+    and the assignments and redirections before it; ("", len(words)) for a command that is only those."""
+    i = 0
+    while i < len(words) and not words[i].redirect and not words[i].computed and words[i].text in _LEADING_WORDS:
+        i += 1
+    while i < len(words) and (words[i].redirect or _ASSIGNMENT_RE.match(words[i].text)):
+        i += 1
+    if i >= len(words):
+        return "", i
+    word = words[i]
+    return ("\x03" if word.computed else word.text.rsplit("/", 1)[-1]), i
+
+
+def _target(word) -> str | None:
+    """The runner's file a redirection's or tee's target word names plainly, else None."""
+    match = _FILE_TARGET_RE.match(word.text)
+    if match:
+        return match.group(1) or match.group(2)
+    match = _FILE_CONTEXT_TARGET_RE.match(word.text.replace("\x03", ""))
+    return f"GITHUB_{match.group(1).upper()}" if match else None
+
+
+def _names_file_context(text: str) -> bool:
+    """Whether `text` holds a `${{ }}` expression that reaches the runner's contexts for its files (`github.env`,
+    `github.path`, ...) or the whole `github` context; a text the reader finds too complex counts."""
+    if "${{" not in text:
+        return False
+    try:
+        return any(expr_mod.reaches(ref.path, _RUNNER_FILE_CONTEXTS, ref.extracted)
+                   for body in expr_mod.bodies(text) for ref in expr_mod.refs(body))
+    except expr_mod.TooComplex:
+        return True
+
+
+# The runner's own contexts for its files, or the whole `github` context, which holds them.
+_RUNNER_FILE_CONTEXTS = ({"github"}, {"env", "path", "output", "state", "step_summary"})
+
+
+def _names_runner_files(text: str) -> bool:
+    squeezed = _squeeze(text)
+    return (_names_file_var(text) or _lists_file_vars(squeezed) or "_runner_file" in squeezed.lower()
+            or _names_file_context(text))
+
+
+def _runner_file_writes(script: str, held: frozenset, every: bool = False, clean: frozenset = frozenset(),
+                        source: bool = False, path_in_env: bool = False,
+                        opaque: bool = False) -> RunnerFileWrite | None:
+    """What a bash or sh script writes to GITHUB_ENV or GITHUB_PATH of text an outsider can write. `held`: the
+    step's environment variables that hold such text, as `env:` spells them; `every`: an `env:` written as one
+    expression, so any variable may; `clean`: the step's other `env:` names, which the checker can vouch for;
+    `source`: the script reads the event's text some other way (`GITHUB_EVENT_PATH`); `path_in_env`: an `env:`
+    value names the runner's files. None where nothing an outsider writes can reach those files.
+
+    The script is read with the lexer. A write is a command whose output a redirection (not `<`), or whose `tee`,
+    sends to `$GITHUB_ENV`, `${GITHUB_ENV}`, `${GITHUB_ENV:-/dev/stdout}` or `${{ github.env }}` (or the same for
+    GITHUB_PATH), or a compound command (`{ }`, a loop, `if`, `case`) so redirected, whose every command, a loop's
+    condition included, is then read. A variable the script sets by plain assignment (or `export`, `declare`,
+    `local`, `typeset`, `readonly`, an array) from one that holds the text, outside a command substitution, holds it
+    too. A write is "written" when its text holds such a variable outside a command substitution (in `echo`,
+    `printf`, a here-document of `cat`, or `tee` or `cat` given what one of those prints), when it prints every
+    variable (`env`, `printenv`, `export -p`, `/proc/self/environ`), or when a program's words name a variable of the
+    step's that holds it (`os.environ["BODY"]`). It is clean when it is `echo`, `printf` or a here-document of `cat`
+    whose text is literal or reads only the runner's own values (`GITHUB_SHA`, `HOME`, ...), the step's other `env`
+    values and variables the script sets from those by plain assignment. Anything else is "unresolved": another
+    program or a pipeline through one (which may print what its environment holds, or change the text), a command
+    substitution, a positional parameter, what `read` or `for` set, `exec`, a subshell, a computed command or target,
+    the runner's files named in any other place, a script that defines a function or an alias or runs `eval` or
+    `source`, a script the lexer cannot read. Letter case counts in names, as bash on Linux reads them."""
+    if not (held or every or source):
+        return None
+    if not (path_in_env or _names_runner_files(script)):
+        return None
+    commands, problem = agent_flags.lex(script)
+    if problem:
+        return RunnerFileWrite("unresolved", frozenset(held) or frozenset({"*"}), _SINK_FILES,
+                               "the checker cannot read the script as bash")
+    opaque = opaque or bool(_OPAQUE_RE.search(script))
+    infos = []                  # (command, name, parts, plain sets {name: parts}, other names set)
+    skip = set()
+    array_words: set = set()
+    previous = None
+    for n, command in enumerate(commands):
+        if n in skip:
+            continue
+        name, at = _command_name(command.words)
+        if command.ended_by == ")" and previous is not None and (
+                previous.ended_by in (";;", ";&", ";;&") or _command_name(previous.words)[0] == "case"):
+            name = ""                   # a `case` pattern
+        previous = command
+        if name and at < len(command.words) and "/" in command.words[at].text and name != "\x03":
+            name = "\x01" + name        # `./echo`, `tools/printf`: a program, not the builtin
+        sets: dict = {}
+        others: set = set()
+        assignments = list(command.words[:at])
+        args = [w for w in command.words[at + 1:] if not w.redirect]
+        if name in _DECLARERS:
+            if any(w.text.startswith("-") and ("n" in w.text) for w in args):
+                opaque = True           # a name reference renames a variable
+            assignments += [w for w in args if not w.text.startswith("-")]
+        for word in assignments:
+            if word.redirect:
+                continue
+            match = _ASSIGNMENT_RE.match(word.text)
+            if match:
+                value = _word_parts(word.text[match.end():])
+                if not word.text[match.end():] and command.ended_by == "(":
+                    # An array, `NAME=( ... )`: the lexer gives its words as the next command only when it ends
+                    # with `)` on the same line; otherwise what it holds is not known.
+                    if n + 1 < len(commands) and commands[n + 1].ended_by == ")":
+                        # Its words, which are also read as a command: a subshell on the next line looks the same.
+                        # As an array's words they open and close nothing (`A=(done)`), so the stack pass leaves
+                        # them out.
+                        value = _command_parts(commands[n + 1])
+                        array_words.add(id(commands[n + 1]))
+                    else:
+                        others.add(match.group(1))
+                sets.setdefault(match.group(1), _Parts()).add(value)
+            elif name in _DECLARERS and word.computed:
+                opaque = True           # `declare "$n=..."`: a name the checker cannot read
+        if name in _SETTERS and name not in ("for", "select"):
+            others |= {w.text for w in args if _PLAIN_NAME_RE.match(w.text)}
+        if name in ("for", "select") and args:
+            if args[0].text:
+                value = _Parts()
+                for word in args[2:] if len(args) > 1 and args[1].text == "in" else []:
+                    value.add(_word_parts(word.text))
+                sets.setdefault(args[0].text, _Parts()).add(value)
+        if name == "printf":
+            for k, word in enumerate(args[:-1]):
+                if word.text == "-v":
+                    if _PLAIN_NAME_RE.match(args[k + 1].text):
+                        others.add(args[k + 1].text)
+                    else:
+                        opaque = True
+        if name in _RENAMERS or name in ("bash", "sh") and any(w.text == "-c" for w in args):
+            opaque = True
+        parts = _command_parts(command)
+        for default in parts.defaults:
+            sets.setdefault(default, _Parts()).add(parts)       # `: "${NAME:=$BODY}"`
+        infos.append((command, name, parts, sets, others))
+
+    # Which names hold the text: a graph from each name to the plain assignments that read it, walked once.
+    holding: set = set(held)
+    readers: dict = collections.defaultdict(list)
+    for k, (_c, _n, _p, sets, _o) in enumerate(infos):
+        for target, value in sets.items():
+            for ref in value.names:
+                readers[ref].append(target)
+    queue = collections.deque(holding)
+    while queue:
+        for target in readers.get(queue.popleft(), ()):
+            if target not in holding:
+                holding.add(target)
+                queue.append(target)
+
+    # Which names the checker can vouch for: the runner's values and the step's other `env` values, and names the
+    # script sets only by plain assignment from those (a graph again: a name is not clean when a value it is set
+    # from reads one that is not).
+    assigned: dict = collections.defaultdict(list)
+    set_otherwise: set = set()
+    for _c, _n, _p, sets, others in infos:
+        for target, value in sets.items():
+            assigned[target].append(value)
+        set_otherwise |= others
+    base = {name for name in clean if name not in assigned} | {
+        name for name in _referenced_names(infos) if _RUNNER_VALUES_RE.match(name) and name not in assigned}
+    unclean: set = set(holding) | set_otherwise
+    depends: dict = collections.defaultdict(set)
+    for target, values in assigned.items():
+        for value in values:
+            if value.substitution or value.indirect or value.positional:
+                unclean.add(target)
+            for ref in value.names:
+                if ref not in base and ref not in assigned:
+                    unclean.add(target)
+                elif ref in assigned:
+                    depends[ref].add(target)
+    queue = collections.deque(unclean)
+    while queue:
+        for target in depends.get(queue.popleft(), ()):
+            if target not in unclean:
+                unclean.add(target)
+                queue.append(target)
+    vouched = set() if opaque else (base | set(assigned)) - unclean
+    # A program's code that reads a variable of the step's by name: `os.environ["BODY"]`, `getenv("BODY")`,
+    # `process.env.BODY`, awk's `ENVIRON["BODY"]`, jq's `env.BODY` and `$ENV.BODY`.
+    env_word = re.compile(r"(?:environ(?:\.get)?|ENVIRON|getenv|Getenv|GetEnvironmentVariable|process\.env|\benv"
+                          r"|\$ENV|\bENV)"
+                          r"\s*(?:\.|\[|\(|\{)?\s*[\"']?(" + "|".join(sorted(map(re.escape, held), key=len, reverse=True))
+                          + r")(?![A-Za-z0-9_])") if held else None
+
+    written_names: set = set()
+    memo: dict = {}
+
+    def content(k: int, depth: int = 0) -> str:
+        """"written", "clean" or "unresolved" for what command `k` prints."""
+        if k in memo:
+            return memo[k]
+        command, name, parts, _sets, _others = infos[k]
+        args = [w for w in command.words[_command_name(command.words)[1] + 1:] if not w.redirect]
+        text = " ".join(w.shown for w in command.words)
+        result = "unresolved"
+        reads = {n for n in parts.names if n in holding} | ({"*"} if every and parts.names else set())
+        if name in ("env", "printenv") and not [w for w in args if not w.text.startswith("-")]:
+            written_names.add("*")
+            result = "written"
+        elif name == "printenv" and any(w.text in holding for w in args):
+            written_names.update(w.text for w in args if w.text in holding)
+            result = "written"
+        elif name in _PRINTERS_BARE and (not args or any(w.text.startswith("-") and "p" in w.text for w in args)):
+            written_names.add("*")
+            result = "written"
+        elif re.search(r"/proc/[^\s'\"]*/environ", text):
+            written_names.add("*")
+            result = "written"
+        elif inputs_redirected(command) and name in ("cat", "tee", "echo", "printf"):
+            result = "unresolved"       # `< file`, `<&3`: what it reads is not known
+        elif name in ("echo", "printf") or (name == "cat" and not args and command.stdin):
+            if reads:
+                written_names.update(reads)
+                result = "written"
+            elif not opaque and not (parts.substitution or parts.indirect or parts.positional) \
+                    and parts.names <= vouched:
+                result = "clean"
+        elif name == "tee" and command.stdin:
+            if reads:
+                written_names.update(reads)
+                result = "written"
+        elif name in ("tee", "cat") and command.piped and command.before is not None and depth < 64 \
+                and not (name == "cat" and [w for w in args if not w.text.startswith("-")]):
+            before = index_of.get(id(command.before))
+            result = content(before, depth + 1) if before is not None else "unresolved"
+        elif env_word is not None and env_word.search(text):
+            written_names.update(env_word.findall(text))
+            result = "written"
+        memo[k] = result
+        return result
+
+    def inputs_redirected(command) -> bool:
+        return any(w.redirect and w.redirect_op in ("<", "<&", "<>") for w in command.words)
+
+    index_of = {id(info[0]): k for k, info in enumerate(infos)}
+
+    def inside(k: int) -> str:
+        """What command `k` adds to a group redirected as a whole: what it prints, and "unresolved" for a builtin
+        that prints nothing but reads the text (its error would)."""
+        command, name, parts, _s, _o = infos[k]
+        if not name or name in _OPENERS or name in ("for", "select", "case"):
+            return "clean"
+        if name in _QUIET:
+            return "unresolved" if parts.names & holding or parts.substitution else "clean"
+        return content(k)
+
+    def plain(word) -> bool:
+        return not word.redirect and not word.computed and word.shown == word.text
+
+    # Each closer's opener, found in one pass with a stack, and what each group's commands print, gathered as the
+    # pass goes (each command is read once, whatever the depth).
+    group_result: dict = {}
+    stack: list = []            # [opener word, results so far]
+    for k, (command, name, _p, _s, _o) in enumerate(infos):
+        words = command.words
+        if id(command) in array_words:
+            if stack:
+                stack[-1][1].add(inside(k))     # also a subshell's command, which would print what it prints
+            continue
+        first = words[0].text if words and plain(words[0]) else ""
+        if first in _OPENERS:
+            want = _OPENERS[first]
+            if stack and (stack[-1][0] == want or stack[-1][0] in (want if isinstance(want, tuple) else ())):
+                _token, results = stack.pop()
+                group_result[k] = ("written" if "written" in results else
+                                   "unresolved" if "unresolved" in results else "clean")
+                if stack:
+                    stack[-1][1].add(group_result[k])
+            else:
+                stack = []
+            continue
+        tokens = [w.text for w in words[:_command_name(words)[1]] if plain(w) and w.text in _LEADING_WORDS] + (
+            [name] if name in ("for", "select", "case") else [])
+        for token in tokens:
+            if token in _OPENING:
+                stack.append([token, set()])
+        if stack and k not in group_result:
+            stack[-1][1].add(inside(k))
+
+    unread: list = []
+    written_files: set = set()
+    unread_files: set = set()
+    for k, (command, name, parts, _sets, _others) in enumerate(infos):
+        if any(_names_runner_files(text) for _kind, text, _literal in command.stdin):
+            unread.append("a here-document or here-string names the runner's files")
+            unread_files |= _SINK_FILES
+            continue
+        if any(_names_runner_files(inner) for word in command.words for inner in word.inner):
+            unread.append("a command substitution names the runner's files")
+            unread_files |= _SINK_FILES
+            continue
+        targets: set = set()
+        placed = True
+        for word in command.words:
+            if not (_names_runner_files(word.text) or _names_runner_files(word.shown)):
+                if path_in_env and word.redirect and word.redirect_op not in ("<", "<<", "<<<") and word.computed:
+                    placed = False      # an `env:` value names the runner's files, and this target is computed
+                continue
+            target = _target(word)
+            if word.redirect and word.redirect_op in ("<", "<<", "<<<"):
+                continue                # read, not written
+            if target in _FILE_NAMES and (word.redirect or name == "tee"):
+                targets.add(target)
+            else:
+                placed = False
+        if not placed:
+            unread.append("the runner's files are named where the checker does not read them as a file written to")
+            unread_files |= _SINK_FILES
+            continue
+        sinks = targets & _SINK_FILES
+        if not sinks:
+            continue                    # an output, the state or the summary
+        first = command.words[0].text if command.words and plain(command.words[0]) else ""
+        if first in _OPENERS:
+            found = group_result.get(k, "unresolved")
+        elif name in ("exec", "\x03", "") or name.startswith("\x01"):
+            found = "unresolved"
+        else:
+            found = content(k)
+        if found == "written":
+            written_files |= sinks
+        elif found == "unresolved":
+            unread.append(f"what `{one_line(name.lstrip(chr(1)) or first, 40)}` writes there" if name or first
+                          else "a subshell redirected as a whole")
+            unread_files |= sinks
+    if path_in_env and not written_files and not unread:
+        unread.append("an `env:` value names the runner's files")
+        unread_files |= _SINK_FILES
+    if written_files:
+        return RunnerFileWrite("written", frozenset(written_names) or frozenset({"*"}), frozenset(written_files))
+    if unread:
+        return RunnerFileWrite("unresolved", frozenset(held) or frozenset({"*"}), frozenset(unread_files),
+                               "; ".join(sorted(set(unread))))
+    return None
+
+
+def _distinct_texts(value, limit: int = 20_000) -> list:
+    """Every distinct text in a YAML value of lists and mappings (keys and scalars), each node and each text once,
+    in the order first met: a value YAML aliases many times is read once. Past `limit` nodes the list ends with
+    `GITHUB_ENV`, so a reading of it fails closed."""
+    out: list = []
+    texts: set = set()
+    stack, seen, count = [value], set(), 0
+    while stack:
+        count += 1
+        if count > limit:
+            out.append("GITHUB_ENV (more values than the checker reads)")
+            break
+        node = stack.pop()
+        if isinstance(node, (list, dict)):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            if isinstance(node, dict):
+                for key, item in node.items():
+                    stack.append(item)
+                    stack.append(key)
+            else:
+                stack.extend(reversed(node))
+        elif node is not None:
+            text = as_text(node)        # a number of any length (`as_text`)
+            if text not in texts:
+                texts.add(text)
+                out.append(text)
+    return out
+
+
+def _referenced_names(infos) -> set:
+    return {name for _c, _n, parts, sets, _o in infos for name in parts.names} | {
+        name for _c, _n, _p, sets, _o in infos for value in sets.values() for name in value.names}
+
+
 _ALWAYS_CACHES = ("Swatinem/rust-cache", "hendrikmuhs/ccache-action", "mozilla-actions/sccache-action",
                   "DeterminateSystems/magic-nix-cache-action", "crazy-max/ghaction-github-runtime")
 
@@ -880,6 +1398,7 @@ class WorkflowRules:
             self.protected_secrets(job)
             self.untrusted_checkout(job)
             self.script_injection(job)
+            self.runner_file_injection(job)
             self.agent_rules(job)
             self.agent_tool_installs(job)
             self.agent_tool_settings(job)
@@ -1416,6 +1935,141 @@ class WorkflowRules:
                 self.add("OBAAF-GHA-010", step.line,
                          "Step '{step}' expands {references}, which reach {fields}, inside its script.", job, step,
                          severity=severity, kind="indirect", references=sorted(references), **values)
+
+    # A script in a shell or a language the checker does not read word by word that names a way to write the
+    # runner's files for later steps (flagship slice 2d.26): `$env:GITHUB_ENV`, `%GITHUB_ENV%`,
+    # `os.environ["GITHUB_ENV"]`, `core.exportVariable`, `core.addPath`, the runner's folder for its files.
+    _RUNNER_FILE_TEXT_RE = re.compile(r"GITHUB_ENV|GITHUB_PATH|_runner_file_commands|exportVariable|addPath", re.I)
+    # An actions/github-script script reaches the event's text through `context.payload` (or `github.event`).
+    _PAYLOAD_RE = re.compile(r"\bpayload\b|github\s*\.\s*event\b|GITHUB_EVENT_PATH", re.I)
+
+    def runner_file_injection(self, job: Job) -> None:
+        """OBAAF-GHA-028: text an outsider can write that a step writes to GITHUB_ENV or GITHUB_PATH through an
+        environment variable (flagship slice 2d.26, from #232). Written through `${{ }}`, the same text is already
+        OBAAF-GHA-010's. The runner reads every line of GITHUB_ENV as `NAME=value` (or its multi-line form) for
+        every later step, and every line of GITHUB_PATH as a folder to put first on `PATH`, so a line break in the
+        text sets any variable (`BASH_ENV`, `LD_PRELOAD`, `NODE_OPTIONS`) and a folder's name can point at code the
+        job checked out. Its severity is OBAAF-GHA-010's for the job's triggers."""
+        triggers = job.triggers()
+        untrusted = bool(triggers & self._INJECTION_UNTRUSTED) or "workflow_call" in triggers
+        commits_pushed = bool(triggers & self._COMMITS_PUSHED)
+        for step in job.steps:
+            self._runner_file_injection(job, step, untrusted, commits_pushed)
+
+    # The event's payload read from its file: `GITHUB_EVENT_PATH`, `${{ github.event_path }}`, or the file's own path.
+    _EVENT_FILE_RE = re.compile(r"GITHUB_EVENT_PATH|github\s*\.\s*event_path|_github_workflow|event\.json", re.I)
+
+    def _scope_names_runner_files(self, scope: dict) -> bool:
+        """Whether an `env` mapping's keys or values name the runner's files, worked out once for each mapping and
+        each distinct text in it (a value YAML aliases into many steps is read once)."""
+        memo = self.__dict__.setdefault("_scopes_naming_files", {})
+        known = memo.get(id(scope))
+        if known is None or known[0] is not scope:
+            known = memo[id(scope)] = (scope, any(_names_runner_files(text)
+                                                  for text in _distinct_texts(list(scope.values()))))
+        return known[1]
+
+    def _earlier_sets_variables(self, job: Job, step: Step) -> bool:
+        """Whether a step of `job` before `step` names a way to set variables for later steps (worked out once for
+        each job, in one pass over its steps)."""
+        memo = self.__dict__.setdefault("_earlier_setters", {})
+        known = memo.get(id(job))
+        if known is None or known[0] is not job:
+            flags, seen = [], False
+            for each in job.steps:
+                flags.append(seen)
+                seen = seen or any(self._ENV_CONTEXT_WRITERS_RE.search(_squeeze(text))
+                                   for text in _distinct_texts([each.raw.get("run"), each.raw.get("with")]))
+            known = memo[id(job)] = (job, flags)
+        flags = known[1]
+        return flags[step.index] if step.index < len(flags) else True
+
+    def _runner_file_injection(self, job: Job, step: Step, untrusted: bool, commits_pushed: bool) -> None:
+        """OBAAF-GHA-028 for one step. A bash or sh `run` is read with `_runner_file_writes`; a `run` in another
+        shell, an actions/github-script script and the inputs `_script_texts` reads otherwise are "cannot tell"
+        where they name a way to write those files and the step's environment holds the text (for github-script,
+        also where the script names the event's payload)."""
+        script = step.run if isinstance(step.raw.get("run"), str) and step.run and not step.uses else ""
+        shell_text = "\n".join(_distinct_texts(step.raw.get("shell")))
+        others = [text for text in self._script_texts(job, step) if text and text != script and text != shell_text]
+        if not script and step.raw.get("run") is not None and not step.uses:
+            others.append("\n".join(_distinct_texts(step.raw.get("run"))))    # each text YAML aliases, once
+        scopes = [scope or {} for scope in (self.wf.env, job.env, step.env)]
+        path_in_env = any(self._scope_names_runner_files(scope) for scope in scopes)
+        if not path_in_env and not any(self._RUNNER_FILE_TEXT_RE.search(_squeeze(text)) or _names_runner_files(text)
+                                       for text in (script, *others) if text):
+            return
+        view = self._indirect(job, step)
+        env_held: dict = view["env"]
+        whole = view["env_whole"]
+        every = bool(whole)
+        held_names = frozenset(str(k) for scope in scopes for k in scope if str(k).lower() in env_held)
+        # The step's other `env` names, unless an earlier step can set variables for later steps.
+        clean = frozenset() if self._earlier_sets_variables(job, step) else frozenset(
+            str(k) for scope in scopes for k in scope if str(k).lower() not in env_held)
+        found = None
+        source = False
+        if script:
+            source = bool(self._EVENT_FILE_RE.search(_squeeze(script)))
+            shell = self._step_shell(job, step)
+            shells = {self._step_language(job, step, shell)}
+            if shell_env.explicit_shell(step.raw, (job.raw, self.wf.raw)) is None:
+                shells |= set(shell_env.runner_shells(job))
+            if shells & {"bash", "sh"}:
+                # Tracing or functions set from outside the script: the shell's own options, or the `env`.
+                given = "\n".join(_distinct_texts(shell_env.explicit_shell(step.raw, (job.raw, self.wf.raw))))
+                outside = bool(re.search(r"\s-[a-zA-Z]*x|xtrace", given)) or any(
+                    re.match(r"\s*(SHELLOPTS|BASHOPTS|BASH_ENV|BASH_FUNC_|ENV\s*$)", str(k))
+                    for scope in scopes for k in scope)
+                found = _runner_file_writes(script, held_names, every, clean, source, path_in_env, outside)
+            if shells - {"bash", "sh"} and (held_names or every or source) and (
+                    self._RUNNER_FILE_TEXT_RE.search(_squeeze(script)) or path_in_env) \
+                    and (found is None or found.state != "written"):
+                found = found or RunnerFileWrite("unresolved", held_names or frozenset({"*"}), _SINK_FILES,
+                                                 "the checker does not read this shell's writes to those files")
+        payload = False
+        if found is None or found.state != "written":
+            for text in others:
+                if not (self._RUNNER_FILE_TEXT_RE.search(_squeeze(text)) or _names_runner_files(text)):
+                    continue
+                github_script = step.uses_action("actions/github-script") and self._PAYLOAD_RE.search(text)
+                event_file = bool(self._EVENT_FILE_RE.search(_squeeze(text)))
+                if held_names or every or github_script or event_file:
+                    payload = payload or bool(github_script) or event_file
+                    found = found or RunnerFileWrite("unresolved", held_names or frozenset({"*"}), _SINK_FILES,
+                                                     "the checker does not read this code's writes to those files")
+        if found is None:
+            return
+        names = found.names
+        by_lower = {name.lower() for name in names}
+        if "*" in names or not by_lower <= set(env_held):
+            held = set().union(*env_held.values()) if env_held else set()
+        else:
+            held = set().union(*(env_held[name] for name in by_lower))
+        held |= set(whole)
+        if payload or source:
+            held.add("github.event (the event's payload, read in the script)")
+        fields = sorted(held)
+        references = sorted("$" + name for name in names if name != "*") or ["every variable"]
+        files = sorted(found.files)
+        trigger_fact = Fact(sorted(job.triggers()), "")
+        # Each distinct text once, so a value YAML aliases many times costs little.
+        written = "\n".join(_distinct_texts([step.raw.get("run"), step.raw.get("with")]))
+        script_fact = Fact([f"script: {hashlib.sha256(written.encode('utf-8', 'surrogatepass')).hexdigest()[:16]}"], "")
+        if found.state == "written":
+            commit_text = any(self._commit_field(f) for f in fields)
+            severity = "high" if untrusted or (commits_pushed and commit_text) else "medium"
+            self.add("OBAAF-GHA-028", step.line,
+                     "Step '{step}' writes {references} to {files}, and that text holds {fields}.", job, step,
+                     severity=severity, references=references, fields=fields, files=files, triggers=trigger_fact,
+                     script=script_fact)
+        else:
+            self.add("OBAAF-GHA-028", step.line,
+                     "Step '{step}' writes to {files} in a way the checker cannot read ({why}), and the text it may "
+                     "write holds {fields}. If none of that text reaches the file, accept this finding and say why.",
+                     job, step, severity="medium", kind="unresolved", files=files, fields=fields,
+                     why=Note(found.why), references=Fact(references, ""), triggers=trigger_fact,
+                     script=script_fact)
 
     @staticmethod
     def _expression_identity(body: str) -> str:
