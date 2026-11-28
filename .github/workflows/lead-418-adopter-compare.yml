@@ -1,4 +1,4 @@
-name: Check the integrated consumer draft and walkthrough after PR 418
+name: Check the integrated consumer draft and walkthrough after PR 419
 on:
   push:
     branches: [lead/adopters-418-aa2a4a5]
@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 155a0020bfd8ce1c0580692887c0fb393f7c2cbd
+          ref: b4985c76b8305b9463a61177a6a8904e62f1a486
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
@@ -21,12 +21,14 @@ jobs:
         run: |
           export TMPDIR="$RUNNER_TEMP/obaaf-temp"
           mkdir "$TMPDIR"
-          git worktree add -q --detach "$RUNNER_TEMP/flagship" 73658d7366eaa250848ce693cb05976327c8cc20
+          git worktree add -q --detach "$RUNNER_TEMP/flagship" b4985c76b8305b9463a61177a6a8904e62f1a486
           git worktree add -q --detach "$RUNNER_TEMP/adoption" e49616ec3b1abe58e73273c852f2073e3dcb9f30
           git worktree add -q --detach "$RUNNER_TEMP/combined" e49616ec3b1abe58e73273c852f2073e3dcb9f30
           git config user.name 'Sean Keluo-Udeke'
           git config user.email '55066947+seanudeke@users.noreply.github.com'
-          git -C "$RUNNER_TEMP/combined" merge --no-ff --no-commit 155a0020bfd8ce1c0580692887c0fb393f7c2cbd
+          git -C "$RUNNER_TEMP/adoption" merge --no-ff --no-commit 155a0020bfd8ce1c0580692887c0fb393f7c2cbd
+          test "$(git -C "$RUNNER_TEMP/adoption" write-tree)" = 463a7c65a5af741e4ce20f5673113cca803a8640
+          git -C "$RUNNER_TEMP/combined" merge --no-ff --no-commit b4985c76b8305b9463a61177a6a8904e62f1a486
           git -C "$RUNNER_TEMP/combined" write-tree
           git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
           git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
@@ -40,7 +42,7 @@ jobs:
               ("OBAAF", settings, settings / ".github/obaaf-settings.json", "medium", 0),
               ("Expectrail", root / "expectrail", settings / "tests/fixtures/settings/live-expectrail-2026-11-13/snapshot.json", "low", 1),
           ]
-          for label, before, after in [("Merged #418 with the adoption drafts",root/"adoption", root/"combined")]:
+          for label, before, after in [("Merged #419 with the adoption drafts",root/"adoption", root/"combined")]:
               for name, site, snapshot, threshold, expected in sites:
                   for mode in ("text", "json", "sarif", "summary"):
                       command = [sys.executable, "-m", "obaaf", "check", ".", "--settings", str(snapshot),
@@ -72,24 +74,34 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-          ref: 14c406ada254991f07ddbeae72d49e645a6b5dc7
+          ref: cbe4b670b8d7eb861dc2919a53afed89f1a3d0e6
           persist-credentials: false
-      - name: Record the native merge tree and the overlapping edits
+      - name: Record the native draft merge tree
         run: |
           git config user.name 'Sean Keluo-Udeke'
           git config user.email '55066947+seanudeke@users.noreply.github.com'
-          git merge --no-ff --no-commit 155a0020bfd8ce1c0580692887c0fb393f7c2cbd
+          git merge --no-ff --no-commit b4985c76b8305b9463a61177a6a8904e62f1a486
           git write-tree
-          python - <<'PY'
-          import json, subprocess
-          from pathlib import Path
-          incoming = '155a0020bfd8ce1c0580692887c0fb393f7c2cbd'
-          for path in ('CHANGELOG.md','DECISIONS.md','docs/checker-configuration.md','docs/upgrading.md','src/obaaf/checker/rules.py'):
-              patch = subprocess.check_output(['git','diff','--cached','--unified=0',incoming,'--',path], text=True)
-              additions = subprocess.check_output(['git','hash-object',path], text=True).strip()
-              print('MERGED-BLOB',path,additions)
-              for line in patch.splitlines():
-                  if line.startswith(('@@', '+', '-')):
-                      print('PATCH', json.dumps(line))
-              print('END-PATCH')
-          PY
+  windows-patch:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: e49616ec3b1abe58e73273c852f2073e3dcb9f30
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Exercise the patch suite on the integrated walkthrough
+        shell: bash
+        run: |
+          export TMPDIR="$RUNNER_TEMP" TEMP="$RUNNER_TEMP" TMP="$RUNNER_TEMP" PYTHONPATH=tests PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          git config user.name 'Sean Keluo-Udeke'
+          git config user.email '55066947+seanudeke@users.noreply.github.com'
+          git merge --no-ff --no-commit b4985c76b8305b9463a61177a6a8904e62f1a486
+          git write-tree
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+          python -m unittest -v test_fix_patch
