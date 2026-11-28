@@ -25,6 +25,7 @@ from obaaf.checker import egress as egress_mod
 from obaaf.checker import env_expr
 from obaaf.checker import expr as expr_mod
 from obaaf.checker import repo as repo_checks
+from obaaf.checker import shell_env
 from obaaf.checker.workflow import (
     COMMIT_SHA_RE, FULL_SHA_RE, IMAGE_DIGEST_RE, MERGE_COMMIT_REFS, MERGE_REF_EVENTS, PR_TRIGGERS, PRIVILEGED_UNTRUSTED_TRIGGERS,
     PULL_REQUEST_PAYLOAD_EVENTS, TRUSTED_WORKFLOW_RUN, EGRESS_ACTION, AgentActions, leaves_repository,
@@ -813,6 +814,16 @@ def give_call_effects(groups: list, detection: dict, agents: dict | None = None)
                     part = (effects.releasing, restoring, effects.downloads, first, effects.downloads_any, restores_any)
                 summary = _joined(summary, part)
             summaries[id(workflow)] = summary
+
+
+def _cmd_carets_out(text: str) -> str:
+    """A cmd script as its programs see it: a caret at a line's end continues the line, and any other is taken out
+    (`claude ^--yolo`; slice 2d.5c2c and its review)."""
+    return re.sub(r"\^[ \t]*\r?\n", " ", text).replace("^", "")
+
+
+class _AltTooLong(Exception):
+    """A text with every value put in that would pass D-137's bound (`WorkflowRules._shell_put_in`)."""
 
 
 class WorkflowRules:
@@ -2387,32 +2398,15 @@ class WorkflowRules:
 
     def _step_shell(self, job: Job, step: Step) -> str:
         """The shell a `run` step's script is given to: its `shell`, else the job's and then the workflow's
-        `defaults.run.shell`, else bash (pwsh on a Windows runner)."""
-        shell = step.raw.get("shell")
-        if not isinstance(shell, str):
-            for defaults in (job.raw.get("defaults"), self.wf.raw.get("defaults")):
-                run = defaults.get("run") if isinstance(defaults, dict) else None
-                if isinstance(run, dict) and isinstance(run.get("shell"), str):
-                    shell = run["shell"]
-                    break
-        if not isinstance(shell, str):
-            windows = any("windows" in str(label).lower() for label in job.runs_on)
-            return "pwsh" if windows else "bash"
-        first = shell.split()[0] if shell.split() else ""
-        return first.rsplit("/", 1)[-1].lower()
+        `defaults.run.shell`, else bash (pwsh on a Windows runner). `shell_env.run_shell`, which the lanes read too
+        (flagship slice 2d.25)."""
+        return shell_env.run_shell(step.raw, (job.raw, self.wf.raw), job.runs_on)
 
     def _step_language(self, job: Job, step: Step, shell_name: str) -> str:
         """The language a `run` step's script is read as by `agent_code`: the shell's program, after `env`
-        and its options (`/usr/bin/env python3 {0}`), and python for `uv run --script {0}`."""
-        shell = step.raw.get("shell")
-        if not isinstance(shell, str):
-            return shell_name
-        words = [w.rsplit("/", 1)[-1].lower() for w in shell.split() if w != "{0}"]
-        while words and (words[0] == "env" or words[0].startswith("-")):
-            words = words[1:]
-        if words and words[0] in ("uv", "uvx") and ("--script" in words or "run" in words):
-            return "python"
-        return words[0] if words else shell_name
+        and its options (`/usr/bin/env python3 {0}`), and python for `uv run --script {0}`
+        (`shell_env.run_language`)."""
+        return shell_env.run_language(step.raw, shell_name)
 
     # What can set a variable of the `env` context for the steps after it, read in an earlier step and in the job's
     # and workflow's `env` the widest way (flagship slice 2d.19c, from its review): more than `_SETS_FOR_LATER_RE`,
@@ -2533,6 +2527,96 @@ class WorkflowRules:
         except (RecursionError, ValueError, env_expr.Unread, expr_mod.TooComplex):
             return False
 
+    def _shell_put_in(self, job: Job, step: Step, source: tuple, scopes: list, trust_env: list, budget) -> tuple:
+        """(text, refused, values) for a PowerShell or cmd `run` script as OBAAF-GHA-026 reads it (flagship slice
+        2d.25, #411): `source` (the script as GitHub hands it to the shell, and the shell's family) with each
+        `$env:NAME` and `${env:NAME}` (PowerShell) or `%NAME%` (cmd) the shell expands put in (`shell_env.put_in`),
+        where the `env` the step runs with (`scopes`, nearest first, each trusted as `trust_env` says) gives a plain
+        value under the runner's comparison of names (`shell_env.case_of`; where the runner may compare either way
+        and the two give other values, the name is left as written) and the script does not set the name itself
+        (`shell_env.script_sets`; where it may set any, none is put in). cmd then takes its carets out. The text is
+        None where nothing is put in. `refused` is True where the step's `PutInBudget` or the workflow's ledger
+        refused. `values` are the values the `env` may give a reference that were not put in (all of them where
+        refused): where one of them names the tool or holds a warned option, the script is read and every warned
+        option not found is "cannot tell" (from the review: the PowerShell and cmd readers say "cannot tell" for
+        `& $env:X` and `%X%`, not for `iex "$env:X ..."`). Made once for the step: the tools read after the first
+        reuse it."""
+        run, family = source
+        cache = self.__dict__.setdefault("_shell_put_ins", {})
+        key = (step.seq, id(step.raw), id(run), family, tuple(trust_env))
+        hit = cache.get(key)
+        if hit is None:
+            sets = shell_env.script_sets(run, family)
+            anything = sets.anything
+            case = shell_env.case_of(family, job)
+            lookup = shell_env.Lookup(scopes, trust_env, shell_env.PLAIN_VALUE_RE, numbers=True)
+            # Every value a reference may be given, trusted and plain or not, by each way the runner may compare
+            # names: what is withheld from the text is read for the tool's name (`& $env:AGENT` with `AGENT` set by
+            # the script, by an `env` an earlier step's `GITHUB_ENV` may change, or in another letter case on a
+            # runner that may compare either way).
+            wide = shell_env.Lookup(scopes, numbers=True)
+            modes = ("exact", "folded") if case == "both" else (case,)
+
+            def get(name: str, at: int = -1):
+                if sets.may_set(name, at):
+                    return None
+                return lookup.get(name, case)
+            made = shell_env.put_in(run, family, get, budget)
+            # What is withheld: each reference the shell expands that was not put in (refused, set by the script,
+            # an untrusted scope, a value that is not plain, another letter case where the runner may compare either
+            # way, a member or an index after it), each name read in another form, and, where the script may set any
+            # name, each name it reads in any form and any quotes.
+            spots: list = []
+            for at, _e, name, in_string, plain in shell_env.references(run, family):
+                value = get(name, at)
+                if made is None or not plain or value is None or not shell_env._safe(value, family, in_string):
+                    spots.append((at, name))
+            spots += shell_env.other_reads(run, family)
+            if anything:
+                spots += shell_env.names_read(run, family)
+            withheld: list = []
+            for _at, name in dict.fromkeys(spots):
+                for mode in modes:
+                    withheld.extend(wide.candidates(name, mode))
+            withheld = list(dict.fromkeys(withheld))
+            # The script again with every reference put in, wherever it stands and whatever the reasons it was left
+            # out, one text for each value a name may take (at most four): what the reader finds in them is what a
+            # value left out may run, which is "cannot tell" (the third review: a list of the places a value may run
+            # was got past by `[string]$a = $env:AGENT`, `foreach`, a pipeline, `Set-Variable` and others). None
+            # where they would pass D-137's bound for the step.
+            alts: list | None = []
+            if withheld:
+                pattern = shell_env.lane_pattern(family)
+                choices: dict = {}
+                for m in pattern.finditer(run):
+                    kind, name = shell_env.lane_reference(m)
+                    if kind == "shell" and name not in choices:
+                        choices[name] = list(dict.fromkeys(v for mode in modes for v in wide.candidates(name, mode)))
+                widest = min(4, max((len(v) for v in choices.values()), default=0))
+                alt_budget = PutInBudget(scale=max(1, widest))
+                for n in range(widest):
+                    def one(m, n=n):
+                        kind, name = shell_env.lane_reference(m)
+                        options = choices.get(name) if kind == "shell" else None
+                        if not options:
+                            return m.group(0)
+                        value = options[min(n, len(options) - 1)]
+                        if alts is not None and not alt_budget.take(value):
+                            raise _AltTooLong
+                        return value
+                    try:
+                        alt = pattern.sub(one, run)
+                    except _AltTooLong:
+                        alts = None
+                        break
+                    alts.append(_cmd_carets_out(alt) if family == "cmd" else alt)
+            put = None
+            if made is not None and made[2]:
+                put = _cmd_carets_out(made[0]) if family == "cmd" else made[0]
+            hit = (put, made is None or alts is None, tuple(withheld), tuple(alts or ()), run, step)
+            cache[key] = hit
+        return hit[0], hit[1], hit[2], hit[3]
+
     def _agent_command(self, job: Job, step: Step, tool: str, name: str, flags: list, programs: list,
                        packages: list) -> None:
         # What the step gives a shell, and in what language: (text, read as bash, the step names the tool).
@@ -2546,6 +2630,9 @@ class WorkflowRules:
         # script starts, where the checker knows every value they read (flagship slice 2d.19c,
         # `_env_expressions_worked`): `claude ${{ env.FLAGS }}` with `FLAGS: --dangerously-skip-permissions` is
         # read as `claude --dangerously-skip-permissions`. Otherwise the text is read as written: "cannot tell".
+        # The `run` script as PowerShell or cmd reads it, before cmd takes its carets out, by the id of its part: its
+        # `$env:NAME` or `%NAME%` are put in below (flagship slice 2d.25, #411).
+        shell_sources: dict = {}
         if step.run:
             written.add(id(step.run))
             shell_name = self._step_shell(job, step)
@@ -2553,9 +2640,20 @@ class WorkflowRules:
             # cmd takes a `^` out before the program sees the word (`claude ^--yolo`), after GitHub has put the
             # expressions' values in, so from those values too.
             # A caret at a line's end continues the line (found by slice 2d.5c2c's review).
-            parts.append((re.sub(r"\^[ \t]*\r?\n", " ", run).replace("^", "")
-                          if shell_name in ("cmd", "cmd.exe") else run, shell_name in ("bash", "sh")))
+            parts.append((_cmd_carets_out(run) if shell_name in ("cmd", "cmd.exe") else run,
+                          shell_name in ("bash", "sh")))
             languages[id(parts[-1][0])] = self._step_language(job, step, shell_name)
+            family = shell_env.family(languages[id(parts[-1][0])])
+            if family is not None and not parts[-1][1]:
+                shell_sources[id(parts[-1][0])] = (run, family)
+            elif family is None and shell_env.explicit_shell(step.raw, (job.raw, self.wf.raw)) is None and (
+                    "pwsh" in shell_env.runner_shells(job)):
+                # No `shell`, on a runner that may be Windows and may not (a matrix over both; from the review): read
+                # as PowerShell too, from a text of its own (the parts are kept by their ids).
+                ps_run = ("\x00" + run)[1:]
+                parts.append((ps_run, False))
+                languages[id(ps_run)] = "pwsh"
+                shell_sources[id(ps_run)] = (run, "pwsh")
         given = step.with_ if step.uses else {}
         script = given.get("script") if step.uses_action("actions/github-script") else None
         if isinstance(script, str):
@@ -2662,12 +2760,50 @@ class WorkflowRules:
                 # held in variables, command lines joined with values, options in pieces; in another shell, a
                 # variable or splat among the program's words (`claude @a`, `& claude $flags`, `claude %F%`)
                 # is "cannot tell", as an unquoted one is in bash.
-                if agent_flags.appears(text, programs, packages):
-                    reading.merge(agent_flags.read_script(text, programs, packages, flags, variables,
-                                                          mentioned=agent_flags.mentions(text, programs, packages),
-                                                          bash=False, loose=True,
-                                                          language=languages.get(id(text), ""),
-                                                          named=named_as_name()))
+                # A PowerShell or cmd script is read with the `env` values it reads put in (flagship slice 2d.25):
+                # `& $env:AGENT --auto -p x` with `AGENT: cn` is read as `& 'cn' --auto -p x`, and read at all only
+                # where the tool's letters are in its own text or its name in the text made.
+                read, refused, values, alts = text, False, (), ()
+                source = shell_sources.get(id(text))
+                if source is not None:
+                    put, refused, values, alts = self._shell_put_in(job, step, source, scopes, trust_env, budget)
+                    read = text if put is None else put
+                # A value left out that names the tool or holds one of its warned options.
+                left = [v for v in values if agent_flags.names(v, programs, packages) or any(
+                    option.casefold() in v.casefold() for flag in flags for option in flag["options"])]
+                if agent_flags.appears(text, programs, packages) or (
+                        read is not text and agent_flags.names(read, programs, packages)) or left:
+                    language = languages.get(id(text), "")
+                    here = agent_flags.read_script(read, programs, packages, flags, variables,
+                                                   mentioned=agent_flags.mentions(read, programs, packages),
+                                                   bash=False, loose=True, language=language, named=named_as_name())
+                    if read is not text and not here.hits and not here.unknown and agent_flags.appears(
+                            text, programs, packages):
+                        # Never quieter than the script read as written, as the base read it (the third review: a
+                        # value put in can be stale where the script sets the name in a way the checker does not
+                        # list, `[type]('System.Envir'+'onment')`, `Set-Alias`, cmd's `%S% AGENT=claude`).
+                        here = agent_flags.read_script(text, programs, packages, flags, variables,
+                                                       mentioned=agent_flags.mentions(text, programs, packages),
+                                                       bash=False, loose=True, language=language,
+                                                       named=named_as_name())
+                    by_id = {flag["id"]: flag for flag in flags}
+                    if left and refused:
+                        # Past D-137's or D-138's bound: every warned option not found is "cannot tell", as
+                        # `agent_flags._put_in_unread` has it for bash.
+                        for flag in flags:
+                            if flag["id"] not in here.hits:
+                                here.cannot_tell(flag, f"{agent_flags.PUT_IN_UNREAD}: " + agent_flags._fact_text(text))
+                    elif left:
+                        # What the script with the values left out put in gives is "cannot tell".
+                        for alt in alts:
+                            other = agent_flags.read_script(alt, programs, packages, flags, {},
+                                                            mentioned=agent_flags.mentions(alt, programs, packages),
+                                                            bash=False, loose=True, language=language, named=True)
+                            for fid in list(other.hits) + list(other.unknown):
+                                if fid not in here.hits and fid in by_id:
+                                    here.cannot_tell(by_id[fid], "a value of its env the checker does not put in: "
+                                                     + agent_flags._fact_text(text))
+                    reading.merge(here)
         for other, command_like in others:
             # Another input, an `env` value or a `docker://` command line that runs the program: one whose text
             # starts a command with it, or that holds the tool's letters in an input whose name says it is a

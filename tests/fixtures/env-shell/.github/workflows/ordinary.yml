@@ -1,0 +1,87 @@
+# Flagship slice 2d.25 (#411): PowerShell and cmd steps that read `env` and run no agent. None of these jobs may be
+# an agent job or get OBAAF-GHA-026. Nothing here is run: the checker reads it.
+on: workflow_dispatch
+permissions: {}
+jobs:
+  pwsh-region:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh
+        run: 'aws s3 ls --region $env:REGION'
+        env: {REGION: cn-north-1}
+  pwsh-tool-from-env:
+    runs-on: windows-latest
+    env: {TOOL: make}
+    steps:
+      - run: '& $env:TOOL build'
+  cmd-greeting:
+    runs-on: windows-latest
+    steps:
+      - shell: cmd
+        run: 'echo %GREETING% %%AGENT%% --dangerously-skip-permissions'
+        env: {GREETING: hello, AGENT: claude}
+  pwsh-linux-other-case:
+    runs-on: ubuntu-latest
+    env: {AGENT: claude}
+    steps:
+      - shell: pwsh
+        run: '& $env:agent --dangerously-skip-permissions -p x'
+  pwsh-single-quoted-and-escaped:
+    runs-on: ubuntu-latest
+    env: {AGENT: claude}
+    steps:
+      - shell: pwsh
+        run: |
+          Write-Host 'run $env:AGENT later'
+          Write-Host "`$env:AGENT stays as written"
+  bash-reads-no-pwsh-reference:
+    runs-on: ubuntu-latest
+    env: {AGENT: claude}
+    steps:
+      - run: 'echo "$env:AGENT"'
+  # From the second review of 2d.25: a tool's name in prose, and `&` that runs another program.
+  pwsh-tool-named-in-prose:
+    runs-on: ubuntu-latest
+    env: {TOOL: aider, BOT: codex}
+    steps:
+      - shell: pwsh
+        run: |
+          Write-Host "Using $env:TOOL for review"
+          Write-Host "$env:BOT exec finished"
+  cmd-tool-named-in-prose:
+    runs-on: windows-latest
+    env: {TOOL: aider, MODEL: claude}
+    steps:
+      - shell: cmd
+        run: |
+          echo Using %TOOL% for review
+          echo %MODEL% -p 4
+  cmd-ampersand-runs-another-program:
+    runs-on: windows-latest
+    env: {MODEL: claude}
+    steps:
+      - shell: cmd
+        run: |
+          call setup.bat
+          echo Model %MODEL% & call build.cmd
+  pwsh-call-operator-on-another-program:
+    runs-on: windows-latest
+    env: {PROVIDER: claude}
+    steps:
+      - run: 'Add-Content $env:GITHUB_ENV "X=1"'
+      - run: '& ./scripts/eval.ps1 -Provider $env:PROVIDER'
+  # From the third review of 2d.25: an assignment of prose is no command.
+  pwsh-assigned-prose:
+    runs-on: ubuntu-latest
+    env: {BOT: aider}
+    steps:
+      - shell: pwsh
+        run: '$msg = "Reviewed by $env:BOT for you"; Write-Host $msg'
+  cmd-assigned-prose:
+    runs-on: windows-latest
+    env: {BOT: aider}
+    steps:
+      - shell: cmd
+        run: |
+          set MSG=Reviewed by %BOT% for you
+          echo %MSG%

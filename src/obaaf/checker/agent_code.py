@@ -2420,6 +2420,18 @@ def _start_process(rest: list, ctx: af._Context, mentioned: bool) -> None:
     file_path, arguments, positional = None, None, []
     switches = ("-wait", "-nonewwindow", "-passthru", "-usenewenvironment", "-loaduserprofile", "-whatif",
                 "-confirm")
+    # A parameter given its value after a colon (`-FilePath:claude`, `-ArgumentList:'-p'`) is read as one given it
+    # after a space (flagship slice 2d.25, from its review).
+    split: list = []
+    for raw, kind in rest:
+        head, colon, tail = raw.partition(":")
+        if kind == "plain" and colon and head.startswith("-") and len(head) > 1 and tail and (
+                "-filepath".startswith(head.lower()) or "-argumentlist".startswith(head.lower())
+                or head.lower() in ("-args", "-arguments")):
+            split += [(head, "plain"), (tail, "single")]
+        else:
+            split.append((raw, kind))
+    rest = split
     j = 0
     while j < len(rest):
         raw, kind = rest[j]
