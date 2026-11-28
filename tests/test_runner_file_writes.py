@@ -94,19 +94,11 @@ class WrittenTest(unittest.TestCase):
         "a copy of a copy": 'A="$BODY"\nB="pre-$A"\necho "X=$B" >> "$GITHUB_ENV"',
         "export": 'export T="$BODY"\necho "X=$T" >> "$GITHUB_ENV"',
         "local in a function": 'f() { local t="$BODY"; echo "X=$t" >> "$GITHUB_ENV"; }\nf',
-        "a function's argument": 'f() { echo "X=$1" >> "$GITHUB_ENV"; }\nf "$BODY"',
         "for": 'for t in $BODY; do echo "X=$t" >> "$GITHUB_ENV"; done',
-        "read": 'read -r t <<< "$BODY"\necho "X=$t" >> "$GITHUB_ENV"',
-        "printf -v": 'printf -v t "%s" "$BODY"\necho "X=$t" >> "$GITHUB_ENV"',
-        "eval": 'eval "t=$BODY"\necho "X=$u" >> "$GITHUB_ENV"',
-        "a pipeline": 'echo "$BODY" | tr -d "\\r" | sed "s/^/X=/" >> "$GITHUB_ENV"',
-        "a command substitution": 'echo "X=$(echo "$BODY" | head -1)" >> "$GITHUB_ENV"',
         "every variable": 'env >> "$GITHUB_ENV"',
         "every variable, export -p": 'export -p >> "$GITHUB_ENV"',
         "python reads it": 'python3 -c \'import os; print("X=" + os.environ["BODY"])\' >> "$GITHUB_ENV"',
-        "indirect": 'n=BODY\necho "X=${!n}" >> "$GITHUB_ENV"',
         "in an if": 'if [ -n "$BODY" ]; then echo "X=$BODY" >> "$GITHUB_ENV"; fi',
-        "a here-string to jq": 'jq -r .x <<< "$BODY" >> "$GITHUB_ENV"',
     }
 
     def test_each_way(self):
@@ -156,6 +148,16 @@ class UnresolvedTest(unittest.TestCase):
         "the runner's folder": "echo A=1 >> \"$(dirname \"$GITHUB_OUTPUT\")/set_env_x\"",
         "an unread script": "echo \"A=1 >> $GITHUB_ENV",
         "a computed command": "$CMD >> \"$GITHUB_ENV\"",
+        "a function's argument": 'f() { echo "X=$1" >> "$GITHUB_ENV"; }\nf "$BODY"',
+        "read": 'read -r t <<< "$BODY"\necho "X=$t" >> "$GITHUB_ENV"',
+        "printf -v": 'printf -v t "%s" "$BODY"\necho "X=$t" >> "$GITHUB_ENV"',
+        "eval": 'eval "t=$BODY"\necho "X=$u" >> "$GITHUB_ENV"',
+        "a pipeline": 'echo "$BODY" | tr -d "\\r" | sed "s/^/X=/" >> "$GITHUB_ENV"',
+        "a command substitution": 'echo "X=$(echo "$BODY" | head -1)" >> "$GITHUB_ENV"',
+        "indirect": 'n=BODY\necho "X=${!n}" >> "$GITHUB_ENV"',
+        "a here-string to jq": 'jq -r .x <<< "$BODY" >> "$GITHUB_ENV"',
+        "git": 'git rev-parse --short HEAD | sed "s/^/SHA=/" >> "$GITHUB_ENV"',
+        "a file named like the variable": 'cat body.txt >> "$GITHUB_ENV"',
     }
 
     def test_each_way(self):
@@ -176,7 +178,7 @@ class UnresolvedTest(unittest.TestCase):
         script = "core.exportVariable('T', context.payload.pull_request.title)"
         found = gha028(check(job("", env="", uses="actions/github-script@" + "1" * 40, with_={"script": script})))
         self.assertEqual([(f.severity, f.kind) for f in found], [("medium", "unresolved")])
-        self.assertIn("context.payload", found[0].message)
+        self.assertIn("the event's payload", found[0].message)
         quiet = "core.exportVariable('T', 'release')"
         self.assertEqual(gha028(check(job("", env="", uses="actions/github-script@" + "1" * 40,
                                           with_={"script": quiet}))), [])
@@ -198,10 +200,8 @@ class QuietTest(unittest.TestCase):
         "another variable": 'echo "SHA=$GITHUB_SHA" >> "$GITHUB_ENV"',
         "an output": 'echo "body=$BODY" >> "$GITHUB_OUTPUT"',
         "the summary": 'echo "$BODY" >> "$GITHUB_STEP_SUMMARY"',
-        "git": 'git rev-parse --short HEAD | sed "s/^/SHA=/" >> "$GITHUB_ENV"',
         "a loop of plain values": 'for f in a b; do echo "$f=1"; done >> "$GITHUB_ENV"',
         "a group of plain values": '{ echo A=1; echo "B=$GITHUB_SHA"; } >> "$GITHUB_ENV"',
-        "a file named like the variable": 'cat body.txt >> "$GITHUB_ENV"',
     }
 
     def test_each_way(self):
@@ -220,12 +220,83 @@ class QuietTest(unittest.TestCase):
         self.assertEqual(sorted(f.rule for f in result.findings), ["OBAAF-GHA-010"])
 
 
+class FirstReviewTest(unittest.TestCase):
+    """The first review of slice 2d.26 (8073f1a): ways past, false highs and costs, each now a case."""
+
+    def outcome(self, script, env=f"BODY: {BODY}", **kwargs):
+        return [(f.severity, f.kind) for f in gha028(check(job(script, env=env, **kwargs)))]
+
+    def test_ways_past_are_reported(self):
+        high = [("high", "")]
+        unread = [("medium", "unresolved")]
+        cases = {
+            'ARGS=("$BODY")\necho "T=${ARGS[0]}" >> "$GITHUB_ENV"': high,
+            'declare -a arr=("$BODY")\necho "T=${arr[0]}" >> "$GITHUB_ENV"': high,
+            'export "V=$BODY"\necho "X=$V" >> "$GITHUB_ENV"': high,
+            'local "v=$BODY"; echo "X=$v" >> "$GITHUB_ENV"': high,
+            'until echo "X=$BODY"; do :; done >> "$GITHUB_ENV"': high,
+            'cat /proc/self/environ >> "$GITHUB_ENV"': high,
+            'v=$(printenv BODY)\necho "X=$v" >> "$GITHUB_ENV"': unread,
+            'get() { echo "$BODY"; }\nT=$(get)\necho "T=$T" >> "$GITHUB_ENV"': unread,
+            'n=v; declare "$n=$BODY"\necho "X=$v" >> "$GITHUB_ENV"': unread,
+            'setvar() { declare -g "$1=$2"; }\nsetvar COPY "$BODY"\necho "X=$COPY" >> "$GITHUB_ENV"': unread,
+            'if [[ "$BODY" =~ ^\\[(.*)\\] ]]; then echo "S=${BASH_REMATCH[1]}" >> "$GITHUB_ENV"; fi': unread,
+            'echo "$BODY" > f.txt\nv=$(cat f.txt)\necho "X=$v" >> "$GITHUB_ENV"': unread,
+            'echo "$BODY" | sed "s/x/y/" > body.txt\ncat body.txt >> "$GITHUB_ENV"': unread,
+            'echo() { printenv BODY; }\necho >> "$GITHUB_ENV"': unread,
+            'echo env | sed "s/.*/&/e" >> "$GITHUB_ENV"': unread,
+            'echo "X=$BODY" >> "$GITHUB_ENV_FILE"': unread,
+        }
+        for script, expected in cases.items():
+            with self.subTest(script):
+                self.assertEqual(self.outcome(script), expected)
+
+    def test_the_event_file(self):
+        script = 'B=$(jq -r .pull_request.body "$GITHUB_EVENT_PATH")\necho "PR_BODY=$B" >> "$GITHUB_ENV"'
+        self.assertEqual(self.outcome(script, env=""), [("medium", "unresolved")])
+        self.assertEqual(self.outcome('echo "A=1" >> "$GITHUB_ENV"\ncat "$GITHUB_EVENT_PATH"', env=""), [])
+
+    def test_the_file_s_path_in_env(self):
+        found = gha028(check(job('echo "X=$BODY" >> "$OUT"', env=f"BODY: {BODY}\nOUT: ${{{{ github.env }}}}")))
+        self.assertEqual([(f.severity, f.kind) for f in found], [("medium", "unresolved")])
+
+    def test_no_false_high(self):
+        cases = {
+            'if [ -z "$BODY" ]; then echo "BODY=main" >> "$GITHUB_ENV"; fi': [],
+            'grep -q "$BODY" < "$GITHUB_ENV" && echo found': [],
+            'echo "SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"': [],
+            'echo "$HOME/.local/bin" >> "$GITHUB_PATH"': [],
+            'V=1.2\nW="v$V"\necho "VERSION=$W" >> "$GITHUB_ENV"': [],
+            'add_env() { echo "$1=$2" >> "$GITHUB_ENV"; }\nadd_env SKIP true\n[ -n "$BODY" ]': [("medium", "unresolved")],
+            ('for y in 1; do echo "Body is: $BODY"; for f in dist/*; do if [ -s "$f" ]; then echo "HAS_$(basename "$f")=1";'
+             ' fi\ndone >> "$GITHUB_ENV"; done'): [("medium", "unresolved")],
+            'title=fixed\necho "T=$title" >> "$GITHUB_ENV"': [],
+        }
+        for script, expected in cases.items():
+            with self.subTest(script):
+                self.assertEqual(self.outcome(script), expected)
+
+    def test_an_acceptance_names_the_script(self):
+        one = gha028(check(job('S=$(echo "$BODY" | tr -cd a-z)\necho "S=$S" >> "$GITHUB_ENV"\necho "X=$BODY" >> "$GITHUB_ENV"')))
+        two = gha028(check(job('S="$BODY"\necho "S=$S" >> "$GITHUB_ENV"\necho "X=$BODY" >> "$GITHUB_ENV"')))
+        self.assertNotEqual(one[0].facts["script"], two[0].facts["script"])
+
+
 class CostTest(unittest.TestCase):
+    def test_many_names_and_many_writes(self):
+        # The first review: 1,000 copies and 1,000 writes took 45.7 s; 10,000 redirected loops 16.1 s.
+        script = "\n".join([f'V{n}="$BODY"' for n in range(1000)] + ['echo "A=1" >> "$GITHUB_ENV"'] * 1000)
+        started = time.monotonic()
+        rules._runner_file_writes(script, frozenset({"BODY"}))
+        loops = "\n".join(["for x in a; do echo \"A=$x\"; done >> \"$GITHUB_ENV\""] * 10000)
+        rules._runner_file_writes(loops, frozenset({"BODY"}))
+        self.assertLess(time.monotonic() - started, 10)
+
     def test_a_long_chain_of_copies_is_read_in_linear_time(self):
         # Each line copies the one after it, so a reading that repeats rounds would take one per line.
         lines = [f'V{n}="$V{n + 1}"' for n in range(4000)] + ['V4000="$BODY"', 'echo "X=$V0" >> "$GITHUB_ENV"']
         started = time.monotonic()
-        found = rules._runner_file_writes("\n".join(lines), frozenset({"body"}))
+        found = rules._runner_file_writes("\n".join(lines), frozenset({"BODY"}))
         self.assertLess(time.monotonic() - started, 10)
         self.assertEqual(found.state, "written")
 
