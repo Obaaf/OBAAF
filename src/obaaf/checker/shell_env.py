@@ -444,7 +444,9 @@ _LAUNCHER_WORD_RE = re.compile(r"(?<![\w.-])(?:iex|invoke-expression|start-proce
 # A cast is a dotted name with an optional `[]` (`[string]`, `[System.String[]]`), nothing nested, so the pattern
 # cannot backtrack over `[a][a]...` in more than one way.
 # An index or a quoted key is read up to 200 characters, so a line of many unclosed `$h[` costs no more than linear.
-_PS_HEAD = (r"(?:\[[\w.]+(?:\[\])?\]\s*)*[$@]?[\w:{}]+"
+# The variable is a word (`$c`, `$script:c`) or a braced name read up to 200 characters (`${c}`, `${env:X}`): braces in
+# the word's class let the pattern start at every `{` of a line of `{a{a...` and run to its end (the sixth review).
+_PS_HEAD = (r"(?:\[[\w.]+(?:\[\])?\]\s*)*(?:\$\{[^}\n]{0,200}\}|[$@]?[\w:]+)"
             r"(?:\.(?:\w+|'[^'\n]{0,200}'|\"[^\"\n]{0,200}\")|\[[^\]\n]{0,200}\])*"
             r"\s*(?:[-+*/%]|\?\?)?=(?!=)")
 _PS_ASSIGN_HEAD_RE = re.compile(r"\s*" + _PS_HEAD)
