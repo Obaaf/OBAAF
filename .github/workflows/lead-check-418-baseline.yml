@@ -1,83 +1,71 @@
-name: Check the checker input fix with the integrated launch draft
+name: Measure shell scaling inside the full Python 3.10 suite
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
 permissions:
   contents: read
 jobs:
-  acceptance:
+  suite:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 985f279cb615bed9c768c785cdf0ac8a5b6a708a
-          fetch-depth: 0
+          ref: 1115f2096a0d761312334f79301e427ead5cc18d
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
-          python-version: '3.13'
-      - name: Combine the two draft heads with the verified walkthrough
-        id: resolve
+          python-version: '3.10'
+      - name: Measure each existing size in the scaling test during normal suite discovery
         run: |
           export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
           if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          git config user.name 'OBAAF integration check'
-          git config user.email 'integration@localhost'
-          git worktree add -q --detach "$RUNNER_TEMP/earlier" e49616ec3b1abe58e73273c852f2073e3dcb9f30
-          git -C "$RUNNER_TEMP/earlier" merge --no-ff --no-commit b4985c76b8305b9463a61177a6a8904e62f1a486
-          test "$(git -C "$RUNNER_TEMP/earlier" write-tree)" = c26bdd0826bfd2a1d153fe7f1e729326aadb9e3f
-          git diff --quiet 41eb870457a1b2b2bae46d3eb6453f8d0ab3fdb2 c26bdd0826bfd2a1d153fe7f1e729326aadb9e3f -- . ':(exclude)docs/from-report-to-gate.md' ':(exclude)docs/upgrading.md'
-          git diff --binary 41eb870457a1b2b2bae46d3eb6453f8d0ab3fdb2 c26bdd0826bfd2a1d153fe7f1e729326aadb9e3f -- docs/from-report-to-gate.md docs/upgrading.md > "$RUNNER_TEMP/walkthrough.patch"
-          git worktree add -q --detach "$RUNNER_TEMP/previous-adoption" 985f279cb615bed9c768c785cdf0ac8a5b6a708a
-          git -C "$RUNNER_TEMP/previous-adoption" apply --3way --index "$RUNNER_TEMP/walkthrough.patch"
-          echo "Reference tree $(git -C "$RUNNER_TEMP/previous-adoption" write-tree)"
-          git merge --no-ff --no-commit 4c8e347b3ce0bc9bdf2a0463bcac665258fb7f2f
-          git diff --cached --check
-          echo "Adoption tree $(git write-tree)"
-          git commit --no-edit
-          git apply --3way --index "$RUNNER_TEMP/walkthrough.patch"
-          git diff --cached --check
-          echo "Combined tree $(git write-tree)"
-      - name: Compare four report formats on both adopters
-        run: |
-          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
-          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          git worktree add -q --detach "$RUNNER_TEMP/flagship" 1115f2096a0d761312334f79301e427ead5cc18d
-          git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
-          git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
           python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
-          python - <<'PY'
-          import os, subprocess, sys
-          from pathlib import Path
-          root = Path(os.environ["RUNNER_TEMP"])
-          settings = root / "flagship"
-          sites = [
-              ("OBAAF", settings, settings / ".github/obaaf-settings.json", "medium", 0),
-              ("Expectrail", root / "expectrail", settings / "tests/fixtures/settings/live-expectrail-2026-11-13/snapshot.json", "low", 1),
-          ]
-          for label, before, after in [("Combined checker", root / "previous-adoption", Path.cwd())]:
-              for name, site, snapshot, threshold, expected in sites:
-                  for mode in ("text", "json", "sarif", "summary"):
-                      command = [sys.executable, "-m", "obaaf", "check", ".", "--settings", str(snapshot),
-                                 "--baseline", ".github/obaaf-baseline.json", "--fail-on", threshold]
-                      command.extend(["--summary"] if mode=="summary" else ["--format", mode])
-                      if name=="Expectrail":
-                          command.append("--no-fixes")
-                      outputs = []
-                      for source in (before, after):
-                          env = dict(os.environ, PYTHONPATH=str(source/"src"), PYTHONDONTWRITEBYTECODE="1")
-                          result = subprocess.run(command, cwd=site, env=env, capture_output=True)
-                          assert result.returncode==expected, (name, mode, result.stderr[-300:])
-                          assert b"git did not list the tracked files" not in result.stdout
-                          outputs.append((result.stdout, result.stderr, result.returncode))
-                      assert outputs[0]==outputs[1], (label,name,mode)
-                      print(label, name, mode, "matched", expected, flush=True)
+          cat > "$TMPDIR/suite_timing.py" <<'PY'
+          import gc
+          import resource
+          import time
+          import unittest
+          from unittest.mock import patch
+          from test_shell_lanes import TheProgramLinesTest, agent_code
+
+          original_test = TheProgramLinesTest.test_linear
+          original_reader = agent_code.program_lines
+
+          def measured_test(case):
+              def measure(*args, **kwargs):
+                  collections = []
+                  def sample(phase, info):
+                      collections.append((phase, info["generation"], time.perf_counter()))
+                  before = resource.getrusage(resource.RUSAGE_SELF)
+                  gc.callbacks.append(sample)
+                  wall = time.perf_counter()
+                  cpu = time.process_time()
+                  try:
+                      return original_reader(*args, **kwargs)
+                  finally:
+                      cpu = time.process_time() - cpu
+                      wall = time.perf_counter() - wall
+                      gc.callbacks.remove(sample)
+                      after = resource.getrusage(resource.RUSAGE_SELF)
+                      intervals = {0: [], 1: [], 2: []}
+                      starts = {}
+                      for phase, generation, stamp in collections:
+                          if phase == "start":
+                              starts[generation] = stamp
+                          elif generation in starts:
+                              intervals[generation].append(stamp - starts.pop(generation))
+                      shape = case._subtest.params["shape"]
+                      gc_ms = [round(1000 * sum(intervals[g]), 2) for g in range(3)]
+                      counts = [len(intervals[g]) for g in range(3)]
+                      print(f"TIMING {shape} wall={wall:.6f} cpu={cpu:.6f} gc_ms={gc_ms} gc_counts={counts} involuntary_switches={after.ru_nivcsw - before.ru_nivcsw}", flush=True)
+
+              with patch.object(agent_code, "program_lines", measure):
+                  original_test(case)
+
+          suite = unittest.defaultTestLoader.discover("tests")
+          with patch.object(TheProgramLinesTest, "test_linear", measured_test):
+              result = unittest.TextTestRunner(verbosity=1).run(suite)
+          raise SystemExit(int(not result.wasSuccessful()))
           PY
-      - name: Run the full combined acceptance suite
-        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
-        run: |
-          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
-          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          python -m obaaf docs build --check
-          python -m unittest discover -s tests -v
+          python "$TMPDIR/suite_timing.py"
