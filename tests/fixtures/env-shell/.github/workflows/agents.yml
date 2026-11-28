@@ -173,3 +173,14 @@ jobs:
           set/p AGENT=<a.txt
           %AGENT% --dangerously-skip-permissions -p x
         env: {AGENT: echo}
+  # From the fifth review of 2d.25: a typed or indexed assignment of a command line.
+  pwsh-typed-command-line:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh
+        run: |
+          [string]$c = "$env:AGENT --dangerously-skip-permissions -p x"
+          $h = @{}
+          $h["c"] = "$env:AGENT --dangerously-skip-permissions -p x"
+          Invoke-Expression $c
+        env: {AGENT: claude}

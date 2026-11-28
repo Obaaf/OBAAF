@@ -63,6 +63,8 @@ AGENT_JOBS = {
     "cmd-if-exist-after-github-env": ("agent", "medium", "command-computed"),
     "pwsh-set-by-an-unlisted-setter": ("trusted", "medium", "command-computed"),
     "cmd-set-p-without-a-space": ("trusted", "medium", "command-computed"),
+    # From the fifth review: a typed or indexed assignment of a command line, run through `Invoke-Expression`.
+    "pwsh-typed-command-line": ("agent", "medium", "command-computed"),
 }
 # The jobs above where the lanes and OBAAF-GHA-026 disagree, each for a reason D-153 states.
 STATED_DISAGREEMENTS = {"pwsh-copied-into-a-variable", "cmd-copied-into-a-variable", "cmd-call-label-sets-it",

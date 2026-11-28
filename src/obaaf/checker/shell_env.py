@@ -439,7 +439,15 @@ def names_read(text: str, family_name: str) -> list:
 # at `&` too; PowerShell's own `&` runs the next word only.
 _LAUNCHER_WORD_RE = re.compile(r"(?<![\w.-])(?:iex|invoke-expression|start-process|saps|start|invoke-command|icm|call"
                                r"|cmd|cmd\.exe|pwsh|pwsh\.exe|powershell|powershell\.exe|bash|sh)(?![\w.-])", re.I)
-_PS_ASSIGN_HEAD_RE = re.compile(r"\s*[$@]?[\w:.\[\]{}]+\s*(?:[-+*/%]|\?\?)?=(?!=)")
+# A PowerShell assignment's head: type casts before the variable (`[string]$c`), and indexes or members after it with
+# quoted keys (`$h["c"]`, `$h.'c'`; the fifth review).
+# A cast is a dotted name with an optional `[]` (`[string]`, `[System.String[]]`), nothing nested, so the pattern
+# cannot backtrack over `[a][a]...` in more than one way.
+# An index or a quoted key is read up to 200 characters, so a line of many unclosed `$h[` costs no more than linear.
+_PS_HEAD = (r"(?:\[[\w.]+(?:\[\])?\]\s*)*[$@]?[\w:{}]+"
+            r"(?:\.(?:\w+|'[^'\n]{0,200}'|\"[^\"\n]{0,200}\")|\[[^\]\n]{0,200}\])*"
+            r"\s*(?:[-+*/%]|\?\?)?=(?!=)")
+_PS_ASSIGN_HEAD_RE = re.compile(r"\s*" + _PS_HEAD)
 _CMD_ASSIGN_HEAD_RE = re.compile(r"\s*@?set[\s,;=]", re.I)
 _KEYWORD_RE = re.compile(r"(?:do|else|then)(?![\w-])", re.I)
 # An operand of a cmd `if` condition: a quoted text (`"C:\Program Files\x"`, `"a b"`) or a word.
@@ -451,7 +459,7 @@ _HEAD_SKIP = " \t@\"'‘’“”"
 # The head of an assignment, taken off so that its value is read as a command line (the fourth review: `$c = "$env:AGENT
 # -p x"` / `iex $c` is an agent job where `$c = "claude -p x"` is).
 _ASSIGNMENT_HEADS = {
-    "pwsh": re.compile(r"(^|[;{(])\s*[$@]?[\w:.\[\]{}]+\s*(?:[-+*/%]|\?\?)?=(?!=)"),
+    "pwsh": re.compile(r"(^|[;{(])\s*" + _PS_HEAD),
     "cmd": re.compile(r"(^|[&(])\s*@?set(?:[\s,;=\"]+|(?=/))(?:/[ap][\s,;=\"]*)?[^=\n]*=", re.I),
 }
 
