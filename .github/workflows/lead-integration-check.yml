@@ -1,0 +1,56 @@
+name: Verify the combined shell and adoption drafts
+on:
+  push:
+    branches: [lead/verify-418-68197af]
+permissions:
+  contents: read
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: 9e5e644cda9b650375a8dd29ff909a7caf0320d2
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Verify the tree and install the checker
+        run: |
+          test "$(git rev-parse 'HEAD^{tree}')" = d6fea59b4f0da5af37b63f126b9b77a519103e9a
+          mkdir "$RUNNER_TEMP/obaaf-test"
+          echo "TMPDIR=$RUNNER_TEMP/obaaf-test" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+      - name: Validate the catalogue, generated docs, site and repository gate
+        run: |
+          obaaf catalog
+          obaaf docs build --check
+          python site/build.py --output "$RUNNER_TEMP/site"
+          obaaf check . --settings .github/obaaf-settings.json --baseline .github/obaaf-baseline.json --fail-on medium
+      - name: Run the complete acceptance suite
+        run: |
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          python -m unittest discover -s tests -v
+  junction:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 9e5e644cda9b650375a8dd29ff909a7caf0320d2
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Check patch handling on native Windows
+        shell: pwsh
+        run: |
+          if ((git rev-parse 'HEAD^{tree}') -ne 'd6fea59b4f0da5af37b63f126b9b77a519103e9a') { throw 'Unexpected source tree' }
+          $env:TMPDIR = $env:RUNNER_TEMP
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_fix_patch.py -v
