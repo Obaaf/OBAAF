@@ -1,0 +1,96 @@
+name: Check patch replay and compare adoption reports
+on:
+  push:
+    branches: [lead/check-419-and-418-68197af]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: c79b863d219d53e2c65f216d80c2e3b043781c86
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Reproduce the LF assertion on flagship and verify the correction
+        shell: pwsh
+        run: |
+          $env:TMPDIR = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:PYTHONPATH = 'tests'
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git checkout --quiet --detach 73658d7366eaa250848ce693cb05976327c8cc20
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $test = 'test_fix_patch.FixPatchReviewTest.test_outside_a_work_tree_the_patch_is_written'
+          $env:GIT_CONFIG_COUNT = '1'
+          $env:GIT_CONFIG_KEY_0 = 'core.autocrlf'
+          $env:GIT_CONFIG_VALUE_0 = 'true'
+          $before = python -m unittest $test 2>&1 | Out-String
+          $status = $LASTEXITCODE
+          Write-Output $before
+          if ($status -ne 1 -or !$before.Contains("AssertionError: b'b\r\n' != b'b\n'")) { throw 'Expected the original CRLF mismatch' }
+          git checkout --quiet --detach c79b863d219d53e2c65f216d80c2e3b043781c86
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($policy in 'true','false','input') {
+            $env:GIT_CONFIG_VALUE_0 = $policy
+            python -m unittest $test -v
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          Remove-Item Env:GIT_CONFIG_COUNT, Env:GIT_CONFIG_KEY_0, Env:GIT_CONFIG_VALUE_0
+          python -m unittest test_fix_patch -v
+  adopter-comparisons:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: c79b863d219d53e2c65f216d80c2e3b043781c86
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Compare fixed repositories on each pair of checker revisions
+        run: |
+          export TMPDIR="$RUNNER_TEMP/obaaf-temp"
+          mkdir "$TMPDIR"
+          git worktree add -q --detach "$RUNNER_TEMP/flagship" 73658d7366eaa250848ce693cb05976327c8cc20
+          git worktree add -q --detach "$RUNNER_TEMP/adoption" e49616ec3b1abe58e73273c852f2073e3dcb9f30
+          git worktree add -q --detach "$RUNNER_TEMP/combined" 9e5e644cda9b650375a8dd29ff909a7caf0320d2
+          git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+          python - <<'PY'
+          import os, subprocess, sys
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"])
+          settings = root / "flagship"
+          sites = [
+              ("OBAAF", settings, settings / ".github/obaaf-settings.json", "medium", 0),
+              ("Expectrail", root / "expectrail", settings / "tests/fixtures/settings/live-expectrail-2026-11-13/snapshot.json", "low", 1),
+          ]
+          for label, before, after in [("#418 with adoption",root/"adoption", root/"combined"), ("#419",settings,Path.cwd())]:
+              for name, site, snapshot, threshold, expected in sites:
+                  for mode in ("text", "json", "sarif", "summary"):
+                      command = [sys.executable, "-m", "obaaf", "check", ".", "--settings", str(snapshot),
+                                 "--baseline", ".github/obaaf-baseline.json", "--fail-on", threshold]
+                      command.extend(["--summary"] if mode=="summary" else ["--format", mode])
+                      if name=="Expectrail":
+                          command.append("--no-fixes")
+                      outputs = []
+                      for source in (before, after):
+                          env = dict(os.environ, PYTHONPATH=str(source/"src"), PYTHONDONTWRITEBYTECODE="1")
+                          result = subprocess.run(command, cwd=site, env=env, capture_output=True)
+                          assert result.returncode==expected, (name, mode, result.stderr[-300:])
+                          assert b"git did not list the tracked files" not in result.stdout
+                          outputs.append((result.stdout, result.stderr, result.returncode))
+                      assert outputs[0]==outputs[1], (label,name,mode)
+                      print(label, name, mode, "matched", expected, flush=True)
+          PY
