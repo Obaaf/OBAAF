@@ -801,6 +801,9 @@ class _Context:
     # The `${{ }}` expressions the script's text holds in their places (`_hold_expressions`), so that a command word
     # made of one is tested for the tool's letters as GitHub will write it (2d.23, from its second review).
     held: list = field(default_factory=list)
+    # The command lines the PowerShell and cmd reader names a program in, for the lanes (`agent_code.program_lines`,
+    # flagship slice 2d.27a); None where nobody asks.
+    runs: list | None = None
 
     def cannot_tell(self, word: str) -> None:
         if self.mentioned:
