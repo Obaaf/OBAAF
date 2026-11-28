@@ -2724,28 +2724,34 @@ class Step:
             return made, None, put_ins.unread
         if made.text is None:
             # Line by line, since no reference spans a line: a line in which a value of one word (a program's name,
-            # `C:\tools\claude.exe`) was put in is kept as the probe, which `agent_text` reads as it reads the
+            # `C:\tools\claude.exe`) was put in where something may run it is kept as the probe, which `agent_text` reads as it reads the
             # step's own lines (from the review: `if 1==1 %AGENT% -p x`, `cmd /d /c %AGENT% ...` and `-ArgumentList`
             # before `-FilePath` are read for a literal program and were not for one put in). A value with a space
             # is read only command by command, as D-139 reads a put-in text, so prose in it is not an agent.
+            # Only where the value stands where something may run it (`shell_env.RunContext`: a launcher before it
+            # in its command, an assignment, the program's place), so prose with a tool's name in it
+            # (`Write-Host "Using $env:TOOL"`) is not searched as a command (the second review).
             texts, probes = [], []
+            context = shell_env.RunContext(base, family)
             for values in readings:
                 found = iter(values)
                 lines = []
+                offset = 0
                 for line in base.split("\n"):
                     single = []
 
-                    def one(m, found=found, single=single):
+                    def one(m, found=found, single=single, offset=offset):
                         value = next(found)
                         if value is None:
                             return m.group(0)
-                        if value and not any(ch.isspace() for ch in value):
+                        if value and not any(ch.isspace() for ch in value) and context.runs(offset + m.start())[0]:
                             single.append(True)
                         return value
                     made_line = pattern.sub(one, line)
                     lines.append(made_line)
                     if single:
                         probes.append(made_line)
+                    offset += len(line) + 1
                 texts.append("\n".join(lines))
             made.text = "\n".join(texts)
             made.probe = "\n".join(probes) or None

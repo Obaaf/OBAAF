@@ -47,9 +47,22 @@ AGENT_JOBS = {
     "cmd-set-by-the-script": ("agent", "medium", "command-computed"),
     "pwsh-self-hosted-other-case": ("agent", "medium", "command-computed"),
     "pwsh-after-github-env": ("agent", "medium", "command-computed"),
+    # From the second review: a value copied into a variable and run on the next line, `-FilePath:`, `call :label`.
+    # The lanes follow neither a value copied into a script's variable nor the script's own assignments, for a
+    # program written out as for one put in (`$a = 'claude'; & $a`; D-153's stated limits): those jobs are in no
+    # agent lane, and OBAAF-GHA-026 reads them.
+    "pwsh-copied-into-a-variable": ("trusted", "high", "command-option"),
+    "pwsh-copied-after-github-env": ("agent", "medium", "command-computed"),
+    "pwsh-file-path-after-a-colon": ("agent", "high", "command-option"),
+    "cmd-copied-into-a-variable": ("trusted", "high", "command-option"),
+    "cmd-call-label-sets-it": ("trusted", "high", "command-option"),
 }
+# The jobs above where the lanes and OBAAF-GHA-026 disagree, each for a reason D-153 states.
+STATED_DISAGREEMENTS = {"pwsh-copied-into-a-variable", "cmd-copied-into-a-variable", "cmd-call-label-sets-it"}
 ORDINARY_JOBS = ["pwsh-region", "pwsh-tool-from-env", "cmd-greeting", "pwsh-linux-other-case",
-                 "pwsh-single-quoted-and-escaped", "bash-reads-no-pwsh-reference"]
+                 "pwsh-single-quoted-and-escaped", "bash-reads-no-pwsh-reference", "pwsh-tool-named-in-prose",
+                 "cmd-tool-named-in-prose", "cmd-ampersand-runs-another-program",
+                 "pwsh-call-operator-on-another-program"]
 
 
 def checked(source=FIXTURE, *args):
@@ -100,7 +113,7 @@ class TheFixtureTest(unittest.TestCase):
         # Every job OBAAF-GHA-026 reads an agent in is an agent job, and the reverse (the lead's order on #411).
         for job, lane in self.lanes.items():
             with self.subTest(job=job):
-                self.assertEqual(lane == "agent", bool(self.gha026(job)))
+                self.assertEqual(lane == "agent" or job in STATED_DISAGREEMENTS, bool(self.gha026(job)))
 
     def test_the_agent_rules_apply_to_an_agent_job(self):
         rules = {f["rule"] for f in self.report["findings"] if f["job"] == "pwsh-step-env"}
@@ -258,9 +271,13 @@ class TheScriptSetsTest(unittest.TestCase):
         return shell_env.script_sets(text, family).may_set(name, len(text) if at is None else at)
 
     def test_pwsh(self):
-        self.assertFalse(self.sets("& $env:AGENT --x; $env:PATH.Split(';')", "pwsh"))
+        for text in ("& $env:AGENT --x; $env:PATH.Split(';')", "$agent = $env:AGENT", "Write-Host 'AGENT ready'",
+                     "git rm -q old.txt", "function Run($Agent) { & $Agent }"):
+            with self.subTest(text=text):
+                self.assertFalse(self.sets(text, "pwsh"))
         for text in ("$env:Agent = 'x'", "$env:AGENT, $b = 'claude', 1", "Set-Content -Path ('en'+'v:AGENT') x",
-                     "$t::$m('AGENT', 'claude')", "Set-Item env:X x", "[Environment]::SetEnvironmentVariable('A','x')",
+                     "Set-Item env:X x", "[Environment]::SetEnvironmentVariable('A','x')",
+                     "(New-Object -ComObject WScript.Shell).Environment('Process')", "rm x",
                      "$t = [Environment]; $t::$m('A'+'GENT', 'x')", "iex $c", ". ./setup.ps1", "& ./setup.ps1",
                      "Import-Module x", "Get-ChildItem Env:", "Copy-Item a b", "$ExecutionContext.SessionState"):
             with self.subTest(text=text):
@@ -277,6 +294,10 @@ class TheScriptSetsTest(unittest.TestCase):
                 self.assertTrue(self.sets(text, "cmd", at=text.index("%AGENT%")))
         self.assertFalse(self.sets("call %AGENT% --x", "cmd", at=5))
         self.assertFalse(self.sets("call :sub\n%AGENT%", "cmd"))
+        self.assertFalse(self.sets("echo Using AGENT\nset BIN=%AGENT%\n%BIN% -p x", "cmd"))
+        # `call :label` runs lines out of their order, as `goto` does (the second review).
+        text = "call :setup\n%AGENT% --x\nexit /b\n:setup\nset AGENT=claude\nexit /b"
+        self.assertTrue(self.sets(text, "cmd", at=text.index("%AGENT%")))
 
     def test_linear(self):
         started = time.monotonic()
@@ -320,9 +341,6 @@ class TheShellTest(unittest.TestCase):
         self.assertEqual(shell_env.family("C:\\Windows\\System32\\cmd.exe"), "cmd")
         self.assertIsNone(shell_env.family("bash"))
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 # The same command with the program (and, where it stands as a word of its own, the option) written out and named
@@ -399,3 +417,7 @@ class TheLiteralFormTest(unittest.TestCase):
         for base, literal, named in pairs:
             with self.subTest(literal=literal, named=named):
                 self.assertEqual(got[base + "-env"], got[base + "-lit"])
+
+
+if __name__ == "__main__":
+    unittest.main()

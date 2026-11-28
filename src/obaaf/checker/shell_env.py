@@ -430,51 +430,95 @@ def names_read(text: str, family_name: str) -> list:
     return [(m.start(), next(g for g in m.groups() if g)) for m in pattern.finditer(text)]
 
 
-# What on a line may run what a reference there gives: a launcher (PowerShell's `&`, `.`, `iex`, `Invoke-Expression`,
-# `Start-Process`, `saps`, `Invoke-Command`; cmd's `call`, `start`, `cmd`; another shell), or the reference standing
-# where a command starts (after a separator, `do`, `else`, `then` or a cmd `if` condition). `may_run` reads the line the reference is on, with the lines a backtick or a caret continues.
-_LAUNCHER_RE = re.compile(r"(?:^|[\s;|({])(?:&|\.|iex|invoke-expression|start-process|saps|start|invoke-command|icm"
-                          r"|call|cmd|cmd\.exe|pwsh|powershell|bash|sh)(?=[\s\"'(\u2018\u2019\u201c\u201d]|$)", re.I)
-_COMMAND_START_RE = re.compile(
-    r"(?:(?:^|[;|&({])|(?<![\w-])(?:do|else|then)|(?<![\w-])if\s+(?:not\s+)?(?:/i\s+)?"
-    r"(?:(?:exist|defined|errorlevel|cmdextversion)\s+\S+|\S+\s*==\s*\S+|\S+\s+(?:equ|neq|lss|leq|gtr|geq)\s+\S+))"
-    r"\s*[@\"'\u2018\u2019\u201c\u201d]?$", re.I)
-
-
-_LOOK_BACK = 1000     # characters before a reference read for where a command starts
+# What may run what a reference gives (flagship slice 2d.25, from its reviews), read for each command of a logical
+# line (the lines a PowerShell backtick or a cmd caret at a line's end continues are one): a launcher as the command's
+# program, before the reference (`iex`, `Invoke-Expression`, `Start-Process`, `saps`, `start`, `Invoke-Command`, `call`,
+# `cmd`, another shell), an assignment (`$c = "$env:AGENT -p x"`, `set BIN=%AGENT%`, a hashtable's `FilePath=`), whose
+# value a later line may run, or the reference where the command's program goes (after a separator, `do`, `else`,
+# `then`, a cmd `if` condition, PowerShell's `&` and `.`). A command ends at `;`, `|`, `&&`, `||`, a bracket, and in cmd
+# at `&` too; PowerShell's own `&` runs the next word only.
+_LAUNCHER_WORD_RE = re.compile(r"(?<![\w.-])(?:iex|invoke-expression|start-process|saps|start|invoke-command|icm|call"
+                               r"|cmd|cmd\.exe|pwsh|pwsh\.exe|powershell|powershell\.exe|bash|sh)(?![\w.-])", re.I)
+_PS_ASSIGN_HEAD_RE = re.compile(r"\s*[$@]?[\w:.\[\]{}]+\s*(?:[-+*/%]|\?\?)?=(?!=)")
+_CMD_ASSIGN_HEAD_RE = re.compile(r"\s*@?set[\s,;=]", re.I)
+_KEYWORD_RE = re.compile(r"(?:do|else|then)(?![\w-])", re.I)
+_CMD_IF_RE = re.compile(r"if\s+(?:not\s+)?(?:/i\s+)?(?:(?:exist|defined|errorlevel|cmdextversion)\s+\S+"
+                        r"|\S+?\s*==\s*\S+|\S+\s+(?:equ|neq|lss|leq|gtr|geq)\s+\S+)", re.I)
+_HEAD_SKIP = " \t@\"'‘’“”"
 
 
 class RunContext:
-    """Where something may run what a reference gives, for each reference of one script (`runs(at)`): a launcher on
-    its logical line (the lines a PowerShell backtick or a cmd caret at a line's end continues are one), or the
-    reference where a command starts, read in the `_LOOK_BACK` characters before it. The lines are found once and
-    each line is searched for a launcher once, so the cost is linear in the script however many references it has."""
+    """Where something may run what a reference gives (`runs(at)`), for each reference of one script. Each logical line
+    is cut into its commands once, and each command's launcher, assignment and program's place are found once, so the
+    cost is linear in the script however many references it has."""
 
     def __init__(self, text: str, family_name: str) -> None:
-        self.text = text
+        self.text, self.family = text, family_name
         mark = "`" if family_name == "pwsh" else "^"
         self.starts: list = [0]
         for m in re.finditer("\n", text):
             if text[m.start() - 1:m.start()] != mark:
                 self.starts.append(m.end())
-        self.launcher: dict = {}
+        self.lines: dict = {}
+
+    def _line(self, k: int) -> tuple:
+        if k in self.lines:
+            return self.lines[k]
+        start = self.starts[k]
+        end = self.starts[k + 1] - 1 if k + 1 < len(self.starts) else len(self.text)
+        line = self.text[start:end]
+        cuts = [0]
+        i, n = 0, len(line)
+        quote = ""
+        while i < n:
+            ch = line[i]
+            if quote:
+                if ch == quote:
+                    quote = ""
+            elif ch in "'\"" and (self.family == "pwsh" or ch == '"'):
+                quote = ch
+            elif ch in ";|(){}" or (ch == "&" and (self.family == "cmd" or line[i + 1:i + 2] == "&"
+                                                   or line[i - 1:i] == "&")):
+                cuts.append(i + 1)
+            i += 1
+        commands = []
+        for a, b in zip(cuts, cuts[1:] + [n + 1]):
+            piece = line[a:b - 1] if b <= n else line[a:]
+            place = self._program_place(piece)
+            # A launcher counts only as the command's own program (`iex ...`, `cmd /c ...`), not as a word in its
+            # arguments or a string (`Write-Host "start: $env:MODEL"`; the second review).
+            launcher = _LAUNCHER_WORD_RE.match(piece, place)
+            assign = (_PS_ASSIGN_HEAD_RE if self.family == "pwsh" else _CMD_ASSIGN_HEAD_RE).match(piece)
+            commands.append((start + a, start + a + (launcher.start() if launcher else len(piece) + 1),
+                             bool(assign), start + a + place))
+        self.lines[k] = (line, [c[0] for c in commands], commands)
+        return self.lines[k]
+
+    def _program_place(self, piece: str) -> int:
+        """Where the command's program goes in `piece`: past spaces, `@` and an opening quote, a keyword, a cmd `if`
+        condition, and PowerShell's `&` or `.` before the program."""
+        i = 0
+        for _ in range(8):
+            while i < len(piece) and piece[i] in _HEAD_SKIP:
+                i += 1
+            m = _KEYWORD_RE.match(piece, i) or (_CMD_IF_RE.match(piece, i) if self.family == "cmd" else None)
+            if m:
+                i = m.end()
+                continue
+            if self.family == "pwsh" and piece[i:i + 1] in ("&", ".") and piece[i + 1:i + 2] in (" ", "\t", "$", "'",
+                                                                                                 '"', "("):
+                i += 1
+                continue
+            break
+        return i
 
     def runs(self, at: int) -> tuple:
         """(whether something may run what the reference at `at` gives, its logical line)."""
         k = bisect.bisect_right(self.starts, at) - 1
-        start = self.starts[k]
-        if k not in self.launcher:
-            end = self.starts[k + 1] - 1 if k + 1 < len(self.starts) else len(self.text)
-            line = self.text[start:end]
-            self.launcher[k] = (bool(_LAUNCHER_RE.search(line)), line)
-        launched, line = self.launcher[k]
-        if launched:
-            return True, line
-        back = max(start, at - _LOOK_BACK)
-        before = self.text[back:at]
-        if back > start:
-            before = "\x00" + before           # not the line's start
-        return bool(_COMMAND_START_RE.search(before.replace("\n", " "))), line
+        line, heads, commands = self._line(k)
+        c = bisect.bisect_right(heads, at) - 1
+        head, launcher, assign, place = commands[max(c, 0)]
+        return bool(launcher < at or assign or at <= place), line
 
 
 def _safe(value: str, family_name: str, in_string: bool) -> bool:
@@ -526,66 +570,72 @@ def put_in(text: str, family_name: str, lookup, budget=None) -> tuple | None:
     return "".join(pieces), size, frozenset(named)
 
 
-# What can set an environment variable in a script, read the widest way (flagship slice 2d.25, from its review: a list
-# of setters was got past by `$env:AGENT, $b = 'claude', 1`, `Set-Content -Path ('en'+'v:AGENT')`, `$t::$m('AGENT',
-# ...)` and cmd's `se^t`, `set,AGENT=` and `set;AGENT=`). A name is taken as set by the script wherever it stands in the
-# script other than as a reference the shell expands (in PowerShell, one not followed by `,` or an assignment) or in a
-# comment; and any name may be set where PowerShell's script holds another `env:`, the `Environment` class, the
-# session state, `Invoke-Expression`, `Import-Module`, `Invoke-Command`, a provider cmdlet that can write a computed
-# path (`Set-Item`, `New-Item`, `Set-Content`, `Add-Content`, `Clear-Item`, `Remove-Item`, `Rename-Item`, `Copy-Item`,
-# `Move-Item` and their aliases), dot-sourcing or a `.ps1` or `.psm1`, or cmd's a `call` of anything but a label or a
-# `set` whose name holds a variable. cmd's carets are taken out first, as cmd takes them out.
+# What can set an environment variable in a script, read the widest way (flagship slice 2d.25, from its reviews: a
+# list of setters was got past by `$env:AGENT, $b = 'claude', 1`, `Set-Content -Path ('en'+'v:AGENT')`, `$t::$m('AGENT',
+# ...)` and cmd's `se^t`, `set,AGENT=` and `set;AGENT=`; and taking every word of the script for a name it may set
+# withdrew trusted values a later line then ran, `$agent = $env:AGENT` / `& $agent ...`). PowerShell: an assignment to
+# `$env:NAME` or `${env:NAME}` (`=`, `+=`, `??=`, or a `,` after it, a multiple assignment) sets that name; any name may
+# be set where the script holds another `env:` (`Set-Item env:X`, `"env:$n"`), the word `Environment` (`[Environment]`,
+# `Environment::`, a COM object's `.Environment(...)`), `SessionState`, `ExecutionContext`, `Invoke-Expression`, `iex`,
+# `Import-Module`, `Invoke-Command`, a provider cmdlet that can write a computed path (`Set-Item`, `New-Item`,
+# `Set-Content`, `Add-Content`, `Clear-Item`, `Remove-Item`, `Rename-Item`, `Copy-Item`, `Move-Item` and their aliases),
+# dot-sourcing, or a `.ps1` or `.psm1`. cmd, with its carets taken out as cmd takes them out: `set NAME=...` (`set`
+# followed by a space, `,`, `;` or `=`, with `/a` or `/p`, quoted or not, the name being what stands before the first
+# `=`) sets that name on its line and the lines after; a `set` whose name holds a variable and a `call` of anything but
+# a label may set any name on the lines after; and where the script holds `goto` or `call :label`, which run lines out
+# of their order, every line counts.
 _PS_SETS_AFTER = re.compile(r"\s*(?:,|(?:[-+*/%]|\?\?)?=(?!=))")
 _PS_ENV_ANY_RE = re.compile(r"env:", re.I)
 _PS_DYNAMIC_RE = re.compile(
-    r"Environment\s*\]|Environment::|SessionState|ExecutionContext|Invoke-Expression|\biex\b|Import-Module|\bipmo\b"
+    r"\bEnvironment\b|SessionState|ExecutionContext|Invoke-Expression|\biex\b|Import-Module|\bipmo\b"
     r"|Invoke-Command|\bicm\b|\.ps1\b|\.psm1\b|(?:Set|New|Clear|Remove|Rename|Copy|Move)-Item|(?:Set|Add)-Content"
-    r"|(?<![\w-])(?:si|ni|sc|ac|cli|ri|rni|cpi|mi|del|erase|rm|rmdir|rd|ren|mv|cp|copy|move)(?![\w-])"
+    r"|(?:^|[;|&({}])[ \t]*(?:si|ni|sc|ac|cli|ri|rni|cpi|mi|del|erase|rm|rmdir|rd|ren|mv|cp|copy|move)(?![\w-])"
     r"|(?:^|[;|&({}\s])\.\s+\S", re.I | re.M)
 _CMD_CALL_RE = re.compile(r"\bcall[\s,;=]+(?!:)\S", re.I)
-_CMD_SET_START_RE = re.compile(r"\bset[\s,;=]+", re.I)
-_WORD_RE = re.compile(r"\w+")
+_CMD_UNORDERED_RE = re.compile(r"\bgoto\b|\bcall[\s,;=]+:", re.I)
+_CMD_SET_START_RE = re.compile(r"\bset[\s,;=]+(?:/[ap][\s,;=]*)?", re.I)
 
 
-def _cmd_computed_set(text: str) -> bool:
-    """Whether a cmd `set` gives a name that holds a variable (`set %N%=x`, `set !N!=x`): a `%` or `!` between the
-    `set` and the first `=` after it on its line. Each line's `=` and marks are found once (bisect), so the cost
-    is not the square of a line of many `set`s (the review's case)."""
-    for line in text.split("\n"):
+def _cmd_sets(text: str) -> tuple:
+    """(names, any_line) for a cmd script with its carets out: the first line each folded name is set on, and the
+    first line of a `set` whose name holds a variable or of a `call` of anything but a label (None for none). Each
+    line's `=` are found once and each `set`'s name is read up to the first `=` after it (bisect), so the cost is
+    not the square of a line of many `set`s (the first review's case)."""
+    names: dict = {}
+    any_line = None
+    for number, line in enumerate(text.split("\n")):
+        if any_line is None and _CMD_CALL_RE.search(line):
+            any_line = number
         starts = list(_CMD_SET_START_RE.finditer(line))
         if not starts:
             continue
         equals = [i for i, ch in enumerate(line) if ch == "="]
-        marks = [0]
-        for ch in line:
-            marks.append(marks[-1] + (ch in "%!"))
         for m in starts:
             j = bisect.bisect_left(equals, m.end())
-            if j < len(equals) and marks[equals[j]] - marks[m.end()] > 0:
-                return True
-    return False
-
-
-def _first_dynamic_line(text: str) -> int | None:
-    """The first line of a cmd script with a `call` of anything but a label or a `set` whose name holds a variable."""
-    for number, line in enumerate(text.split("\n")):
-        if _CMD_CALL_RE.search(line) or _cmd_computed_set(line):
-            return number
-    return None
+            if j == len(equals):
+                continue
+            name = line[m.end():equals[j]].strip(" \t\"")
+            if "%" in name or "!" in name:
+                if any_line is None:
+                    any_line = number
+                continue
+            if name:
+                names.setdefault(env_expr.fold(name), number)
+    return names, any_line
 
 
 class Sets:
     """What a script may set itself (`script_sets`): `may_set(name, at)` says whether the reference to `name` at
     offset `at` may read a value the script set rather than its `env`. In PowerShell any place in the script counts
-    (functions, loops and scripts it runs can set a name before a reference that stands earlier). In cmd only a `set`
-    or a `call` on an earlier line counts, since cmd puts a line's `%NAME%` in when it reads the line, unless the
-    script holds `goto`, which can run an earlier line again."""
+    (functions, loops and scripts it runs can set a name before a reference that stands earlier). In cmd only a line
+    before the reference's counts, since cmd puts a line's `%NAME%` in when it reads the line, unless the script holds
+    `goto` or `call :label`."""
 
     def __init__(self, names, anything: bool, family_name: str, lines: dict | None = None,
                  any_line: int | None = None, text: str = "") -> None:
         self.names, self.anything, self.family = frozenset(names), anything, family_name
-        self.lines = lines          # cmd: the first line each folded name is set on, where order counts
-        self.any_line = any_line    # cmd: the first line of a `call` or a computed `set`, where order counts
+        self.lines = lines          # cmd: the first line each folded name is set on
+        self.any_line = any_line    # cmd: the first line of a `call` or a computed `set`
         # Where each line starts, so a reference's line is found by bisection (the script's lines are the same with
         # its carets taken out, which `script_sets` reads, as in the text the references are found in).
         self.starts = [0] + [m.end() for m in re.finditer("\n", text)] if lines is not None else []
@@ -601,53 +651,28 @@ class Sets:
 
 
 def script_sets(text: str, family_name: str) -> Sets:
-    """What the script may set itself (`Sets`). One pass over the script's words, so linear in it."""
+    """What the script may set itself (`Sets`), in one pass, so linear in the script."""
     if family_name == "cmd":
-        # The carets out, as cmd takes them out (`se^t`), with the line breaks kept, so that each line is the line
-        # the references are on.
         text = text.replace("^", "")
-        ordered = not re.search(r"\bgoto\b", text, re.I)
-        any_line = _first_dynamic_line(text)
-        if not ordered and any_line is not None:
-            return Sets((), True, family_name)
-        reads = {(start, end) for start, end, _name, _q, plain in _cmd_references(text) if plain}
-        # A `rem` or `::` line sets nothing.
-        for m in re.finditer(r"^[ \t@]*(?:rem(?:[ \t].*)?|::.*)$", text, re.I | re.M):
-            reads.add((m.start(), m.end()))
-    else:
-        if _PS_DYNAMIC_RE.search(text):
-            return Sets((), True, family_name)
-        reads = set()
-        comments: list = []
-        for start, end, _name, _q, plain in _ps_references(text, comments):
-            if plain and not _PS_SETS_AFTER.match(text, end):
-                reads.add((start, end))
-        # A comment sets nothing: its words are left out as a reference's are.
-        reads.update(comments)
-        covered = set()
-        for m in _PS_REF_RE.finditer(text):
-            covered.add(m.start() + (2 if m.group(0).startswith("${") else 1))
-        # Every `env:` that is not in a `$env:NAME` or `${env:NAME}`, wherever it stands, may set any name.
-        if any(m.start() not in covered for m in _PS_ENV_ANY_RE.finditer(text)):
-            return Sets((), True, family_name)
-    spans = sorted(reads)
+        names, any_line = _cmd_sets(text)
+        if _CMD_UNORDERED_RE.search(text):
+            if any_line is not None:
+                return Sets((), True, family_name)
+            return Sets(names, False, family_name)
+        return Sets(names, False, family_name, names, any_line, text)
+    if _PS_DYNAMIC_RE.search(text):
+        return Sets((), True, family_name)
     names: set = set()
-    first: dict = {}
-    k = 0
-    line, last = 0, 0
-    for m in _WORD_RE.finditer(text):
-        while k < len(spans) and spans[k][1] <= m.start():
-            k += 1
-        if k < len(spans) and spans[k][0] <= m.start() < spans[k][1]:
-            continue
-        key = env_expr.fold(m.group(0))
-        names.add(key)
-        if family_name == "cmd":
-            line += text.count("\n", last, m.start())
-            last = m.start()
-            first.setdefault(key, line)
-    if family_name == "cmd" and ordered:
-        return Sets(names, False, family_name, first, any_line, text)
+    for _start, end, name, _q, _plain in _ps_references(text):
+        if _PS_SETS_AFTER.match(text, end):
+            names.add(env_expr.fold(name))
+    for m in _PS_REF_RE.finditer(text):
+        if _PS_SETS_AFTER.match(text, m.end()):
+            names.add(env_expr.fold(m.group(1) or m.group(2)))
+    covered = {m.start() + (2 if m.group(0).startswith("${") else 1) for m in _PS_REF_RE.finditer(text)}
+    # Every `env:` that is not in a `$env:NAME` or `${env:NAME}`, wherever it stands, may set any name.
+    if any(m.start() not in covered for m in _PS_ENV_ANY_RE.finditer(text)):
+        return Sets((), True, family_name)
     return Sets(names, False, family_name)
 
 

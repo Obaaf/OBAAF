@@ -39,3 +39,34 @@ jobs:
     env: {AGENT: claude}
     steps:
       - run: 'echo "$env:AGENT"'
+  # From the second review of 2d.25: a tool's name in prose, and `&` that runs another program.
+  pwsh-tool-named-in-prose:
+    runs-on: ubuntu-latest
+    env: {TOOL: aider, BOT: codex}
+    steps:
+      - shell: pwsh
+        run: |
+          Write-Host "Using $env:TOOL for review"
+          Write-Host "$env:BOT exec finished"
+  cmd-tool-named-in-prose:
+    runs-on: windows-latest
+    env: {TOOL: aider, MODEL: claude}
+    steps:
+      - shell: cmd
+        run: |
+          echo Using %TOOL% for review
+          echo %MODEL% -p 4
+  cmd-ampersand-runs-another-program:
+    runs-on: windows-latest
+    env: {MODEL: claude}
+    steps:
+      - shell: cmd
+        run: |
+          call setup.bat
+          echo Model %MODEL% & call build.cmd
+  pwsh-call-operator-on-another-program:
+    runs-on: windows-latest
+    env: {PROVIDER: claude}
+    steps:
+      - run: 'Add-Content $env:GITHUB_ENV "X=1"'
+      - run: '& ./scripts/eval.ps1 -Provider $env:PROVIDER'

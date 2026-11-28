@@ -88,3 +88,48 @@ jobs:
         run: 'Add-Content $env:GITHUB_ENV "AGENT=echo"'
       - shell: pwsh
         run: '& $env:AGENT --dangerously-skip-permissions -p x'
+  # From the second review of 2d.25.
+  pwsh-copied-into-a-variable:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: pwsh
+        run: |
+          $agent = $env:AGENT
+          & $agent --dangerously-skip-permissions -p x
+        env: {AGENT: claude}
+  pwsh-copied-after-github-env:
+    runs-on: ubuntu-latest
+    env: {AGENT: claude}
+    steps:
+      - shell: pwsh
+        run: 'Add-Content $env:GITHUB_ENV "X=1"'
+      - shell: pwsh
+        run: |
+          $c = "$env:AGENT --dangerously-skip-permissions -p x"
+          Invoke-Expression $c
+  pwsh-file-path-after-a-colon:
+    runs-on: windows-latest
+    env: {AGENT: claude}
+    steps:
+      - run: "Start-Process -FilePath:$env:AGENT -ArgumentList '--dangerously-skip-permissions','-p','x'"
+  cmd-copied-into-a-variable:
+    runs-on: windows-latest
+    steps:
+      - shell: cmd
+        run: |
+          echo Using AGENT
+          set BIN=%AGENT%
+          %BIN% --dangerously-skip-permissions -p x
+        env: {AGENT: claude}
+  cmd-call-label-sets-it:
+    runs-on: windows-latest
+    steps:
+      - shell: cmd
+        run: |
+          call :setup
+          %AGENT% --dangerously-skip-permissions -p x
+          exit /b
+          :setup
+          set AGENT=claude
+          exit /b
+        env: {AGENT: echo}
