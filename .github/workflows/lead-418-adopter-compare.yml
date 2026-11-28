@@ -1,0 +1,64 @@
+name: Compare adopter reports across the four open PRs
+on:
+  push:
+    branches: [lead/adopters-418-aa2a4a5]
+permissions:
+  contents: read
+jobs:
+  adopter-comparisons:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: c79b863d219d53e2c65f216d80c2e3b043781c86
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Compare fixed repositories on each pair of checker revisions
+        run: |
+          export TMPDIR="$RUNNER_TEMP/obaaf-temp"
+          mkdir "$TMPDIR"
+          git worktree add -q --detach "$RUNNER_TEMP/flagship" 73658d7366eaa250848ce693cb05976327c8cc20
+          git worktree add -q --detach "$RUNNER_TEMP/adoption" e49616ec3b1abe58e73273c852f2073e3dcb9f30
+          git worktree add -q --detach "$RUNNER_TEMP/combined" e49616ec3b1abe58e73273c852f2073e3dcb9f30
+          git config user.name 'Sean Keluo-Udeke'
+          git config user.email '55066947+seanudeke@users.noreply.github.com'
+          git -C "$RUNNER_TEMP/combined" merge --no-ff --no-commit aa2a4a57399818a3fb7d8af9a29a4f7d82bd7f68
+          test "$(git -C "$RUNNER_TEMP/combined" write-tree)" = 43a15e7f002d35b5c6a797110c7d34bb08036ec4
+          git -C "$RUNNER_TEMP/combined" commit -qm 'Combine the shell revision and adoption drafts' -m 'Assisted-by: ChatGPT (OpenAI)
+          Signed-off-by: Sean Keluo-Udeke <55066947+seanudeke@users.noreply.github.com>'
+          git -C "$RUNNER_TEMP/combined" merge --no-ff --no-commit c79b863d219d53e2c65f216d80c2e3b043781c86
+          git -C "$RUNNER_TEMP/combined" write-tree
+          git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
+          git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+          python - <<'PY'
+          import os, subprocess, sys
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"])
+          settings = root / "flagship"
+          sites = [
+              ("OBAAF", settings, settings / ".github/obaaf-settings.json", "medium", 0),
+              ("Expectrail", root / "expectrail", settings / "tests/fixtures/settings/live-expectrail-2026-11-13/snapshot.json", "low", 1),
+          ]
+          for label, before, after in [("#418 and #419 with adoption",root/"adoption", root/"combined")]:
+              for name, site, snapshot, threshold, expected in sites:
+                  for mode in ("text", "json", "sarif", "summary"):
+                      command = [sys.executable, "-m", "obaaf", "check", ".", "--settings", str(snapshot),
+                                 "--baseline", ".github/obaaf-baseline.json", "--fail-on", threshold]
+                      command.extend(["--summary"] if mode=="summary" else ["--format", mode])
+                      if name=="Expectrail":
+                          command.append("--no-fixes")
+                      outputs = []
+                      for source in (before, after):
+                          env = dict(os.environ, PYTHONPATH=str(source/"src"), PYTHONDONTWRITEBYTECODE="1")
+                          result = subprocess.run(command, cwd=site, env=env, capture_output=True)
+                          assert result.returncode==expected, (name, mode, result.stderr[-300:])
+                          assert b"git did not list the tracked files" not in result.stdout
+                          outputs.append((result.stdout, result.stderr, result.returncode))
+                      assert outputs[0]==outputs[1], (label,name,mode)
+                      print(label, name, mode, "matched", expected, flush=True)
+          PY
