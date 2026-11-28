@@ -270,22 +270,28 @@ jobs:
             with self.subTest(rel=rel):
                 link = self.root / rel
                 link.parent.mkdir(exist_ok=True)
-                os.symlink(target, link)
-                self.addCleanup(lambda link=link: os.path.lexists(link) and link.unlink())
-                for options in ((), ("--apply",)):
-                    status, text = self.invoke(*options)
-                    self.assertEqual(status, 1, text)
-                    self.assertIn(f"{root}: {rel} looks like a checker configuration", text)
-                    self.assertFalse(self.config.exists())
-                    self.assertFalse(os.path.lexists(self.workflow))
-                # The checker sees the same file once the workflow exists.
-                self.workflow.parent.mkdir(parents=True, exist_ok=True)
-                self.workflow.write_text("on: push\n")
-                with self.assertRaises(ConfigError) as error:
-                    Config.load(root)
-                self.assertIn(f"{root}: {rel} looks like", str(error.exception))
-                self.workflow.unlink()
-                link.unlink()
+                # Native separators: on Windows a relative link target written with `/` does not resolve
+                # once its target exists (found by the lead on native Windows, after #415), which D-122
+                # states as one of the ways `realpath`'s prediction can differ from the system.
+                os.symlink(os.path.normpath(target), link)
+                # Each case is cleaned up even when it fails, so the next does not see its files.
+                try:
+                    for options in ((), ("--apply",)):
+                        status, text = self.invoke(*options)
+                        self.assertEqual(status, 1, text)
+                        self.assertIn(f"{root}: {rel} looks like a checker configuration", text)
+                        self.assertFalse(self.config.exists())
+                        self.assertFalse(os.path.lexists(self.workflow))
+                    # The checker sees the same file once the workflow exists.
+                    self.workflow.parent.mkdir(parents=True, exist_ok=True)
+                    self.workflow.write_text("on: push\n")
+                    with self.assertRaises(ConfigError) as error:
+                        Config.load(root)
+                    self.assertIn(f"{root}: {rel} looks like", str(error.exception))
+                finally:
+                    for path in (self.workflow, self.config, link):
+                        if os.path.lexists(path):
+                            path.unlink()
 
     def test_a_link_the_system_does_not_resolve_is_not_a_lookalike_once_set_up(self):
         # Second review of #415: realpath lets `..` cancel a folder that does not exist, where the system
