@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 904dd22f7c758fba09f34cf11b8c87aebb023698
+          ref: 477d64bf69b77f496f7907cde754ae8e70dd1d66
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
@@ -20,7 +20,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if ((git rev-parse 'HEAD^{tree}') -ne '59648113ec02e6190e50a737bd39509be2e37bdc') { throw 'Unexpected source tree' }
+          if ((git rev-parse 'HEAD^{tree}') -ne '09a1e3bcbf686f1e162ba2e74d5fc77ba75b3e14') { throw 'Unexpected source tree' }
           $scratch = Join-Path $env:RUNNER_TEMP 'obaaf-junction'
           New-Item -Type Directory -Path $scratch | Out-Null
           $env:TMPDIR = $scratch
@@ -36,6 +36,16 @@ jobs:
           assert root == Path(os.environ['TMPDIR']).resolve()
           assert not any((p / '.git').exists() for p in (root, *root.parents))
           assert os.name == 'nt'
+          # Compare relative targets using Git-style slashes and the platform spelling.
+          for spelling in ('nested/sample.yml', os.path.join('nested', 'sample.yml')):
+              with tempfile.TemporaryDirectory() as folder:
+                  base = Path(folder)
+                  link = base / 'alias.yml'
+                  os.symlink(spelling, link)
+                  target = base / 'nested' / 'sample.yml'
+                  target.parent.mkdir()
+                  target.write_text('example')
+                  print('target', repr(spelling), 'readlink', repr(os.readlink(link)), 'is_file', link.is_file(), 'resolved', link.resolve(strict=False), flush=True)
           sys.path.insert(0, 'tests')
           case = 'test_fix_patch.FixPatchTest.test_windows_refuses_reparse_before_creating_patch'
           result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromNames([case, 'test_init.InitTests.test_a_link_that_only_inits_own_file_resolves_is_a_lookalike', 'test_init.InitTests.test_a_link_the_system_does_not_resolve_is_not_a_lookalike_once_set_up', 'test_init.InitTests.test_a_link_to_the_configuration_init_writes_is_not_a_lookalike', 'test_init.InitTests.test_alias_of_supported_config_is_accepted', 'test_init.InitTests.test_lookalikes_report_the_default_checker_error_without_writing']))
