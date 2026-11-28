@@ -261,7 +261,11 @@ class WhereTheToolIsNamedTest(unittest.TestCase):
         # The review's second way past: another shell reads the step's `env` too, once its script is read.
         self.assert_cannot_tell("$claudeOpts = @('-p')\n& $env:AGENT @claudeOpts -x", "pwsh", "claude-code",
                                 env={"AGENT": "claude"})
-        self.assert_cannot_tell("# picnic\n& $env:AGENT --auto", "pwsh", env={"AGENT": "cn"})
+        # Since slice 2d.25 (#411, D-153) the step's plain `env` value is put into `$env:AGENT`, so this is read as
+        # `& 'cn' --auto`: the warned option itself, where 2d.23 could only say "cannot tell".
+        got, errors = findings("# picnic\n& $env:AGENT --auto", "pwsh", env={"AGENT": "cn"})
+        self.assertEqual(errors, [])
+        self.assertIn(("medium", "command-option", "continue"), got)
 
     def test_a_warned_option_is_still_a_match(self):
         for shell, script in (("pwsh", f"& 'C:\\tools\\claude.exe' {SKIP} -p x"), ("cmd", "cn.exe --auto -p x"),
