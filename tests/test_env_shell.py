@@ -251,21 +251,39 @@ class ThePutInTest(unittest.TestCase):
 
 
 class TheScriptSetsTest(unittest.TestCase):
+    """A name standing anywhere in the script other than as a reference the shell expands may be set by it (from the
+    review: a list of setters was got past)."""
+
+    def sets(self, text, family, name="AGENT", at=None):
+        return shell_env.script_sets(text, family).may_set(name, len(text) if at is None else at)
 
     def test_pwsh(self):
-        self.assertEqual(shell_env.script_sets("$env:Agent = 'x'; $env:PATH.Split(';')", "pwsh"),
-                         (frozenset({"AGENT"}), False))
-        for text in ("Set-Item env:AGENT x", "[Environment]::SetEnvironmentVariable('A', 'x')", "iex $c",
-                     ". ./setup.ps1", "& ./setup.ps1", "Import-Module x", "Get-ChildItem Env:"):
+        self.assertFalse(self.sets("& $env:AGENT --x; $env:PATH.Split(';')", "pwsh"))
+        for text in ("$env:Agent = 'x'", "$env:AGENT, $b = 'claude', 1", "Set-Content -Path ('en'+'v:AGENT') x",
+                     "$t::$m('AGENT', 'claude')", "Set-Item env:X x", "[Environment]::SetEnvironmentVariable('A','x')",
+                     "$t = [Environment]; $t::$m('A'+'GENT', 'x')", "iex $c", ". ./setup.ps1", "& ./setup.ps1",
+                     "Import-Module x", "Get-ChildItem Env:", "Copy-Item a b", "$ExecutionContext.SessionState"):
             with self.subTest(text=text):
-                self.assertTrue(shell_env.script_sets(text, "pwsh")[1])
+                self.assertTrue(self.sets(text, "pwsh"))
 
-    def test_cmd(self):
-        self.assertEqual(shell_env.script_sets('set "Agent=x"\nset /a N=1\ncall :sub', "cmd"),
-                         (frozenset({"AGENT", "N"}), False))
-        for text in ("call setup.cmd", "set %N%=x", "set !N!=x"):
+    def test_cmd_counts_only_earlier_lines(self):
+        text = "%AGENT% --x\nset AGENT=echo\n%AGENT% --y"
+        self.assertFalse(self.sets(text, "cmd", at=0))
+        self.assertTrue(self.sets(text, "cmd"))
+        for text in ("se^t AGENT=claude\n%AGENT%", "set,AGENT=claude\n%AGENT%", "set;AGENT=claude\n%AGENT%",
+                     'set "Agent=x"\n%AGENT%', "call setup.cmd\n%AGENT%", "set %N%=x\n%AGENT%",
+                     "set !N!=x\n%AGENT%", ":a\n%AGENT%\nset AGENT=x\ngoto a"):
             with self.subTest(text=text):
-                self.assertTrue(shell_env.script_sets(text, "cmd")[1])
+                self.assertTrue(self.sets(text, "cmd", at=text.index("%AGENT%")))
+        self.assertFalse(self.sets("call %AGENT% --x", "cmd", at=5))
+        self.assertFalse(self.sets("call :sub\n%AGENT%", "cmd"))
+
+    def test_linear(self):
+        started = time.monotonic()
+        shell_env.script_sets("set " * 60_000, "cmd")
+        shell_env.script_sets("set a=b " * 60_000 + "\n%a%" * 20_000, "cmd").may_set("a", 10)
+        shell_env.script_sets("$env:A " * 60_000, "pwsh")
+        self.assertLess(time.monotonic() - started, 5)
 
 
 class TheLaunchersTest(unittest.TestCase):
@@ -305,3 +323,79 @@ class TheShellTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# The same command with the program (and, where it stands as a word of its own, the option) written out and named
+# through `env` (from the review of 2d.25): what the lanes and OBAAF-GHA-026 give must be the same.
+F = "--dangerously-skip-permissions"
+PWSH_TEMPLATES = [
+    "& {P} {F} -p x",
+    "& \"{P}\" {F} -p x",
+    "$out = & {P} {F} -p x",
+    "Start-Process -FilePath {P} -ArgumentList '" + F + "', '-p', 'x'",
+    "Start-Process {P} -ArgumentList '" + F + "','-p','x'",
+    "Start-Process -ArgumentList '" + F + "', '-p', 'x' -FilePath {P}",
+    "saps {P} '" + F + " -p x'",
+    "if ($true) {{ & {P} {F} -p x }}",
+    "Write-Host hi; & {P} {F} -p x",
+    "'x' | & {P} {F} -p",
+    "Write-Host 'nothing runs'; Write-Host {P}",
+]
+CMD_TEMPLATES = [
+    "{P} {F} -p x",
+    "@{P} {F} -p x",
+    "call {P} {F} -p x",
+    "start /wait {P} {F} -p x",
+    "cmd /d /c {P} {F} -p x",
+    "if 1==1 {P} {F} -p x",
+    "for %%i in (1) do {P} {F} -p x",
+    "{P} {F} -p x & echo done",
+    "echo {P} is installed",
+]
+
+
+class TheLiteralFormTest(unittest.TestCase):
+    """A command whose program or option comes from a plain `env` value gives what the same command written out
+    gives: the same lane and the same OBAAF-GHA-026."""
+
+    def results(self, cases):
+        jobs = ""
+        for name, runs_on, shell, run, env in cases:
+            shell_line = f"        shell: {shell}\n" if shell else ""
+            jobs += (f"  {name}:\n    runs-on: {runs_on}\n    steps:\n      - run: {json.dumps(run)}\n{shell_line}"
+                     f"        env: {json.dumps(env)}\n")
+        text = "on: workflow_dispatch\npermissions: {}\njobs:\n" + jobs
+        with TempDir() as tmp:
+            (tmp / ".github" / "workflows").mkdir(parents=True)
+            (tmp / ".github" / "CODEOWNERS").write_text("* @example/maintainers\n", encoding="utf-8")
+            (tmp / ".github" / "workflows" / "a.yml").write_text(text, encoding="utf-8")
+            _code, lanes, report = checked(tmp)
+        self.assertEqual(report["errors"], [])
+        found = {}
+        for f in report["findings"]:
+            if f["rule"] == "OBAAF-GHA-026":
+                found.setdefault(f["job"], []).append((f["severity"], f["kind"]))
+        return {job: (lanes.get(job), sorted(found.get(job, []))) for job in lanes}
+
+    def test_env_and_literal_agree(self):
+        cases, pairs = [], []
+        for family, templates, runners in (("pwsh", PWSH_TEMPLATES, [("windows-latest", None),
+                                                                    ("ubuntu-latest", "pwsh")]),
+                                           ("cmd", CMD_TEMPLATES, [("windows-latest", "cmd")])):
+            ref = (lambda n: f"$env:{n}") if family == "pwsh" else (lambda n: f"%{n}%")
+            for t, template in enumerate(templates):
+                for r, (runs_on, shell) in enumerate(runners):
+                    for option in (False, True):
+                        if option and "{F}" not in template:
+                            continue
+                        base = f"{family}-{t}-{r}-{int(option)}"
+                        literal = template.format(P="claude", F=F)
+                        named = template.format(P=ref("AGENT"), F=ref("FLAGS") if option else F)
+                        env = {"AGENT": "claude", "FLAGS": F}
+                        cases.append((base + "-lit", runs_on, shell, literal, env))
+                        cases.append((base + "-env", runs_on, shell, named, env))
+                        pairs.append((base, literal, named))
+        got = self.results(cases)
+        for base, literal, named in pairs:
+            with self.subTest(literal=literal, named=named):
+                self.assertEqual(got[base + "-env"], got[base + "-lit"])

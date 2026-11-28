@@ -2522,14 +2522,17 @@ class WorkflowRules:
         (`shell_env.script_sets`; where it may set any, none is put in). cmd then takes its carets out. The text is
         None where nothing is put in. `refused` is True where the step's `PutInBudget` or the workflow's ledger
         refused. `values` are the values the `env` may give a reference that were not put in (all of them where
-        refused): the script is read where one of them names the tool, so that what is left as written there is
-        "cannot tell". Made once for the step: the tools read after the first reuse it."""
+        refused): where one of them names the tool or holds a warned option, the script is read and every warned
+        option not found is "cannot tell" (from the review: the PowerShell and cmd readers say "cannot tell" for
+        `& $env:X` and `%X%`, not for `iex "$env:X ..."`). Made once for the step: the tools read after the first
+        reuse it."""
         run, family = source
         cache = self.__dict__.setdefault("_shell_put_ins", {})
         key = (step.seq, id(step.raw), id(run), family, tuple(trust_env))
         hit = cache.get(key)
         if hit is None:
-            sets, anything = shell_env.script_sets(run, family)
+            sets = shell_env.script_sets(run, family)
+            anything = sets.anything
             case = shell_env.case_of(family, job)
             lookup = shell_env.Lookup(scopes, trust_env, shell_env.PLAIN_VALUE_RE, numbers=True)
             # Every value a reference may be given, trusted and plain or not, by each way the runner may compare
@@ -2539,16 +2542,31 @@ class WorkflowRules:
             wide = shell_env.Lookup(scopes, numbers=True)
             modes = ("exact", "folded") if case == "both" else (case,)
 
-            def get(name: str):
-                if anything or env_expr.fold(name) in sets:
+            def get(name: str, at: int = -1):
+                if sets.may_set(name, at):
                     return None
                 return lookup.get(name, case)
             made = shell_env.put_in(run, family, get, budget)
-            done = made[2] if made is not None else frozenset()
+            # What is withheld: each reference the shell expands that was not put in (refused, set by the script,
+            # an untrusted scope, a value that is not plain, another letter case where the runner may compare either
+            # way, a member or an index after it), each name read in another form, and, where the script may set any
+            # name, each name it reads in any form and any quotes.
+            spots: list = []
+            for at, _e, name, in_string, plain in shell_env.references(run, family):
+                value = get(name, at)
+                if made is None or not plain or value is None or not shell_env._safe(value, family, in_string):
+                    spots.append((at, name))
+            spots += shell_env.other_reads(run, family)
+            if anything:
+                spots += shell_env.names_read(run, family)
             withheld: list = []
-            for name in shell_env.names_read(run, family):
-                if name not in done:
-                    withheld.extend(v for v in (wide.get(name, mode) for mode in modes) if v is not None)
+            context = shell_env.RunContext(run, family)
+            for at, name in dict.fromkeys(spots):
+                runs, line = context.runs(at)
+                for mode in modes:
+                    withheld.extend((value, runs, line) for value in wide.candidates(name, mode))
+            # One entry for each value, place and line (the line is the context's own text, kept by identity).
+            withheld = list({(v, runs, id(line)): (v, runs, line) for v, runs, line in withheld}.values())
             put = None
             if made is not None and made[2]:
                 put = _cmd_carets_out(made[0]) if family == "cmd" else made[0]
@@ -2585,6 +2603,14 @@ class WorkflowRules:
             family = shell_env.family(languages[id(parts[-1][0])])
             if family is not None and not parts[-1][1]:
                 shell_sources[id(parts[-1][0])] = (run, family)
+            elif family is None and shell_env.explicit_shell(step.raw, (job.raw, self.wf.raw)) is None and (
+                    "pwsh" in shell_env.runner_shells(job)):
+                # No `shell`, on a runner that may be Windows and may not (a matrix over both; from the review): read
+                # as PowerShell too, from a text of its own (the parts are kept by their ids).
+                ps_run = ("\x00" + run)[1:]
+                parts.append((ps_run, False))
+                languages[id(ps_run)] = "pwsh"
+                shell_sources[id(ps_run)] = (run, "pwsh")
         given = step.with_ if step.uses else {}
         script = given.get("script") if step.uses_action("actions/github-script") else None
         if isinstance(script, str):
@@ -2699,19 +2725,32 @@ class WorkflowRules:
                 if source is not None:
                     put, refused, values = self._shell_put_in(job, step, source, scopes, trust_env, budget)
                     read = text if put is None else put
+                # A value left out that names the tool or holds a warned option, where something on its line may run
+                # it (a launcher, the start of a command) or the line names the tool (`claude $env:FLAGS`).
+                lines_named: dict = {}
+
+                def line_names(line: str) -> bool:
+                    if id(line) not in lines_named:
+                        lines_named[id(line)] = agent_flags.names(line, programs, packages)
+                    return lines_named[id(line)]
+                withheld = [v for v, runs, line in values if (agent_flags.names(v, programs, packages) or any(
+                    option.casefold() in v.casefold() for flag in flags for option in flag["options"])) and (
+                    runs or line_names(line))]
                 if agent_flags.appears(text, programs, packages) or (
-                        read is not text and agent_flags.names(read, programs, packages)) or any(
-                        agent_flags.names(v, programs, packages) for v in values):
+                        read is not text and agent_flags.names(read, programs, packages)) or withheld:
                     reading.merge(agent_flags.read_script(read, programs, packages, flags, variables,
                                                           mentioned=agent_flags.mentions(read, programs, packages),
                                                           bash=False, loose=True,
                                                           language=languages.get(id(text), ""),
                                                           named=named_as_name()))
-                    if refused:
-                        # Past D-137's or D-138's bound the values are not put in: every warned option is "cannot
-                        # tell", as `agent_flags._put_in_unread` has it for bash.
+                    if refused or withheld:
+                        # Past D-137's or D-138's bound, or with a value that names the tool or holds a warned option
+                        # left out: every warned option not found is "cannot tell", as `agent_flags._put_in_unread`
+                        # has it for bash.
+                        why = agent_flags.PUT_IN_UNREAD if refused else "a value of its env the checker does not put in"
                         for flag in flags:
-                            reading.cannot_tell(flag, f"{agent_flags.PUT_IN_UNREAD}: " + agent_flags._fact_text(text))
+                            if flag["id"] not in reading.hits:
+                                reading.cannot_tell(flag, f"{why}: " + agent_flags._fact_text(text))
         for other, command_like in others:
             # Another input, an `env` value or a `docker://` command line that runs the program: one whose text
             # starts a command with it, or that holds the tool's letters in an input whose name says it is a

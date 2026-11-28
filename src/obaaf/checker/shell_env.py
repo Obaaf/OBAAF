@@ -26,6 +26,7 @@ What this module gives both readers:
 
 from __future__ import annotations
 
+import bisect
 import re
 
 from obaaf.checker import env_expr
@@ -55,6 +56,47 @@ def run_shell(step_raw, holders, runs_on) -> str:
         return "pwsh" if windows else "bash"
     first = shell.split()[0] if shell.split() else ""
     return first.rsplit("/", 1)[-1].lower()
+
+
+def explicit_shell(step_raw, holders) -> str | None:
+    """The `shell` a `run` step names, its own or its job's or workflow's `defaults.run.shell`; None where none does,
+    so the runner's default applies."""
+    shell = step_raw.get("shell") if isinstance(step_raw, dict) else None
+    if isinstance(shell, str):
+        return shell
+    for holder in holders:
+        defaults = holder.get("defaults") if isinstance(holder, dict) else None
+        run = defaults.get("run") if isinstance(defaults, dict) else None
+        if isinstance(run, dict) and isinstance(run.get("shell"), str):
+            return run["shell"]
+    return None
+
+
+def runner_shells(job) -> tuple:
+    """The shells a `run` step with no `shell` may be given on `job`'s runner (flagship slice 2d.25, from its review):
+    `("pwsh",)` where every set of labels GitHub may run it on names Windows, `("bash", "pwsh")` where some do and some
+    do not (`runs-on: ${{ matrix.os }}` over `ubuntu-latest` and `windows-latest`), `("bash",)` otherwise. A `runs-on`
+    whose labels cannot be resolved is read as `run_shell` reads it, by its labels as written. Kept on the job."""
+    if job is None:
+        return ("bash",)
+    known = getattr(job, "_obaaf_runner_shells", None)
+    if known is not None:
+        return known
+    raw = [str(label).lower() for label in job.runs_on]
+    try:
+        sets = job.runner_label_sets()
+    except Exception:       # a `runs-on` the reader refuses
+        sets = None
+    if sets:
+        windows = [any("windows" in str(label).lower() for label in labels) for labels in sets]
+        out = ("pwsh",) if all(windows) else ("bash", "pwsh") if any(windows) else ("bash",)
+    else:
+        out = ("pwsh",) if any("windows" in label for label in raw) else ("bash",)
+    try:
+        job._obaaf_runner_shells = out
+    except AttributeError:
+        pass
+    return out
 
 
 def run_language(step_raw, shell_name: str) -> str:
@@ -117,12 +159,15 @@ class Lookup:
                  numbers: bool = False) -> None:
         self.exact: dict = {}
         self.folded: dict = {}
+        self.folded_every: dict = {}
+        self.outside_ascii: list = []
         self.kept: list = []
         for number, scope in enumerate(scopes):
             if not isinstance(scope, dict):
                 continue
             ok_scope = trusted is None or (number < len(trusted) and trusted[number])
             here: dict = {}
+            every: dict = {}
             for name, value in scope.items():
                 if not isinstance(name, str):
                     continue
@@ -137,8 +182,15 @@ class Lookup:
                     here[key] = None
                 else:
                     here[key] = text
+                if text is not None:
+                    every.setdefault(key, []).append(text)
+                    if not name.isascii():
+                        self.outside_ascii.append(text)
             for key, text in here.items():
                 self.folded.setdefault(key, text)
+                # Every value of the nearest scope that sets the name, for `candidates`: where two names of it fold
+                # together, the runner keeps one of them.
+                self.folded_every.setdefault(key, every.get(key, []))
 
     def get(self, name: str, mode: str) -> str | None:
         """The value of `name` (None for none the checker knows): `mode` `exact` as written, `folded` without regard to
@@ -153,6 +205,18 @@ class Lookup:
         if mode == "folded":
             return folded
         return exact if exact == folded else None
+
+    def candidates(self, name: str, mode: str) -> list:
+        """Every value `name` may be given (`mode` as for `get`): as written, and without regard to case each value of
+        the nearest scope that sets it, and, for a name outside ASCII, any value whose name is outside ASCII."""
+        out: list = []
+        if mode in ("exact", "both"):
+            out.append(self.exact.get(name))
+        if mode in ("folded", "both"):
+            out.extend(self.folded_every.get(env_expr.fold(name), ()))
+            if not name.isascii():
+                out.extend(self.outside_ascii)
+        return list(dict.fromkeys(v for v in out if v is not None))
 
 
 def case_of(family_name: str, job) -> str:
@@ -198,6 +262,7 @@ _PS_REF_RE = re.compile(r"\$(?:\{(?i:env):(\w+)\}|(?i:env):(\w+))")
 # drive-qualified path (`:`), `?` (a name PowerShell 7 reads on). Such a reference is left as written.
 _PS_AFTER = frozenset(".[:?")
 _CMD_ARG_RE = re.compile(r"%~[A-Za-z]*[0-9]|%[0-9*]")
+_BLANK_TO_EOL = re.compile(r"[ \t\r\f\v]*\n")
 
 
 def _here_end(text: str, eol: int, closers: frozenset) -> int:
@@ -211,7 +276,7 @@ def _here_end(text: str, eol: int, closers: frozenset) -> int:
     return len(text)
 
 
-def _ps_references(text: str) -> list:
+def _ps_references(text: str, comments: list | None = None) -> list:
     """(start, end, name, in_string, plain) for each `$env:NAME` and `${env:NAME}` PowerShell expands in `text`: in
     code and in a double-quoted string or here-string, not in a single-quoted one, a comment, or after a backtick.
     `plain` is False where, in code, `.`, `[`, `:` or `?` follows (a member, an index, a longer name), which is more
@@ -227,15 +292,22 @@ def _ps_references(text: str) -> list:
                 continue
             if ch == "#" and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";|&({}"):
                 end = text.find("\n", i)
-                i = n if end == -1 else end
+                end = n if end == -1 else end
+                if comments is not None:
+                    comments.append((i, end))
+                i = end
                 continue
             if text.startswith("<#", i):
                 end = text.find("#>", i + 2)
-                i = n if end == -1 else end + 2
+                end = n if end == -1 else end + 2
+                if comments is not None:
+                    comments.append((i, end))
+                i = end
                 continue
             if ch == "@" and i + 1 < n and (text[i + 1] in _PS_SINGLE or text[i + 1] in _PS_DOUBLE):
-                eol = text.find("\n", i + 2)
-                if eol != -1 and not text[i + 2:eol].strip():
+                blank = _BLANK_TO_EOL.match(text, i + 2)
+                eol = blank.end() - 1 if blank else -1
+                if eol != -1:
                     if text[i + 1] in _PS_SINGLE:
                         i = _here_end(text, eol, _PS_SINGLE)
                     else:
@@ -294,6 +366,7 @@ def _cmd_references(text: str) -> list:
     has, whose name is then the part before the `:`."""
     out: list = []
     i, n = 0, len(text)
+    eol = -2            # the end of the line `at` is on, found once for each line
     while i < n:
         at = text.find("%", i)
         if at == -1:
@@ -305,10 +378,12 @@ def _cmd_references(text: str) -> list:
         if arg:
             i = arg.end()
             continue
+        if eol != -1 and eol < at:
+            eol = text.find("\n", at)
         close = text.find("%", at + 1)
-        eol = text.find("\n", at + 1)
         if close == -1 or (eol != -1 and eol < close):
-            i = at + 1
+            # No `%` closes it on its line: none further on the line does either.
+            i = n if eol == -1 else eol + 1
             continue
         name = text[at + 1:close]
         plain = bool(_CMD_NAME_RE.fullmatch(name))
@@ -335,11 +410,71 @@ _PS_ANY_NAME_RE = re.compile(r"(?i:env):\\?(\w+)|GetEnvironmentVariable\s*\(\s*[
 _CMD_ANY_NAME_RE = re.compile(r"%([^%\s:]+)(?::[^%\n]*)?%|!([^!\s:]+)(?::[^!\n]*)?!")
 
 
+# The names a script reads from its environment in a form `put_in` does not put in: PowerShell's provider paths
+# (`env:NAME`, `Env:\NAME`, not after `$` or `${`) and `GetEnvironmentVariable('NAME')`; cmd's `!NAME!`.
+_PS_OTHER_READ_RE = re.compile(r"(?<![$\w{])(?i:env):\\?(\w+)|GetEnvironmentVariable\s*\(\s*['\"\u2018\u2019\u201c\u201d]?(\w+)",
+                               re.I)
+_CMD_OTHER_READ_RE = re.compile(r"!([^!\s:]+)(?::[^!\n]*)?!")
+
+
+def other_reads(text: str, family_name: str) -> list:
+    """(start, name) for each name `text` reads in a form `put_in` does not put in."""
+    pattern = _PS_OTHER_READ_RE if family_name == "pwsh" else _CMD_OTHER_READ_RE
+    return [(m.start(), next(g for g in m.groups() if g)) for m in pattern.finditer(text)]
+
+
 def names_read(text: str, family_name: str) -> list:
-    """Every name `text` may read from its environment (`_PS_ANY_NAME_RE`, `_CMD_ANY_NAME_RE`), in order, once each:
-    what OBAAF-GHA-026 reads for the tool's name where it does not put a value in."""
+    """(start, name) for every name `text` may read from its environment, in any form and any quotes
+    (`_PS_ANY_NAME_RE`, `_CMD_ANY_NAME_RE`): what OBAAF-GHA-026 weighs where the script may set any name."""
     pattern = _PS_ANY_NAME_RE if family_name == "pwsh" else _CMD_ANY_NAME_RE
-    return list(dict.fromkeys(next(g for g in m.groups() if g) for m in pattern.finditer(text)))
+    return [(m.start(), next(g for g in m.groups() if g)) for m in pattern.finditer(text)]
+
+
+# What on a line may run what a reference there gives: a launcher (PowerShell's `&`, `.`, `iex`, `Invoke-Expression`,
+# `Start-Process`, `saps`, `Invoke-Command`; cmd's `call`, `start`, `cmd`; another shell), or the reference standing
+# where a command starts (after a separator, `do`, `else`, `then` or a cmd `if` condition). `may_run` reads the line the reference is on, with the lines a backtick or a caret continues.
+_LAUNCHER_RE = re.compile(r"(?:^|[\s;|({])(?:&|\.|iex|invoke-expression|start-process|saps|start|invoke-command|icm"
+                          r"|call|cmd|cmd\.exe|pwsh|powershell|bash|sh)(?=[\s\"'(\u2018\u2019\u201c\u201d]|$)", re.I)
+_COMMAND_START_RE = re.compile(
+    r"(?:(?:^|[;|&({])|(?<![\w-])(?:do|else|then)|(?<![\w-])if\s+(?:not\s+)?(?:/i\s+)?"
+    r"(?:(?:exist|defined|errorlevel|cmdextversion)\s+\S+|\S+\s*==\s*\S+|\S+\s+(?:equ|neq|lss|leq|gtr|geq)\s+\S+))"
+    r"\s*[@\"'\u2018\u2019\u201c\u201d]?$", re.I)
+
+
+_LOOK_BACK = 1000     # characters before a reference read for where a command starts
+
+
+class RunContext:
+    """Where something may run what a reference gives, for each reference of one script (`runs(at)`): a launcher on
+    its logical line (the lines a PowerShell backtick or a cmd caret at a line's end continues are one), or the
+    reference where a command starts, read in the `_LOOK_BACK` characters before it. The lines are found once and
+    each line is searched for a launcher once, so the cost is linear in the script however many references it has."""
+
+    def __init__(self, text: str, family_name: str) -> None:
+        self.text = text
+        mark = "`" if family_name == "pwsh" else "^"
+        self.starts: list = [0]
+        for m in re.finditer("\n", text):
+            if text[m.start() - 1:m.start()] != mark:
+                self.starts.append(m.end())
+        self.launcher: dict = {}
+
+    def runs(self, at: int) -> tuple:
+        """(whether something may run what the reference at `at` gives, its logical line)."""
+        k = bisect.bisect_right(self.starts, at) - 1
+        start = self.starts[k]
+        if k not in self.launcher:
+            end = self.starts[k + 1] - 1 if k + 1 < len(self.starts) else len(self.text)
+            line = self.text[start:end]
+            self.launcher[k] = (bool(_LAUNCHER_RE.search(line)), line)
+        launched, line = self.launcher[k]
+        if launched:
+            return True, line
+        back = max(start, at - _LOOK_BACK)
+        before = self.text[back:at]
+        if back > start:
+            before = "\x00" + before           # not the line's start
+        return bool(_COMMAND_START_RE.search(before.replace("\n", " "))), line
 
 
 def _safe(value: str, family_name: str, in_string: bool) -> bool:
@@ -355,11 +490,11 @@ def _safe(value: str, family_name: str, in_string: bool) -> bool:
 
 def put_in(text: str, family_name: str, lookup, budget=None) -> tuple | None:
     """(text, size, names) for `text` with each plain reference the shell expands (`references`) whose value
-    `lookup(name)` gives put in, the characters put in and the names put in; None when the step's `PutInBudget` runs out or the workflow's ledger refuses
-    (the budget's `ledger`, settled as `agent_flags._substitute` settles, by the step's number, the text and the
-    values put in). In PowerShell code a value is put in as a single-quoted string, one word as the variable is (a
-    plain value holds no quote); in a string as it is. In cmd a value is put in as it is, as cmd puts it in before it
-    reads the line; a name with a `:` or `=` is not put in."""
+    `lookup(name, offset)` gives put in, the characters put in and the names put in; None when the step's
+    `PutInBudget` runs out or the workflow's ledger refuses (the budget's `ledger`, settled as
+    `agent_flags._substitute` settles, by the step's number, the text and the values put in). In PowerShell code a
+    value is put in as a single-quoted string, one word as the variable is (a plain value holds no quote); in a
+    string as it is. In cmd a value is put in as it is, as cmd puts it in before it reads the line."""
     found = references(text, family_name)
     if not found:
         return text, 0, frozenset()
@@ -370,7 +505,7 @@ def put_in(text: str, family_name: str, lookup, budget=None) -> tuple | None:
     for start, end, name, in_string, plain in found:
         if not plain:
             continue
-        value = lookup(name)
+        value = lookup(name, start)
         if value is None or not _safe(value, family_name, in_string):
             continue
         if budget is not None and not budget.take(value):
@@ -391,41 +526,129 @@ def put_in(text: str, family_name: str, lookup, budget=None) -> tuple | None:
     return "".join(pieces), size, frozenset(named)
 
 
-# What can set an environment variable in a script, read the widest way. PowerShell: an assignment to `$env:NAME` or
-# `${env:NAME}` (`=`, `+=`, `??=` and the like) sets that name; any other `env:` (`Set-Item env:X`, `Remove-Item
-# Env:\X`, `cd env:`), `SetEnvironmentVariable`, `Invoke-Expression`, dot-sourcing, a `.ps1` run in the same process,
-# `Import-Module` and `Invoke-Command` may set any. cmd: `set NAME=...` (with `/a` or `/p`, quoted or not) sets that
-# name; a `set` whose name holds a variable (`set %N%=x`), and `call` of anything but a label, may set any.
-_PS_ASSIGN_RE = re.compile(r"\$\{?(?i:env):(\w+)\}?\s*(?:[-+*/%]|\?\?)?=(?!=)")
+# What can set an environment variable in a script, read the widest way (flagship slice 2d.25, from its review: a list
+# of setters was got past by `$env:AGENT, $b = 'claude', 1`, `Set-Content -Path ('en'+'v:AGENT')`, `$t::$m('AGENT',
+# ...)` and cmd's `se^t`, `set,AGENT=` and `set;AGENT=`). A name is taken as set by the script wherever it stands in the
+# script other than as a reference the shell expands (in PowerShell, one not followed by `,` or an assignment) or in a
+# comment; and any name may be set where PowerShell's script holds another `env:`, the `Environment` class, the
+# session state, `Invoke-Expression`, `Import-Module`, `Invoke-Command`, a provider cmdlet that can write a computed
+# path (`Set-Item`, `New-Item`, `Set-Content`, `Add-Content`, `Clear-Item`, `Remove-Item`, `Rename-Item`, `Copy-Item`,
+# `Move-Item` and their aliases), dot-sourcing or a `.ps1` or `.psm1`, or cmd's a `call` of anything but a label or a
+# `set` whose name holds a variable. cmd's carets are taken out first, as cmd takes them out.
+_PS_SETS_AFTER = re.compile(r"\s*(?:,|(?:[-+*/%]|\?\?)?=(?!=))")
 _PS_ENV_ANY_RE = re.compile(r"env:", re.I)
-_PS_DYNAMIC_RE = re.compile(r"SetEnvironmentVariable|Invoke-Expression|\biex\b|Import-Module|\bipmo\b|Invoke-Command"
-                            r"|\bicm\b|\.ps1\b|\.psm1\b|Environment::|(?:^|[;|&({}\s])\.\s+\S", re.I | re.M)
-_CMD_SET_RE = re.compile(r"\bset\s+(?:/[ap]\s+)?\"?\s*([^=\"\n]*?)\s*=", re.I)
-_CMD_DYNAMIC_RE = re.compile(r"\bcall\s+(?!:)\S", re.I)
+_PS_DYNAMIC_RE = re.compile(
+    r"Environment\s*\]|Environment::|SessionState|ExecutionContext|Invoke-Expression|\biex\b|Import-Module|\bipmo\b"
+    r"|Invoke-Command|\bicm\b|\.ps1\b|\.psm1\b|(?:Set|New|Clear|Remove|Rename|Copy|Move)-Item|(?:Set|Add)-Content"
+    r"|(?<![\w-])(?:si|ni|sc|ac|cli|ri|rni|cpi|mi|del|erase|rm|rmdir|rd|ren|mv|cp|copy|move)(?![\w-])"
+    r"|(?:^|[;|&({}\s])\.\s+\S", re.I | re.M)
+_CMD_CALL_RE = re.compile(r"\bcall[\s,;=]+(?!:)\S", re.I)
+_CMD_SET_START_RE = re.compile(r"\bset[\s,;=]+", re.I)
+_WORD_RE = re.compile(r"\w+")
 
 
-def script_sets(text: str, family_name: str) -> tuple:
-    """(names, any): the names, folded, the script may set itself, and whether it may set any name."""
-    names: set = set()
-    if family_name == "pwsh":
+def _cmd_computed_set(text: str) -> bool:
+    """Whether a cmd `set` gives a name that holds a variable (`set %N%=x`, `set !N!=x`): a `%` or `!` between the
+    `set` and the first `=` after it on its line. Each line's `=` and marks are found once (bisect), so the cost
+    is not the square of a line of many `set`s (the review's case)."""
+    for line in text.split("\n"):
+        starts = list(_CMD_SET_START_RE.finditer(line))
+        if not starts:
+            continue
+        equals = [i for i, ch in enumerate(line) if ch == "="]
+        marks = [0]
+        for ch in line:
+            marks.append(marks[-1] + (ch in "%!"))
+        for m in starts:
+            j = bisect.bisect_left(equals, m.end())
+            if j < len(equals) and marks[equals[j]] - marks[m.end()] > 0:
+                return True
+    return False
+
+
+def _first_dynamic_line(text: str) -> int | None:
+    """The first line of a cmd script with a `call` of anything but a label or a `set` whose name holds a variable."""
+    for number, line in enumerate(text.split("\n")):
+        if _CMD_CALL_RE.search(line) or _cmd_computed_set(line):
+            return number
+    return None
+
+
+class Sets:
+    """What a script may set itself (`script_sets`): `may_set(name, at)` says whether the reference to `name` at
+    offset `at` may read a value the script set rather than its `env`. In PowerShell any place in the script counts
+    (functions, loops and scripts it runs can set a name before a reference that stands earlier). In cmd only a `set`
+    or a `call` on an earlier line counts, since cmd puts a line's `%NAME%` in when it reads the line, unless the
+    script holds `goto`, which can run an earlier line again."""
+
+    def __init__(self, names, anything: bool, family_name: str, lines: dict | None = None,
+                 any_line: int | None = None, text: str = "") -> None:
+        self.names, self.anything, self.family = frozenset(names), anything, family_name
+        self.lines = lines          # cmd: the first line each folded name is set on, where order counts
+        self.any_line = any_line    # cmd: the first line of a `call` or a computed `set`, where order counts
+        # Where each line starts, so a reference's line is found by bisection (the script's lines are the same with
+        # its carets taken out, which `script_sets` reads, as in the text the references are found in).
+        self.starts = [0] + [m.end() for m in re.finditer("\n", text)] if lines is not None else []
+
+    def may_set(self, name: str, at: int) -> bool:
+        if self.lines is None:
+            return self.anything or env_expr.fold(name) in self.names
+        line = bisect.bisect_right(self.starts, max(at, 0)) - 1
+        if self.any_line is not None and self.any_line < line:
+            return True
+        first = self.lines.get(env_expr.fold(name))
+        return first is not None and first < line
+
+
+def script_sets(text: str, family_name: str) -> Sets:
+    """What the script may set itself (`Sets`). One pass over the script's words, so linear in it."""
+    if family_name == "cmd":
+        # The carets out, as cmd takes them out (`se^t`), with the line breaks kept, so that each line is the line
+        # the references are on.
+        text = text.replace("^", "")
+        ordered = not re.search(r"\bgoto\b", text, re.I)
+        any_line = _first_dynamic_line(text)
+        if not ordered and any_line is not None:
+            return Sets((), True, family_name)
+        reads = {(start, end) for start, end, _name, _q, plain in _cmd_references(text) if plain}
+        # A `rem` or `::` line sets nothing.
+        for m in re.finditer(r"^[ \t@]*(?:rem(?:[ \t].*)?|::.*)$", text, re.I | re.M):
+            reads.add((m.start(), m.end()))
+    else:
         if _PS_DYNAMIC_RE.search(text):
-            return frozenset(), True
-        for m in _PS_ASSIGN_RE.finditer(text):
-            names.add(env_expr.fold(m.group(1)))
-        # Every `env:` that is not in a `$env:NAME` or `${env:NAME}` (read, or assigned to above), wherever it stands,
-        # may set any name (`Set-Item env:X`, `"env:$n"`).
-        covered = {m.start() + (2 if m.group(0).startswith("${") else 1) for m in _PS_REF_RE.finditer(text)}
+            return Sets((), True, family_name)
+        reads = set()
+        comments: list = []
+        for start, end, _name, _q, plain in _ps_references(text, comments):
+            if plain and not _PS_SETS_AFTER.match(text, end):
+                reads.add((start, end))
+        # A comment sets nothing: its words are left out as a reference's are.
+        reads.update(comments)
+        covered = set()
+        for m in _PS_REF_RE.finditer(text):
+            covered.add(m.start() + (2 if m.group(0).startswith("${") else 1))
+        # Every `env:` that is not in a `$env:NAME` or `${env:NAME}`, wherever it stands, may set any name.
         if any(m.start() not in covered for m in _PS_ENV_ANY_RE.finditer(text)):
-            return frozenset(), True
-        return frozenset(names), False
-    if _CMD_DYNAMIC_RE.search(text):
-        return frozenset(), True
-    for m in _CMD_SET_RE.finditer(text):
-        name = m.group(1)
-        if "%" in name or "!" in name:
-            return frozenset(), True
-        names.add(env_expr.fold(name))
-    return frozenset(names), False
+            return Sets((), True, family_name)
+    spans = sorted(reads)
+    names: set = set()
+    first: dict = {}
+    k = 0
+    line, last = 0, 0
+    for m in _WORD_RE.finditer(text):
+        while k < len(spans) and spans[k][1] <= m.start():
+            k += 1
+        if k < len(spans) and spans[k][0] <= m.start() < spans[k][1]:
+            continue
+        key = env_expr.fold(m.group(0))
+        names.add(key)
+        if family_name == "cmd":
+            line += text.count("\n", last, m.start())
+            last = m.start()
+            first.setdefault(key, line)
+    if family_name == "cmd" and ordered:
+        return Sets(names, False, family_name, first, any_line, text)
+    return Sets(names, False, family_name)
 
 
 # ------------------------------------------------------------------------------------------ launchers
@@ -463,31 +686,32 @@ def command_forms(segment: str, family_name: str | None) -> list:
             return []
         first = words[0].lower()
         if first in _PS_START:
-            file_path, arguments, positional = None, [], []
+            # The program is `-FilePath`'s value (`-FilePath x`, `-FilePath:x`, any start of the name) or the first
+            # word that is no parameter; everything else but the parameters and their values is an argument, in any
+            # order, commas splitting (the review found `-ArgumentList` before `-FilePath`, and `-FilePath:x`).
+            file_path, rest = None, []
             j = 1
             while j < len(words):
                 word = words[j]
-                if any(_parameter(word, switch) for switch in _PS_START_SWITCHES):
+                head, colon, tail = word.partition(":")
+                if _parameter(head, "-filepath", 1):
+                    if colon:
+                        file_path = tail or (words[j + 1] if j + 1 < len(words) else None)
+                        j += 1 if tail else 2
+                    else:
+                        file_path = words[j + 1] if j + 1 < len(words) else None
+                        j += 2
+                    continue
+                if any(_parameter(head, switch) for switch in _PS_START_SWITCHES) or _parameter(
+                        head, "-argumentlist") or head.lower() in ("-args", "-arguments"):
                     j += 1
                     continue
-                if _parameter(word, "-filepath", 1):
-                    file_path = words[j + 1] if j + 1 < len(words) else None
-                    j += 2
-                    continue
-                if _parameter(word, "-argumentlist") or word.lower() in ("-args", "-arguments"):
-                    arguments = words[j + 1:]
-                    break
-                if word.startswith("-") and j + 1 < len(words) and file_path is not None:
-                    j += 2
-                    continue
-                positional.append(word)
+                rest.append(word)
                 j += 1
-            if file_path is None and positional:
-                file_path, positional = positional[0], positional[1:]
-            if not arguments:
-                arguments = positional
+            if file_path is None and rest:
+                file_path, rest = rest[0], rest[1:]
             if file_path:
-                out.append(" ".join([file_path] + [w.strip(",") for w in arguments for w in w.split(",") if w]))
+                out.append(" ".join([file_path] + [w for word in rest for w in word.split(",") if w]))
         elif first in _PS_EXPRESSION:
             rest = words[1:]
             if rest and _parameter(rest[0], "-command"):
@@ -510,8 +734,15 @@ def command_forms(segment: str, family_name: str | None) -> list:
         while j < len(words) and words[j].startswith("/"):
             j += 1
         out.extend(" ".join(words[k:]) for k in (j, j + 1) if k < len(words))
-    elif first in ("cmd", "cmd.exe") and len(words) > 2 and words[1].lower() in ("/c", "/k", "/s/c"):
-        out.append(" ".join(words[2:]))
+    elif first in ("cmd", "cmd.exe"):
+        # `cmd /d /s /c ...`: the options before `/c` or `/k`, in any number (the review found `/d /c`).
+        j = 1
+        while j < len(words) and words[j].startswith("/"):
+            if re.search(r"/[ck]$", words[j], re.I):
+                if j + 1 < len(words):
+                    out.append(" ".join(words[j + 1:]))
+                break
+            j += 1
     elif stripped:
         out.append(" ".join(words))
     return out

@@ -2238,12 +2238,14 @@ class _MadeText:
     """What `Step.env_put_in` makes of some command lines and `env` values (flagship slice 2d.17): the
     characters of values it puts in, or None where the step's own bound stops it; the text, made only once a
     step's use of it fits the workflow's bound (None until then); the values, kept so that their ids, which the
-    key holds, stay theirs; and what `agent_text` found in the text, by the patterns it looked for."""
+    key holds, stay theirs; and what `agent_text` found in the text, by the patterns it looked for. `probe`
+    (flagship slice 2d.25): for a PowerShell or cmd step, the lines of the text in which a value of one word was put
+    in, which `agent_text` searches as it searches the step's own lines."""
 
-    __slots__ = ("text", "size", "kept", "found")
+    __slots__ = ("text", "size", "kept", "found", "probe")
 
     def __init__(self, text, size, kept) -> None:
-        self.text, self.size, self.kept, self.found = text, size, kept, {}
+        self.text, self.size, self.kept, self.found, self.probe = text, size, kept, {}, None
 
 
 _ENV_NAME_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
@@ -2453,17 +2455,36 @@ class Step:
             else:
                 here: list = []
                 # In PowerShell and cmd, also the program a launcher runs (`Start-Process -FilePath $env:AGENT`, `call
-                # %AGENT%`; flagship slice 2d.25), as OBAAF-GHA-026's reader of those shells reads it.
+                # %AGENT%`; flagship slice 2d.25), as OBAAF-GHA-026's reader of those shells reads it, and the
+                # command that matched is kept beside the reading, so that it is found where the reading is searched.
                 family = self.shell_family() if self.run else None
                 for variant in _readings(put):
-                    if any(matches_any(commands, candidate, anchored=True) for segment in command_segments(variant)
-                           for form in [segment, *shell_env.command_forms(segment, family)]
-                           for candidate in _first_word_forms(form)):
+                    hit = next((candidate for segment in command_segments(variant)
+                                for form in [segment, *shell_env.command_forms(segment, family)]
+                                for candidate in _first_word_forms(form)
+                                if matches_any(commands, candidate, anchored=True)), None)
+                    if hit is not None:
                         here.append(variant)
+                        if family is not None:
+                            here.append(hit)
                         break
                 made.found[signature] = tuple(here)
                 found.extend(here)
-        text = "\n".join(p for p in [own, worked if worked != own else None, *found] if p)
+        probe = made.probe if made is not None and put is not None else None
+        # A PowerShell or cmd step's own lines are read for the program a launcher runs too (`@claude -p x`,
+        # `Start-Process claude -ArgumentList '-p','x'`, `call claude ...`), as OBAAF-GHA-026's readers of those
+        # shells read them, so that a program written out and one put in give the same lane (flagship slice 2d.25).
+        family = self.shell_family() if self.run else None
+        if family is not None and own:
+            cache = self.__dict__.setdefault("_launched", {})
+            signature = (own, tuple((p.pattern, p.flags) for p in commands))
+            if signature not in cache:
+                cache[signature] = [candidate for variant in _readings(own) for segment in command_segments(variant)
+                                    for form in shell_env.command_forms(segment, family)
+                                    for candidate in _first_word_forms(form)
+                                    if matches_any(commands, candidate, anchored=True)][:1]
+            found.extend(cache[signature])
+        text = "\n".join(p for p in [own, worked if worked != own else None, probe, *found] if p)
         return "\n".join(dict.fromkeys(v for v in _readings(text) if v))
 
     def env_expressions_text(self, own: str | None = None) -> str | None:
@@ -2569,8 +2590,11 @@ class Step:
 
     def shell_family(self) -> str | None:
         """`pwsh` or `cmd` where the step's `run` script is given to PowerShell or cmd, as OBAAF-GHA-026 reads it
-        (`shell_env.run_shell` and `run_language`: the step's `shell`, its job's and workflow's `defaults`, pwsh on a
-        runner labelled Windows); None for any other shell (flagship slice 2d.25)."""
+        (`shell_env.run_shell` and `run_language`: the step's `shell`, its job's and workflow's `defaults`); with none,
+        `pwsh` where the runner may be Windows (`shell_env.runner_shells`: a matrix over Windows and Linux too, whose
+        put-in text holds bash's as well); None for any other shell (flagship slice 2d.25)."""
+        if shell_env.explicit_shell(self.raw, self.inherited) is None:
+            return "pwsh" if "pwsh" in shell_env.runner_shells(self.job) else None
         holders = self.inherited
         runs_on = self.job.runs_on if self.job is not None else ()
         return shell_env.family(shell_env.run_language(self.raw, shell_env.run_shell(self.raw, holders, runs_on)))
@@ -2699,15 +2723,32 @@ class Step:
         if put_ins is not None and not put_ins.lanes.settle((self.seq, key), made.size):
             return made, None, put_ins.unread
         if made.text is None:
-            texts = []
+            # Line by line, since no reference spans a line: a line in which a value of one word (a program's name,
+            # `C:\tools\claude.exe`) was put in is kept as the probe, which `agent_text` reads as it reads the
+            # step's own lines (from the review: `if 1==1 %AGENT% -p x`, `cmd /d /c %AGENT% ...` and `-ArgumentList`
+            # before `-FilePath` are read for a literal program and were not for one put in). A value with a space
+            # is read only command by command, as D-139 reads a put-in text, so prose in it is not an agent.
+            texts, probes = [], []
             for values in readings:
                 found = iter(values)
+                lines = []
+                for line in base.split("\n"):
+                    single = []
 
-                def one(m, found=found):
-                    value = next(found)
-                    return m.group(0) if value is None else value
-                texts.append(pattern.sub(one, base))
+                    def one(m, found=found, single=single):
+                        value = next(found)
+                        if value is None:
+                            return m.group(0)
+                        if value and not any(ch.isspace() for ch in value):
+                            single.append(True)
+                        return value
+                    made_line = pattern.sub(one, line)
+                    lines.append(made_line)
+                    if single:
+                        probes.append(made_line)
+                texts.append("\n".join(lines))
             made.text = "\n".join(texts)
+            made.probe = "\n".join(probes) or None
         return made, made.text, None
 
     @property
