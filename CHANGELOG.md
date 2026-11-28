@@ -4,6 +4,15 @@ All notable changes to OBAAF. The format follows [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### `obaaf init` stops before writing where the first check would refuse a look-alike configuration
+
+Slice 3.3c, from #321 item 3 (`review-gpt` #415); decision D-122. A file named like a checker configuration where the checker does not read one (`.obaaf.yml`, `obaaf.yaml` at the top folder, `.github/.OBAAF.yaml` and the like, in any letter case) makes `obaaf check` stop with status 2. `obaaf init --apply` still wrote both files beside such a file, so the first check of the setup the user had just reviewed refused to run.
+
+- **Now init stops with status 1, in preview and with `--apply`, before it writes either file**, and prints `Conflict:` with the checker's own message, naming the file and the three places the checker reads. It shows its diffs as before. This also applies to a repository already set up, where init used to print "Already matches" twice and end with 0.
+- **Not a look-alike:** a file that is the same file as one the checker reads, such as `.github/OBAAF.yml` on a file system that ignores letter case.
+- **From the review:** the files init would write count. A link named like a configuration whose target is the workflow init writes is reported now, as the first check would report it; one whose target is `.github/obaaf.yml` is not, because the checker then reads it. Before the files exist, the target is worked out as `os.path.realpath` does, which can differ from the system, for example for a `..` after a missing folder or a file, a chain of more than 40 links, or letter case (#416).
+- `obaaf check` is unchanged: on this repository and the first adopter its reports are byte-identical with `flagship` `d08cdd9`.
+
 ### The JSON release decision no longer says a pre-approval run may be uploaded
 
 Slice 2d.24, from #394; decision D-152. `obaaf verify release --pre-approval` skips the approvals (and on Jenkins the checks that tie the publishing build to the tag build), so that the approver can read the rest first. Its JSON decision had `"allowed": true` when the rest passed, the same as a full verification that may be uploaded; the only sign was a warning string. A program that read `allowed` could take a pre-approval run for a release that may be uploaded, the misreading #391 fixed for the text report.
