@@ -55,32 +55,11 @@ jobs:
           git config user.name 'Sean Keluo-Udeke'
           git config user.email '55066947+seanudeke@users.noreply.github.com'
           git merge --no-ff --no-commit b705c8577d5d76750fd3f86236c388ccadbba973
-          git commit -qm 'Combine the shell reader with the adoption drafts for verification' -m 
-          python "$RUNNER_TEMP/acceptance.py" after
-          python -m unittest -v test_short_names.WhereTheToolIsNamedTest.test_a_name_in_the_steps_env test_docs.LinksTest.test_relative_links_and_anchors_resolve test_fix_patch
-      - name: Read the producer and consumer fixtures through the combined checker
-        run: |
-          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
-          python - <<'PY'
-          from test_egress_recognised import workflow, run_check, FIREWALL, SHA, VERIFIED
-          from test_egress_artifact_producers import upload
-          for shell, invocation, runner in [('pwsh','& $env:TOOL -p review','ubuntu-24.04-firewall'), ('cmd','%TOOL% -p review','windows-latest')]:
-              steps=f"      - shell: {shell}\n        run: '{invocation}'\n        env: {{TOOL: claude}}\n"+upload()
-              src=workflow(steps,runs_on=runner).replace('  agent:', '  assemble:')
-              for command,wanted in [('cat result/report.txt',[]),('sh result/report.txt',['read'])]:
-                  wf=src+f"  read:\n    needs: assemble\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/download-artifact@{SHA}\n        with: {{name: report, path: result}}\n      - run: {command}\n"
-                  result=run_check(wf,config={'lanes':{}}, policy=FIREWALL)
-                  found=[f.job for f in result.findings if f.rule=='OBAAF-GHA-027']
-                  controls=[f.controls[0] for f in result.findings if f.rule=='OBAAF-GHA-020' and f.job=='assemble']
-                  assert len(controls)==1 and found==wanted
-                  if shell=='pwsh':assert controls[0].verdict==VERIFIED and 'can miss' in controls[0].detail
-                  print(shell,command,controls[0].verdict,found)
-          PY
-Assisted-by: ChatGPT (OpenAI)\nSigned-off-by: Sean Keluo-Udeke <55066947+seanudeke@users.noreply.github.com>'
+          git commit -qm 'Combine the shell reader with the adoption drafts for verification' -m $'Assisted-by: ChatGPT (OpenAI)\nSigned-off-by: Sean Keluo-Udeke <55066947+seanudeke@users.noreply.github.com>'
           git merge --no-ff --no-commit c79b863d219d53e2c65f216d80c2e3b043781c86
           git write-tree
           python "$RUNNER_TEMP/acceptance.py" after
-          python -m unittest -v test_short_names.WhereTheToolIsNamedTest.test_a_name_in_the_steps_env
+          python -m unittest -v test_short_names.WhereTheToolIsNamedTest.test_a_name_in_the_steps_env test_docs.LinksTest.test_relative_links_and_anchors_resolve test_fix_patch
       - name: Read the producer and consumer fixtures through the combined checker
         run: |
           export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
