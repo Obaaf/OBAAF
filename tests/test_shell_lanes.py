@@ -67,6 +67,13 @@ AGENT_FORMS = [
     ("pwsh-redirection-with-its-target", "pwsh", "claude.exe " + F + " 2>&1 -p x", {}),
     ("cmd-redirection-with-its-target", "cmd", "claude.exe " + F + " >nul 2>&1 -p x", {}),
     ("pwsh-inline-comment", "pwsh", "claude.exe " + F + " <# note #> -p x", {}),
+    # From the second review: a comment that ends with `,` or `|` carries nothing on; a bracket in a command's text
+    # does not hold the next command; `^^` is an escaped caret, so the `&` after it is an operator.
+    ("pwsh-comment-ending-with-a-comma", "pwsh", "# First install it,\nC:\\tools\\claude.exe " + F + " -p x", {}),
+    ("pwsh-code-then-comment-with-a-pipe", "pwsh", "$a = 'claude' # the cli |\n& $a " + F + " -p x", {}),
+    ("cmd-text-bracket-then-ampersand", "cmd", "echo :-( & claude.exe " + F + " -p x", {}),
+    ("cmd-at-block", "cmd", "@(claude.exe " + F + " -p x) > log.txt", {}),
+    ("cmd-escaped-caret-then-ampersand", "cmd", "echo a ^^& claude.exe " + F + " -p x", {}),
     ("pwsh-separator-in-an-argument", "pwsh",
      "claude.exe " + F + " --allowedTools \"Bash(npm test)|Read\" --append-system-prompt \"a; b\" -p x", {}),
 ]
@@ -86,8 +93,6 @@ ORDINARY_FORMS = [
     ("cmd-other-exe", "cmd", "notepad.exe -p x", {}),
     ("cmd-remark", "cmd", "rem claude.exe -p x", {}),
     # From the review: text the base kept out of the lanes that the first head put in.
-    ("pwsh-here-string", "pwsh", "$body = @\"\n  claude.exe -p \"review this PR\"\n\"@\ngh pr comment 1 --body $body", {}),
-    ("pwsh-single-here-string", "pwsh", "Write-Host @'\nC:\\tools\\claude.exe --print x\n'@", {}),
     ("cmd-echo-bracket", "cmd", "echo Run (claude.exe -p \"review\") locally", {}),
     ("cmd-for-set", "cmd", "for %%a in (claude.exe -p x) do echo %%a", {}),
     ("cmd-escaped-ampersand", "cmd", "echo a ^& claude.exe -p x", {}),

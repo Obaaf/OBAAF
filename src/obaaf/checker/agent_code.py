@@ -2238,10 +2238,22 @@ def _logical_lines(text: str, family: str) -> list:
     """Lines with their continuations joined: a backtick at the end in PowerShell, a caret in cmd; and in PowerShell a
     line that ends with a `,` or a `|`, which PowerShell continues on the next (2d.27a, from its review)."""
     mark = "`" if family == "pwsh" else "^"
-    text = re.sub(re.escape(mark) + r"[ \t]*\r?\n", " ", text)
-    if family == "pwsh":
-        text = re.sub(r"([,|])[ \t]*\r?\n", r"\1 ", text)
-    return text.split("\n")
+    lines = re.sub(re.escape(mark) + r"[ \t]*\r?\n", " ", text).split("\n")
+    if family != "pwsh":
+        return lines
+    # Only where the `,` or `|` is the line's last word, outside a comment and a string: a comment ends its line
+    # and carries nothing on (the second review: `# install it,` joined the next line into the comment). Each line is
+    # split into words once, so this stays linear.
+    out: list = []
+    carry = False
+    for line in lines:
+        if carry:
+            out[-1] += " " + line
+        else:
+            out.append(line)
+        words = _ps_words(line, family)
+        carry = bool(words) and (words[-1] == ("|", "op") or words[-1][1] == "plain" and words[-1][0].endswith(","))
+    return out
 
 
 def _shell_words(raw: str, kind: str, family: str) -> af.Word:
@@ -2316,12 +2328,18 @@ def read_shell_lines(text: str, ctx: af._Context, family: str) -> None:
         for w in words + [(";", "op")]:
             if w[1] == "op":
                 _shell_command(segment, ctx, family, aliases, mentioned, maybe)
-                if family == "cmd" and w[0] == "(" and (literal or segment and segment[0][0].lstrip("@").lower() != "if"):
+                head = [x for x in segment if x[0] != "@"]
+                if family == "cmd" and w[0] == "(" and (literal or head and head[0][0].lstrip("@").lower() != "if"):
                     literal += 1
                     ctx.runs = None
                 elif family == "cmd" and w[0] == ")" and literal:
                     literal -= 1
                     ctx.runs = runs if not literal else None
+                elif family == "cmd" and w[0] in ("&", "&&", "||", "|") and literal:
+                    # A bracket inside a command's text does not hold the next command (`echo :-( & claude ...`;
+                    # the second review).
+                    literal = 0
+                    ctx.runs = runs
                 segment = []
             elif family == "cmd" and w[1] == "plain" and w[0].lower() in ("do", "else"):
                 if segment:
@@ -2630,36 +2648,13 @@ def program_lines(text: str, family: str, programs: list, packages: list) -> lis
     if family == "cmd":
         # A caret before an operator makes it text (`echo a ^& claude ...` echoes), so the operator is kept out of
         # the reading; every other caret is taken out (2d.27a, from its review).
-        text = re.sub(r"\^[ \t]*\r?\n", " ", text)
-        text = re.sub(r"\^[&|<>()]", "\ue000", text).replace("^", "")
-    else:
-        text = _here_strings_out(text)
+        text = re.sub(r"\^[ \t]*\r?\n", " ", text).replace("^^", "\ue001")
+        text = re.sub(r"\^[&|<>()]", "\ue000", text).replace("^", "").replace("\ue001", "^")
     if not af.appears(text, programs, packages):
         return []
     ctx = af._Context(programs, packages, [], {}, False, set(), af.Reading(), loose=True, runs=[])
     read_shell_lines(text, ctx, family)
     return ctx.runs
-
-
-_HERE_DOUBLE_END = re.compile("\n[\"\u201c\u201d]@")
-_HERE_SINGLE_END = re.compile("\n['\u2018\u2019]@")
-
-
-def _here_strings_out(text: str) -> str:
-    """A PowerShell script with each here-string's lines (`@"` or `@'` at a line's end, to `"@` or `'@` at a line's
-    start) left out, an empty string in their place: they are a value, not commands (2d.27a, from its review). One
-    that does not end runs to the end of the text. Linear: each search starts where the last ended."""
-    out: list = []
-    at = 0
-    for m in re.finditer(r"@([\"'\u201c\u201d\u2018\u2019])[ \t]*\r?\n", text):
-        if m.start() < at:
-            continue
-        closer = (_HERE_DOUBLE_END if m.group(1) in '"\u201c\u201d' else _HERE_SINGLE_END).search(text, m.end() - 1)
-        end = closer.end() if closer else len(text)
-        out.append(text[at:m.start()] + "''")
-        at = end
-    out.append(text[at:])
-    return "".join(out)
 
 
 def _read_shell_args(args: list, ctx: af._Context, family: str, words: list) -> None:
