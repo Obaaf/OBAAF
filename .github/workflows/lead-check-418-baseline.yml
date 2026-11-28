@@ -56,3 +56,38 @@ jobs:
           if merged:
               merge("#423/#422 + #366/#297", merged, adoption)
           PY
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Rehearse the catalogue resolution in the runner checkout
+        run: |
+          export TMPDIR="$RUNNER_TEMP" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          git checkout -q --detach b27fee9a07c7d5f6525c026fb510980972d55e20
+          git merge --no-ff -m 'Temporary guide integration' 6b8f81bc1a1c1913224f0fb1a381707de8d5ce88
+          if git merge --no-ff --no-commit e49616ec3b1abe58e73273c852f2073e3dcb9f30; then exit 1; fi
+          python - <<'PY'
+          import subprocess
+          from pathlib import Path
+          profile = "src/obaaf/data/profile.yaml"
+          spec = "spec/profile.md"
+          tests = "tests/test_todo_catalog.py"
+          unmerged = subprocess.check_output(["git", "diff", "--name-only", "--diff-filter=U"], text=True)
+          assert set(unmerged.splitlines()) == {profile, spec, tests}, unmerged
+          subprocess.run(["git", "checkout", "--ours", "--", profile, spec, tests], check=True)
+          for file, anchor, updated in [
+              (profile, "OBAAF-GHA-022, OBAAF-JEN-001", "OBAAF-GHA-022, OBAAF-GHA-027, OBAAF-JEN-001"),
+              (tests, '    "OBAAF-GHA-028": {""},', '    "OBAAF-GHA-027": {""},\n    "OBAAF-GHA-028": {""},'),
+          ]:
+              path = Path(file)
+              content = path.read_text(encoding="utf-8")
+              assert content.count(anchor) == 1, file
+              path.write_text(content.replace(anchor, updated), encoding="utf-8")
+          PY
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+          python -m obaaf docs build
+          git add -- spec/profile.md src/obaaf/data/profile.yaml tests/test_todo_catalog.py
+          git diff --exit-code
+          git write-tree
+          python -m obaaf catalog
+          python -m obaaf docs build --check
+          python -m unittest -v test_todo_catalog test_docs test_site_claims test_first_run test_templates_install_docs test_todo_upgrade
