@@ -1,13 +1,16 @@
-name: Check the combined upgrade instructions
+name: Exercise the walkthrough's Windows junction test
 on:
   push:
     branches: [lead/recheck-418-aa2a4a5]
 permissions:
   contents: read
 jobs:
-  combined-guide:
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
+  junction:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -17,40 +20,14 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.13'
-      - name: Combine the four pinned PR heads
+      - name: Reproduce the integrated tree and exercise its native junction boundary
         run: |
           git config user.name 'Sean Keluo-Udeke'
           git config user.email '55066947+seanudeke@users.noreply.github.com'
-          git merge --no-ff --no-commit 014d9be19840362e21ab329b64c79e597e31fdb9
-          git commit -qm 'Rehearse the updated upgrade guide with the adoption drafts' -m 'Assisted-by: ChatGPT (OpenAI)
-          Signed-off-by: Sean Keluo-Udeke <55066947+seanudeke@users.noreply.github.com>'
-          git merge --no-ff --no-commit c79b863d219d53e2c65f216d80c2e3b043781c86
-          git write-tree
-      - name: Verify that the published explanations survive integration
-        run: |
-          export TMPDIR="$RUNNER_TEMP" PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src:$PWD/tests"
+          git merge --no-ff --no-commit 155a0020bfd8ce1c0580692887c0fb393f7c2cbd
+          test "$(git write-tree)" = 463a7c65a5af741e4ce20f5673113cca803a8640
+          export TMPDIR="$RUNNER_TEMP" TMP="$RUNNER_TEMP" TEMP="$RUNNER_TEMP" PYTHONDONTWRITEBYTECODE=1
           if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
-          python - <<'PY'
-          from pathlib import Path
-          import subprocess
-          for path in ('CHANGELOG.md', 'docs/upgrading.md'):
-              patch = subprocess.check_output(
-                  ['git', 'diff', '--unified=0', '9acb088', '014d9be', '--', path], text=True)
-              added = [line[1:] for line in patch.splitlines() if line.startswith('+') and not line.startswith('+++')]
-              actual = Path(path).read_text().splitlines()
-              assert len(added) == 1 and actual.count(added[0]) == 1, path
-              assert 'command-computed' in added[0] and 'command-option' in added[0], path
-              print(path, 'contains the exact new upgrade note once')
-          for ref, path, marker in [
-              ('14c406a', 'docs/upgrading.md', '| An agent job uploads an artifact'),
-              ('14c406a', 'CHANGELOG.md', 'OBAAF-GHA-027 reports a job'),
-              ('d884604', 'docs/upgrading.md', 'On 2026-11-20 UTC, direct migration'),
-          ]:
-              old = subprocess.check_output(['git', 'show', f'{ref}:{path}'], text=True)
-              expected, = [line for line in old.splitlines() if line.startswith(marker)]
-              assert Path(path).read_text().splitlines().count(expected) == 1, (ref, path)
-              print(path, 'preserves the paragraph from', ref)
-          PY
           python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
-          python -m obaaf docs build --check
-          python -m unittest -v test_docs test_first_run test_templates_install_docs test_todo_upgrade
+          cd tests
+          python -m unittest -v test_fix_patch.FixPatchTest.test_windows_refuses_reparse_before_creating_patch
