@@ -7,7 +7,7 @@ permissions:
 jobs:
   adopter-comparisons:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -26,12 +26,11 @@ jobs:
           git worktree add -q --detach "$RUNNER_TEMP/combined" e49616ec3b1abe58e73273c852f2073e3dcb9f30
           git config user.name 'Sean Keluo-Udeke'
           git config user.email '55066947+seanudeke@users.noreply.github.com'
-          git -C "$RUNNER_TEMP/combined" merge --no-ff --no-commit aa2a4a57399818a3fb7d8af9a29a4f7d82bd7f68
-          test "$(git -C "$RUNNER_TEMP/combined" write-tree)" = 43a15e7f002d35b5c6a797110c7d34bb08036ec4
+          git -C "$RUNNER_TEMP/combined" merge --no-ff --no-commit b705c8577d5d76750fd3f86236c388ccadbba973
           git -C "$RUNNER_TEMP/combined" commit -qm 'Combine the shell revision and adoption drafts' -m 'Assisted-by: ChatGPT (OpenAI)
           Signed-off-by: Sean Keluo-Udeke <55066947+seanudeke@users.noreply.github.com>'
           git -C "$RUNNER_TEMP/combined" merge --no-ff --no-commit c79b863d219d53e2c65f216d80c2e3b043781c86
-          git -C "$RUNNER_TEMP/combined" write-tree
+          test "$(git -C "$RUNNER_TEMP/combined" write-tree)" = 7bca6762f8bbc1988cfe5bc0a69dd949926e63b7
           git clone --quiet --no-checkout https://github.com/Expectrail/Expectrail.git "$RUNNER_TEMP/expectrail"
           git -C "$RUNNER_TEMP/expectrail" checkout --quiet --detach de1ddd65cbad237d2ca32eed4c62b13ba645a6d3
           python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
@@ -62,3 +61,10 @@ jobs:
                       assert outputs[0]==outputs[1], (label,name,mode)
                       print(label, name, mode, "matched", expected, flush=True)
           PY
+      - name: Run the full suite on the verified four-PR tree
+        run: |
+          cd "$RUNNER_TEMP/combined"
+          export TMPDIR="$RUNNER_TEMP/obaaf-temp" PYTHONPATH="$PWD/src:$PWD/tests" PYTHONDONTWRITEBYTECODE=1
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+          python -m unittest discover -s tests -v
