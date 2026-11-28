@@ -1,0 +1,51 @@
+name: Verify the combined shell and adoption drafts
+on:
+  push:
+    branches: [lead/verify-418-4b93bfa]
+permissions:
+  contents: read
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          ref: 14c406ada254991f07ddbeae72d49e645a6b5dc7
+          persist-credentials: false
+      - name: Recreate the private integration tree
+        run: |
+          git config user.name 'Sean Keluo-Udeke'
+          git config user.email '55066947+seanudeke@users.noreply.github.com'
+          guide=d884604e00e7ef660a0e13667581dc8430d33a38
+          shell_head=4b93bfae2244bfd2df1e3dfbfa295f5cf58e48f6
+          if git merge --no-ff --no-commit "$guide"; then exit 1; fi
+          test "$(git diff --name-only --diff-filter=U)" = docs/from-report-to-gate.md
+          blob=d5ec9c91a7ebfb90100fa4d920b35243455130ac
+          curl -fsSL -H 'Accept: application/vnd.github.raw+json' "https://api.github.com/repos/Obaaf/OBAAF/git/blobs/$blob" -o docs/from-report-to-gate.md
+          test "$(git hash-object docs/from-report-to-gate.md)" = "$blob"
+          git add docs/from-report-to-gate.md
+          test "$(git write-tree)" = 276f7df6fdcf2e88e4bd4e045638577773c69214
+          git commit -qm 'Reconcile the previously validated adoption walkthrough' -m 'Assisted-by: ChatGPT (OpenAI)' -m 'Signed-off-by: Sean Keluo-Udeke <55066947+seanudeke@users.noreply.github.com>'
+          git merge --no-ff --no-commit "$shell_head"
+          git commit -qm 'Verify the shell reader with the adoption drafts' -m 'Assisted-by: ChatGPT (OpenAI)' -m 'Signed-off-by: Sean Keluo-Udeke <55066947+seanudeke@users.noreply.github.com>'
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Verify the tree and install the checker
+        run: |
+          test "$(git rev-parse 'HEAD^{tree}')" = 6ed8d80843d1e2b06e70d4b3c36c4c0f2c33fa05
+          mkdir "$RUNNER_TEMP/obaaf-test"
+          echo "TMPDIR=$RUNNER_TEMP/obaaf-test" >> "$GITHUB_ENV"
+          python -m pip install --constraint actions/setup-obaaf/constraints.txt -e ".[keys]"
+      - name: Validate the catalogue, generated docs, site and repository gate
+        run: |
+          obaaf catalog
+          obaaf docs build --check
+          python site/build.py --output "$RUNNER_TEMP/site"
+          obaaf check . --settings .github/obaaf-settings.json --baseline .github/obaaf-baseline.json --fail-on medium
+      - name: Run the complete acceptance suite
+        run: |
+          if git -C "$TMPDIR" rev-parse --git-dir 2>/dev/null; then exit 1; fi
+          python -m unittest discover -s tests -v
