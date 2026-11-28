@@ -44,11 +44,12 @@ jobs:
           path.write_text(result, encoding="utf-8")
           PY
           git add -- src/obaaf/checker/rules.py
-          git diff --cached --check
+          test "$(git rev-parse :docs/bypass-attempts.md)" = "$(git rev-parse f13262d4805b280bb4cc9ba61a2614affbfdb2b2:docs/bypass-attempts.md)"
+          git diff --cached --check -- . ':(exclude)docs/bypass-attempts.md'
           git commit --no-edit
           git worktree add -q --detach "$RUNNER_TEMP/before-tests" HEAD
           git merge --no-ff --no-edit 5554d5cb1d16ad98c8d66c02ed373fa04e559e37
-          git diff --check 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e HEAD
+          git diff --check 6fe8cd177220a1d1d2e6dfabbb78e89162f3a78e HEAD -- . ':(exclude)docs/bypass-attempts.md'
           test "$(git diff --name-only HEAD^1 HEAD)" = tests/test_fix_patch.py
           echo "Integration tree $(git rev-parse HEAD^{tree})"
           git merge-base --is-ancestor d884604e00e7ef660a0e13667581dc8430d33a38 e49616ec3b1abe58e73273c852f2073e3dcb9f30
