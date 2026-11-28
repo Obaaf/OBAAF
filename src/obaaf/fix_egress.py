@@ -208,10 +208,9 @@ def run(args, catalog=None):
             "For the checker to verify the egress control, the job runs on GitHub-hosted ubuntu-24.04 "
             "without a container; no other step and no job or workflow env holds a credential; the job "
             "cannot request OIDC tokens or the models permission; the allow-list holds literal hosts with "
-            "no public suffix; and no step follows the confined step. A possible artifact upload in this job makes "
-            "otherwise verified egress and key isolation 'cannot tell', even for inspection-only uploads: an upload "
-            "step, an action other than actions/checkout, download-artifact and cache (an actions/setup- action "
-            "counts), or a script other than plain echo lines (npm ci or make, before the confined step or after it). "
+            "no public suffix; only recognised artifact uploads may follow the confined step. An upload alone "
+            "leaves producer egress credit intact. A possible upload makes key isolation 'cannot tell'. "
+            "Unread local actions or scripts can also withhold egress credit. "
             "Keep later jobs from running or loading the agent's output. The conditions this job does not meet are "
             "listed below.",
             f"Checked on a private copy of {shown!r}, job {args.job!r}:",

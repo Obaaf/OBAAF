@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 from obaaf import agent_tools
 from obaaf.catalog import Catalog
 from obaaf.checker import agent_code
-from obaaf.checker import agent_flags
+from obaaf.checker import agent_flags, artifact_consumers
 from obaaf.checker import egress as egress_mod
 from obaaf.checker import env_expr
 from obaaf.checker import expr as expr_mod
@@ -1364,7 +1364,8 @@ class WorkflowRules:
 
     def __init__(self, workflow: Workflow, catalog: Catalog, protected: dict | None = None,
                  agents: dict | None = None, firewall: "egress_mod.FirewallPolicy | None" = None,
-                 settings: SettingsEvidence | None = None) -> None:
+                 settings: SettingsEvidence | None = None, artifact_sources=None) -> None:
+        self.artifact_sources = artifact_sources if artifact_sources is not None else artifact_consumers.uploads([workflow])
         self.wf = workflow
         self.catalog = catalog
         self.detection = catalog.detection
@@ -1415,6 +1416,7 @@ class WorkflowRules:
             self.script_injection(job)
             self.runner_file_injection(job)
             self.agent_rules(job)
+            self.artifact_consumer(job)
             self.agent_tool_installs(job)
             self.agent_tool_settings(job)
             self.release_rules(job)
@@ -1467,7 +1469,7 @@ class WorkflowRules:
             return
         view = _through_view(self.wf, self.detection, self.agents)
         second = WorkflowRules(view, self.catalog, protected=self.protected, agents=self.agents,
-                               firewall=self.firewall, settings=self.settings)
+                               firewall=self.firewall, settings=self.settings, artifact_sources=self.artifact_sources)
         second._through = True
         second._problems = self.wf.problems      # a problem the second pass finds is the file's
         found = second.run()
@@ -2642,6 +2644,15 @@ class WorkflowRules:
         }
         self.add("OBAAF-GHA-020", job.line, templates[kind], job, kind=kind, controls=[egress], **values, **agents)
 
+    def artifact_consumer(self, job: Job) -> None:
+        for source, download, step, path in artifact_consumers.consumers(self.wf, job, self.artifact_sources):
+            self.add("OBAAF-GHA-027", step.line,
+                     "Job '{job}' downloads artifact '{artifact}' in '{download}' from agent job '{producer}' "
+                     "({workflow}). Step '{step}' can run '{path}' from the download with the consuming job's "
+                     "network and permissions. Review the artifact as data before running its contents.",
+                     job, step, artifact=source.name, producer=source.job,
+                     workflow=source.workflow, download=download.name, path=path)
+
     # -------------------------------------------------------------- GHA-025
     _INSTALL_SCRIPT_LIMIT = 400_000     # characters of one step's scripts, after variables are put in
     # Programs that run what they are given on standard input, or as the text of `-c`, as code.
@@ -3633,8 +3644,6 @@ class WorkflowRules:
         "actions/checkout", "actions/download-artifact", "actions/cache", "actions/cache/save",
         "actions/cache/restore",
     })
-    # Of those, the ones with no post step, by their action.yml.
-    _NO_POST_ACTIONS = frozenset({"actions/download-artifact", "actions/cache/restore"})
 
     # Literal arguments only. The step's shell must be known, but errexit and pipefail
     # do not affect whether one of these commands uploads an artifact.
@@ -3686,37 +3695,7 @@ class WorkflowRules:
         commands = (self._LITERAL_COMMAND.fullmatch(line) for line in lines if line and not line.startswith("#"))
         return all(match and match[1] in programs for match in commands)
 
-    def _script_steers_action(self, job: Job) -> str | None:
-        """GitHub's firewall route only (reviews of #357, run `ouzel`): the agent runs there as a step of its own,
-        with the runner's file commands. A step that runs a script the checker does not read as plain `echo`,
-        `pwd`, `true` or `:` lines (the agent's own, or an install, whose packages' scripts run) can write
-        `GITHUB_ENV` and `GITHUB_PATH`, which change what later steps run, the post steps of actions used before
-        it included (actions/checkout's runs `git`, found through the `PATH`). An action runs with the token that
-        uploads artifacts. Both are read from the runner's and the actions' code, not run. An action before every
-        such script that has no post step (`_NO_POST_ACTIONS`), and OBAAF's egress action at a listed commit,
-        whose own steps read nothing a workflow can set for them (slices 2c.9 to 2c.12), are not counted. Under
-        OBAAF's egress action the confined command cannot reach those files (slice 2c.9), so this is not read
-        on that route."""
-        releases = self.detection.get("egress_action_releases") or ()
-        scripts = [step for step in job.steps
-                   if step.uses is None and not self._literal_script(job, step, self._PLAIN_COMMANDS)]
-        if not scripts:
-            return None
-        first = scripts[0]
-        for step in job.steps:
-            if step.uses is None or (step.confines and step.uses.partition("@")[2] in releases):
-                continue
-            where = f"step '{one_line(first.name, 80)}' in job '{one_line(job.id, 80)}' runs a script, which can change"
-            if step.index > first.index:
-                return (f"{where} through GITHUB_ENV or GITHUB_PATH what step '{one_line(step.name, 80)}', which runs "
-                        "after it, runs, and an action runs with the token that uploads artifacts")
-            if step.clean_action not in self._NO_POST_ACTIONS:
-                return (f"{where} through GITHUB_ENV or GITHUB_PATH what the post step of step "
-                        f"'{one_line(step.name, 80)}', used before it, runs if the action has one (actions/checkout's "
-                        "has), and an action runs with the token that uploads artifacts")
-        return None
-
-    def _artifact_upload(self, job: Job) -> str | None:
+    def _artifact_upload(self, job: Job, *, egress: bool = False) -> str | None:
         """Return producer-side evidence. A later job's existence or behavior is immaterial."""
         direct_agents = set((self.detection.get("agent_installs") or {}).values())
         releases = self.detection.get("egress_action_releases") or ()
@@ -3729,7 +3708,11 @@ class WorkflowRules:
             action = step.clean_action
             where = f"step '{one_line(step.name, 80)}' in job '{one_line(job.id, 80)}'"
             if action in ("actions/upload-artifact", "actions/upload-artifact/merge", "actions/upload-pages-artifact"):
-                return f"{where} uploads an artifact"
+                if not egress:
+                    return f"{where} uploads an artifact"
+                if self._upload_env_steers(job, step):
+                    return f"{where} uploads an artifact, but {steered}"
+                continue
             if step.uses is not None:
                 ref = step.uses.partition("@")[2]
                 if step.confines and ref in releases:
@@ -3768,7 +3751,16 @@ class WorkflowRules:
             rank = {VERIFIED: 0, CANNOT_TELL: 1, NOT_MET: 2}
             best = min(readings, key=lambda r: rank[r.verdict])     # the first of the best, in the order above
             conditions = tuple(c for reading in readings for c in reading.conditions)
-            return Control(self.EGRESS_NAME, best.verdict, best.detail, self.EGRESS_ID, conditions), best.kind, best.values
+            detail = best.detail
+            if best.verdict == VERIFIED:
+                detail += (" This verdict covers the producing job. A later job can run uploaded files with its own "
+                           "network and credentials. The checker follows actions/upload-artifact and actions/download-artifact "
+                           "in this workflow and named workflow_run subscriptions, when it can match the artifact "
+                           "and execution path. It recognizes literal workspace action manifests and selected script and build "
+                           "commands. It can miss execution through wrappers, other tools or dynamically selected commands. "
+                           "Other actions, downloads in scripts, computed values, other repositories, "
+                           "caches and job outputs can carry files or code beyond that check.")
+            return Control(self.EGRESS_NAME, best.verdict, detail, self.EGRESS_ID, conditions), best.kind, best.values
         declared = job.env.get("OBAAF_EGRESS") or self.wf.env.get("OBAAF_EGRESS")
         kind, values = ("declared", {"declared": str(declared)}) if declared else ("none", {})
         if declared:
@@ -3856,9 +3848,6 @@ class WorkflowRules:
                 unsure.append(f"the policy allows {one_line(', '.join(wide[:5]), 120)}, which is or has under it "
                               "a public suffix (where anyone can register a name), and the firewall's README does "
                               "not say whether an allowed name covers the names under it")
-        upload = self._artifact_upload(job) or self._script_steers_action(job)
-        if upload:
-            unsure.append(f"{upload}. The job's network restriction does not extend to its artifact in another job")
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             listed = ", ".join(policy.allow) or "nothing"
@@ -4642,7 +4631,7 @@ class WorkflowRules:
                               "and the path may reach /tmp or the confined command's output")
                 continue
             if not before:
-                if step.clean_action in ("actions/upload-artifact", "actions/upload-artifact/merge"):
+                if step.clean_action in ("actions/upload-artifact", "actions/upload-artifact/merge", "actions/upload-pages-artifact"):
                     continue
                 after.append(where)
             elif refs:
@@ -4655,13 +4644,13 @@ class WorkflowRules:
             group(unsure, after, " can run after it or beside it, and the checker cannot tell "
                   "whether it runs or loads anything the command wrote (an actions/upload-artifact step is "
                   "read as an upload instead)")
-        upload = self._artifact_upload(job)
+        upload = self._artifact_upload(job, egress=True)
         if upload:
-            unsure.append(f"{upload}. The job's network restriction does not extend to its artifact in another job")
+            unsure.append(f"{upload}. The checker cannot establish what this step runs outside the confined command")
         verdict = egress_mod.worst(problems, unsure)
         if verdict == VERIFIED:
             detail = (f"the agent's command runs under OBAAF's egress action at a commit OBAAF lists as released, "
-                      f"allowing {one_line(', '.join(allow_shown), 200)}, and no other step runs after it. "
+                      f"allowing {one_line(', '.join(allow_shown), 200)}, and no later step other than an artifact upload was recognised. "
                       f"{self._leaks(placements)}")
         else:
             detail = egress_mod.joined(problems or unsure)

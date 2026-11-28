@@ -21,13 +21,13 @@ ROUTES = {
 
 
 class ArtifactProducerTest(unittest.TestCase):
-    def test_upload_changes_producer_verdict_without_a_visible_consumer(self):
+    def test_visible_upload_preserves_producer_egress_without_a_consumer(self):
         for route, (runner, steps, baseline_key) in ROUTES.items():
             for action_name in (None, "upload-artifact", "upload-pages-artifact"):
                 with self.subTest(route=route, upload=action_name):
                     body = steps if action_name is None else steps + "\n" + upload(action_name)
                     result = run_check(workflow(body, runs_on=runner), policy=FIREWALL)
-                    expected = VERIFIED if action_name is None else CANNOT_TELL
+                    expected = VERIFIED
                     self.assertEqual(verdict(egress(result)), expected)
                     finding = secret_finding(result)
                     controls = {control.id: control.verdict for control in finding.controls}
@@ -35,7 +35,89 @@ class ArtifactProducerTest(unittest.TestCase):
                     key = CANNOT_TELL if action_name and route == "action" else baseline_key
                     self.assertEqual(controls["key-out-of-reach"], key)
                     egress_state = next(f.state for f in result.findings if f.rule == "OBAAF-GHA-020")
-                    self.assertEqual(egress_state, "fixed" if action_name is None else "cannot-tell")
+                    self.assertEqual(egress_state, "fixed")
+
+    def test_steered_upload_withholds_action_egress_credit(self):
+        runner, steps, _ = ROUTES["action"]
+        body = steps + "\n" + upload() + "\n        env: {OPENSSL_CONF: unused.cnf}"
+        result = run_check(workflow(body, runs_on=runner))
+        self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+        self.assertIn("can make it run code the checker did not read", egress(result).controls[0].detail)
+
+    def test_only_the_job_that_could_run_downloaded_code_gets_the_finding(self):
+        _, steps, _ = ROUTES["action"]
+        producer = workflow(steps + "\n" + upload())
+        for command, reported in (("cat result/report.txt", False), ("echo ./result/report.txt", False),
+                                  ("sh result/report.txt", True), ("sh -eu result/report.txt", True),
+                                  ("python -u -- result/report.txt", True), ("bash -n result/report.txt", False),
+                                  ("sh result/unrelated.sh", False),
+                                  ("./elsewhere/report.txt", False)):
+            with self.subTest(command=command):
+                consumer = ("  read:\n    needs: agent\n    runs-on: ubuntu-24.04\n    steps:\n"
+                            f"      - uses: actions/download-artifact@{SHA}\n"
+                            "        with: {name: report, path: result}\n"
+                            f"      - name: inspect\n        run: {command}\n")
+                result = run_check(producer + consumer)
+                found = [f for f in result.findings if f.rule == "OBAAF-GHA-027"]
+                self.assertEqual([(f.job, f.step) for f in found], [("read", "inspect")] if reported else [])
+                self.assertEqual(verdict(egress(result)), VERIFIED)
+                self.assertIn("other repositories", egress(result).controls[0].detail)
+                self.assertIn("can miss execution through wrappers", egress(result).controls[0].detail)
+                unrelated = run_check(producer + consumer.replace("name: report", "name: another"))
+                self.assertFalse(any(f.rule == "OBAAF-GHA-027" for f in unrelated.findings))
+
+    def test_workspace_local_action_reads_the_downloaded_manifest(self):
+        _, steps, _ = ROUTES["action"]
+        for manifest in ("action.yml", "action.yaml"):
+            producer = workflow(steps + "\n" + upload().replace("report.txt", manifest))
+            for reference, reported in (("./result", True), ("./tools", False), ("$/result", False)):
+                with self.subTest(manifest=manifest, reference=reference):
+                    consumer = ("  read:\n    needs: agent\n    runs-on: ubuntu-24.04\n    steps:\n"
+                                f"      - uses: actions/download-artifact@{SHA}\n"
+                                "        with: {name: report, path: result}\n"
+                                f"      - name: Use action\n        uses: {reference}\n")
+                    checked = run_check(producer + consumer)
+                    findings = [f for f in checked.findings if f.rule == "OBAAF-GHA-027"]
+                    expected = [("read", "Use action", f"result/{manifest}")] if reported else []
+                    self.assertEqual([(f.job, f.step, f.facts["path"]) for f in findings], expected)
+
+    def test_repository_scorer_receives_downloaded_json_as_data(self):
+        _, steps, _ = ROUTES["action"]
+        producer = workflow(steps + "\n" + upload().replace("report.txt", "report.json"))
+        reader = ("  score:\n    needs: agent\n    runs-on: ubuntu-24.04\n    steps:\n"
+                  f"      - uses: actions/download-artifact@{SHA}\n"
+                  "        with: {name: report, path: result}\n"
+                  "      - run: python tools/score.py result/report.json\n")
+        checked = run_check(producer + reader)
+        self.assertFalse(any(f.rule == "OBAAF-GHA-027" for f in checked.findings))
+
+    def test_build_target_in_downloaded_workspace_is_reported_on_build(self):
+        for route, (runner, steps, _) in ROUTES.items():
+            with self.subTest(route=route):
+                archive = upload().replace("report.txt", "'${{ steps.agent.outputs.workspace }}'")
+                producer = workflow(steps + "\n" + archive, runs_on=runner)
+                consumer = ("  build:\n    needs: agent\n    runs-on: ubuntu-24.04\n    steps:\n"
+                            f"      - uses: actions/download-artifact@{SHA}\n"
+                            "        with: {name: report}\n      - run: make test\n")
+                checked = run_check(producer + consumer, policy=FIREWALL)
+                self.assertEqual(verdict(egress(checked)), VERIFIED)
+                found = [f for f in checked.findings if f.rule == "OBAAF-GHA-027"]
+                self.assertEqual([(f.job, f.facts["path"]) for f in found], [("build", "Makefile")])
+
+    def test_triggering_run_is_matched_to_its_named_workflow(self):
+        _, steps, _ = ROUTES["action"]
+        producer = "name: Producer\n" + workflow(steps + "\n" + upload())
+        consumer = ("on:\n  workflow_run:\n    workflows: [Producer]\n    types: [completed]\n"
+                    "jobs:\n  read:\n    runs-on: ubuntu-24.04\n    steps:\n"
+                    f"      - uses: actions/download-artifact@{SHA}\n"
+                    "        with:\n          name: report\n          path: result\n"
+                    "          run-id: '${{ github.event.workflow_run.id }}'\n"
+                    "          github-token: '${{ github.token }}'\n"
+                    "      - run: sh result/report.txt\n")
+        for subscribed, count in (("Producer", 1), ("Elsewhere", 0)):
+            with self.subTest(subscribed=subscribed):
+                result = run_check(producer, files={".github/workflows/read.yml": consumer.replace("Producer", subscribed)})
+                self.assertEqual(sum(f.rule == "OBAAF-GHA-027" for f in result.findings), count)
 
     def test_a_sibling_jobs_upload_does_not_change_producer_egress(self):
         for route, (runner, steps, _) in ROUTES.items():
@@ -85,8 +167,11 @@ class ArtifactProducerTest(unittest.TestCase):
             with self.subTest(name):
                 runner = ROUTES[route][0]
                 result = run_check(workflow(steps, runs_on=runner, job_extra=job_extra, top=top), policy=FIREWALL)
-                self.assertEqual(verdict(egress(result)), CANNOT_TELL)
-                self.assertIn("can make it run code the checker did not read", egress(result).controls[0].detail)
+                if route == "firewall":
+                    self.assertEqual(verdict(egress(result)), VERIFIED)
+                else:
+                    self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+                    self.assertIn("can make it run code the checker did not read", egress(result).controls[0].detail)
         # The second review of #357: a job container, an earlier step that names GITHUB_PATH before an install, and
         # the `actions/setup-` actions, which start tools that read the repository and variables the checker does not.
         b = "b" * 40
@@ -111,8 +196,11 @@ class ArtifactProducerTest(unittest.TestCase):
         for name, (route, steps, job_extra, top, reason) in more.items():
             with self.subTest(name):
                 result = run_check(workflow(steps, runs_on=ROUTES[route][0], job_extra=job_extra, top=top), policy=FIREWALL)
-                self.assertEqual(verdict(egress(result)), CANNOT_TELL)
-                self.assertIn(reason, egress(result).controls[0].detail)
+                if route == "firewall":
+                    self.assertEqual(verdict(egress(result)), VERIFIED)
+                else:
+                    self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+                    self.assertIn(reason, egress(result).controls[0].detail)
         # The action route's key-out-of-reach too (the commit message of the first review said so).
         steered = workflow(f"      - uses: actions/checkout@{SHA}\n        env: {{NODE_OPTIONS: --require ./x.js}}\n" + keyed())
         controls = {c.id: c.verdict for c in secret_finding(run_check(steered)).controls}
@@ -139,5 +227,8 @@ class ArtifactProducerTest(unittest.TestCase):
                 with self.subTest(route=route, step=step):
                     body = workflow(step + "\n" + steps, runs_on=runner)
                     result = run_check(body, policy=FIREWALL)
-                    self.assertEqual(verdict(egress(result)), CANNOT_TELL)
-                    self.assertIn("artifact", egress(result).controls[0].detail)
+                    if route == "firewall":
+                        self.assertEqual(verdict(egress(result)), VERIFIED)
+                    else:
+                        self.assertEqual(verdict(egress(result)), CANNOT_TELL)
+                        self.assertIn("artifact", egress(result).controls[0].detail)

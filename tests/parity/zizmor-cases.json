@@ -1199,6 +1199,7 @@
  "digests": {
   "risky": {
    "agent-action-unsafe.yml": "69b7f422689071f5747820b0ffe7df9f78b1cdf122c2f8fd4bf538c42c5e7bc3",
+   "agent-artifact-consumer.yml": "9c87daf26b06affdfa5cf2bfea41ba1f0739d18582ad02d5a74d47b0a7874c6b",
    "agent-cli-skip-permissions.yml": "be85d22b01cd832dccf56360d80dbf14d47976d3498156e8a27ac9a149f3687e",
    "agent-cli-unpinned.yml": "b7a6855016fa4320ad466ed9853985f556f00ae25e0a3f7609325354091d7f00",
    "agent-lane-misspelled.yml": "f51f382101ba3ee0bde07d6a777a0b819a8d5875c64bc39c29cbb928fe0acc66",

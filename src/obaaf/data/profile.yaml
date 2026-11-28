@@ -555,7 +555,7 @@ families:
           write access to protected branches, and that a separate approved job applies its proposals.
           Pass if all hold.
         evidence: "Workflow permissions for each agent."
-        checks: [OBAAF-GHA-001, OBAAF-GHA-003, OBAAF-GHA-004, OBAAF-GHA-005, OBAAF-GHA-010, OBAAF-GHA-028, OBAAF-GHA-011, OBAAF-GHA-020, OBAAF-GHA-022, OBAAF-JEN-001, OBAAF-JEN-003, OBAAF-JEN-007, OBAAF-JEN-009]
+        checks: [OBAAF-GHA-001, OBAAF-GHA-003, OBAAF-GHA-004, OBAAF-GHA-005, OBAAF-GHA-010, OBAAF-GHA-028, OBAAF-GHA-011, OBAAF-GHA-020, OBAAF-GHA-022, OBAAF-GHA-027, OBAAF-JEN-001, OBAAF-JEN-003, OBAAF-JEN-007, OBAAF-JEN-009]
 
       - id: G8.2
         title: Protect agent instructions as code

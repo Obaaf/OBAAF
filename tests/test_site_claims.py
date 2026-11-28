@@ -224,8 +224,8 @@ class TheFirewallConditions(unittest.TestCase):
                           "sets mode: enforce",
                           "allows only plain host names, none of which is a public suffix or has one under it",
                           "the job's token has contents permission", "the job calls no reusable workflow",
-                          "no other workflow can call this one", "no step in the agent job may upload an artifact",
-                          "in a job that also runs a script"):
+                          "no other workflow can call this one", "ordinary steps and post steps",
+                          "OBAAF-GHA-027 reports visible execution"):
             self.assertIn(condition, words)
 
     def test_a_job_that_calls_a_reusable_workflow_is_not_cleared(self):
@@ -271,14 +271,20 @@ class TheFirewallConditions(unittest.TestCase):
             "a public suffix": dict(policy="mode: enforce\nallow:\n  - github.io\n"),
             "no contents permission": dict(workflow={"permissions": "issues: read"}),
             "callable by another workflow": dict(workflow={"on": "[issues, workflow_call]"}),
-            # Review of #357 (run `ouzel`): the page's "may upload an artifact" and "in a job that also runs a script".
+        }
+        for case, arguments in cases.items():
+            with self.subTest(case):
+                self.assertNotEqual(self._gha020(**arguments), "fixed")
+
+    def test_the_firewall_covers_upload_and_checkout_steps(self):
+        cases = {
             "an upload step": dict(workflow={"more": f"      - uses: actions/upload-artifact@{'b' * 40}\n"
                                                     "        with: {name: out, path: out}\n"}),
             "actions/checkout beside the agent's step": dict(workflow={"more": f"      - uses: actions/checkout@{'b' * 40}\n"}),
         }
         for case, arguments in cases.items():
             with self.subTest(case):
-                self.assertNotEqual(self._gha020(**arguments), "fixed")
+                self.assertEqual(self._gha020(**arguments), "fixed")
 
 
 SECRET_JOBS = """\

@@ -442,7 +442,7 @@ Isolation tiers A and B are separate from the four self-assessment tiers.
 
 **Evidence.** Workflow permissions for each agent.
 
-**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · Agent controls: R1, R2, R3, R4, R7 · Assessment items: 3.6 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-003`, `OBAAF-GHA-004`, `OBAAF-GHA-005`, `OBAAF-GHA-010`, `OBAAF-GHA-028`, `OBAAF-GHA-011`, `OBAAF-GHA-020`, `OBAAF-GHA-022`, `OBAAF-JEN-001`, `OBAAF-JEN-003`, `OBAAF-JEN-007`, `OBAAF-JEN-009`
+**Maps to.** SSDF: PO.5: Implement and Maintain Secure Environments for Software Development · Agent controls: R1, R2, R3, R4, R7 · Assessment items: 3.6 · Checker rules: `OBAAF-GHA-001`, `OBAAF-GHA-003`, `OBAAF-GHA-004`, `OBAAF-GHA-005`, `OBAAF-GHA-010`, `OBAAF-GHA-028`, `OBAAF-GHA-011`, `OBAAF-GHA-020`, `OBAAF-GHA-022`, `OBAAF-GHA-027`, `OBAAF-JEN-001`, `OBAAF-JEN-003`, `OBAAF-JEN-007`, `OBAAF-JEN-009`
 
 ### G8.2 Protect agent instructions as code
 

@@ -205,7 +205,7 @@ rules:
       beside it whose script, `env` values or inputs name `GITHUB_ENV`, `exportVariable` or the runner's `_runner_file_commands` folder or whose
       words may leave a process running, a parallel step,
       and service containers given volumes or options; and, since decision D-133, a possible artifact
-      upload anywhere in the job, steps after it included, as OBAAF-GHA-020 reads it. Since those steps run no shell, look nothing up
+      upload anywhere in the job, steps after it included. This key control keeps its own upload check. Since those steps run no shell, look nothing up
       through the `PATH` and empty the loader's variables (slice 2c.9), bash's, Python's, the `PATH`'s and
       the loader's variables and a write to `GITHUB_PATH` no longer count as reasons of this control's own
       (slice 2c.10b), though such a variable or step can make a step a possible upload; since the action
@@ -753,24 +753,12 @@ rules:
       the whole job from outside the runner; and OBAAF's egress action (`actions/egress`) at a commit
       OBAAF lists as released, with a plain allow-list with no public suffix at or under a name, the
       agent as its command (no other step and no `env` of the job is given a credential, and the job
-      cannot request OIDC tokens) and no step after it.
-      With either control, a possible artifact upload in the agent job makes otherwise verified
-      `egress-enforced` credit "cannot tell", even for inspection-only uploads with no visible download
-      (decision D-133). The same applies to `key-out-of-reach` under OBAAF's action. An independent "not
-      met" verdict stands. A possible upload is a step that uses upload-artifact or upload-pages-artifact;
-      one that uses any action but `actions/checkout`, `actions/download-artifact`, `actions/cache`, and
-      OBAAF's egress action and Harden-Runner at listed commits (so an agent run through an action, or an
-      `actions/setup-` action, is "cannot tell"); one that runs a script other than lines of `echo`, `pwd`,
-      `true`, `:` or an agent's CLI with literal arguments in a POSIX shell the checker reads, or an install
-      of an agent's CLI (so `npm ci` or `make` is "cannot tell"); every step of a job in a container; a step
-      otherwise not counted, the egress action aside, when an `env` sets a variable that can make it run
-      code the checker did not read (bash's, the loader's, Python's, `PATH`, `HOME`, `NODE_OPTIONS`,
-      `NODE_PATH`, git's but its identity names, `XDG_CONFIG_HOME`, `TAR_OPTIONS` and, since slice 2c.13,
-      any name beginning `OPENSSL_`, whose configuration and modules Node.js loads) or after a step that may
-      change later steps; and, on the firewall only, an action after a script that is not plain `echo`
-      lines, or one with a post step before it (`actions/checkout`), because the script, the agent's
-      included, can change through `GITHUB_ENV` or `GITHUB_PATH` what those run, and actions hold the token
-      that uploads artifacts (read from the runner's code, not run).
+      cannot request OIDC tokens) and no later step other than a recognised upload.
+      A recognised artifact upload does not alone change the producing job's egress verdict.
+      OBAAF-GHA-027 reports visible execution of the download on the consuming job. Other steps
+      whose local behaviour is unread still withhold credit for OBAAF's action, and a possible upload still
+      withholds credit for `key-out-of-reach` under that action (decision D-133). Under OBAAF's action, an `OPENSSL_` variable that can steer another step also withholds credit. GitHub's native
+      firewall covers all producer steps from outside the virtual machine, including post steps.
       Each credential
       given to the action's step is placed as the action reads its inputs: a model key named in
       `model-keys` goes to AWF's API proxy, whose provider host is then shown after the allow-list, and
@@ -804,7 +792,7 @@ rules:
       repository or a local action the checker cannot read through (named in a note); code an earlier action
       runs in its post step; an upload the agent's own command makes (with `sudo`, for one; not tested),
       transfers through caches or job outputs, variables other programs read for their own settings,
-      and what another job or repository does with an artifact;
+      and consumers beyond the visible downloads and execution paths that OBAAF-GHA-027 reads;
       whether a pinned commit of upload-artifact is on its repository's own branches; and whether a
       runner with the firewall's label has the firewall, which the label is taken to mean.
     fix: >-
@@ -1255,6 +1243,20 @@ rules:
 
   # Jenkins (advisory). These rules read a Jenkinsfile and the files it names; controller
   # configuration is reported as coverage unknowns, never as a pass. See docs/jenkins.md.
+  - id: OBAAF-GHA-027
+    title: Job may execute an agent job's uploaded files
+    severity: medium
+    category: authority
+    requirements: [G8.1]
+    agent_controls: [R7]
+    supports: [FR7]
+    why: >-
+      A later job can run agent-written code with its own credentials and network access.
+    description: >-
+      A job downloads a named agent artifact and a subsequent step can execute files in the download location. The checker reads ordinary GitHub artifact actions in one workflow and named workflow_run subscriptions using the triggering run ID. Direct script invocations, common interpreters, package scripts and make are recognised. Custom downloads, expressions, wrapper scripts, other repositories, caches and job outputs may escape detection.
+    fix: >-
+      Review the downloaded files as data. If they must run, give the consuming job its own network and permission limits.
+
   - id: OBAAF-JEN-001
     title: Credentials available to change-request code or an AI agent
     severity: high
