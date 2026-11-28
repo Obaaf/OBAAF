@@ -10,7 +10,7 @@ Slice 3.3c, from #321 item 3 (`review-gpt` #415); decision D-122. A file named l
 
 - **Now init stops with status 1, in preview and with `--apply`, before it writes either file**, and prints `Conflict:` with the checker's own message, naming the file and the three places the checker reads. It shows its diffs as before. This also applies to a repository already set up, where init used to print "Already matches" twice and end with 0.
 - **Not a look-alike:** a file that is the same file as one the checker reads, such as `.github/OBAAF.yml` on a file system that ignores letter case.
-- **From the review:** the files init would write count. A link named like a configuration whose target is the workflow init writes is reported now, as the first check would report it; one whose target is `.github/obaaf.yml` is not, because the checker then reads it. Before the files exist, the target is worked out as `os.path.realpath` does, which can differ from the system for a `..` after a missing folder or for letter case (#416).
+- **From the review:** the files init would write count. A link named like a configuration whose target is the workflow init writes is reported now, as the first check would report it; one whose target is `.github/obaaf.yml` is not, because the checker then reads it. Before the files exist, the target is worked out as `os.path.realpath` does, which can differ from the system, for example for a `..` after a missing folder or a file, a chain of more than 40 links, or letter case (#416).
 - `obaaf check` is unchanged: on this repository and the first adopter its reports are byte-identical with `flagship` `d08cdd9`.
 
 ### The JSON release decision no longer says a pre-approval run may be uploaded
