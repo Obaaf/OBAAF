@@ -14,6 +14,7 @@ Slice 2d.25, from #411; decision D-153. PowerShell reads a step's `env` as `$env
 - **Launchers, written out or put in.** The lanes read the program PowerShell's `&`, `.`, `Start-Process`, `saps` and `iex`, and cmd's `@`, `call`, `start` and `cmd /c`, run, in the step's own lines too. **Can fail a check that passed:** a literal `@claude ...` in cmd, or `Start-Process claude -ArgumentList '...','-p','x'`, is now an agent job.
 - **A runner that may be Windows:** a step with no `shell` on a job whose matrix runs on Windows and on Linux is read as pwsh as well as bash.
 - **The same bounds as bash:** D-137 for a step, D-138 for a workflow. A step past them is an error of its file. Every new scan is linear in the script.
+- **A saved acceptance can go stale.** If your baseline accepted this Continue finding as `command-computed`, the checker now reports it as `command-option`. Review the resolved option, remove the stale entry, and record a new owned acceptance only if you still accept that risk.
 - On this repository and on the first adopter the reports are byte-identical with `flagship` `73658d7`.
 
 ### `obaaf init` stops before writing where the first check would refuse a look-alike configuration
